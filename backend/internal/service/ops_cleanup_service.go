@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -23,6 +24,7 @@ const (
 
 	opsCleanupLeaderLockKeyDefault = "ops:cleanup:leader"
 	opsCleanupLeaderLockTTLDefault = 30 * time.Minute
+	opsCleanupSettingsSyncInterval = 30 * time.Second
 )
 
 var opsCleanupCronParser = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
@@ -61,6 +63,10 @@ type OpsCleanupService struct {
 	stopped   bool
 	effective config.OpsCleanupConfig
 
+	settingsFingerprint string
+	settingsSyncCancel  context.CancelFunc
+	settingsSyncWG      sync.WaitGroup
+
 	warnNoRedisOnce sync.Once
 }
 
@@ -98,14 +104,20 @@ func (s *OpsCleanupService) Start() {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.started || s.stopped {
+		s.mu.Unlock()
 		return
 	}
 	s.started = true
-	if err := s.applyScheduleLocked(context.Background()); err != nil {
+	err := s.applyScheduleLocked(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+	s.settingsSyncCancel = cancel
+	s.settingsSyncWG.Add(1)
+	s.mu.Unlock()
+	if err != nil {
 		logger.LegacyPrintf("service.ops_cleanup", "[OpsCleanup] not started: %v", err)
 	}
+	go s.runSettingsSync(ctx)
 }
 
 // Stop 关闭 cron。幂等。
@@ -114,12 +126,42 @@ func (s *OpsCleanupService) Stop() {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.stopped {
+		s.mu.Unlock()
 		return
 	}
 	s.stopped = true
+	cancel := s.settingsSyncCancel
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	s.settingsSyncWG.Wait()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.stopCronLocked()
+}
+
+func (s *OpsCleanupService) runSettingsSync(ctx context.Context) {
+	defer s.settingsSyncWG.Done()
+	ticker := time.NewTicker(opsCleanupSettingsSyncInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			fingerprint := s.readSettingsFingerprint(ctx)
+			s.mu.Lock()
+			changed := !s.stopped && fingerprint != s.settingsFingerprint
+			s.mu.Unlock()
+			if changed {
+				if err := s.Reload(ctx); err != nil && ctx.Err() == nil {
+					logger.LegacyPrintf("service.ops_cleanup", "[OpsCleanup] settings sync failed: %v", err)
+				}
+			}
+		}
+	}
 }
 
 // stopCronLocked 停掉当前 cron 实例（带 3s 超时）。调用方持锁。
@@ -207,6 +249,7 @@ func (s *OpsCleanupService) computeEffectiveLocked(ctx context.Context) {
 	defer func() { s.effective = base }()
 
 	if s.settingRepo == nil {
+		s.settingsFingerprint = "no-repository"
 		return
 	}
 	if ctx == nil {
@@ -214,12 +257,15 @@ func (s *OpsCleanupService) computeEffectiveLocked(ctx context.Context) {
 	}
 	raw, err := s.settingRepo.GetValue(ctx, SettingKeyOpsAdvancedSettings)
 	if err != nil {
+		s.settingsFingerprint = "not-found"
 		if !errors.Is(err, ErrSettingNotFound) {
+			s.settingsFingerprint = "read-error"
 			logger.LegacyPrintf("service.ops_cleanup",
 				"[OpsCleanup] read advanced settings failed, using cfg: %v", err)
 		}
 		return
 	}
+	s.settingsFingerprint = opsCleanupFingerprint(raw)
 	var adv OpsAdvancedSettings
 	if err := json.Unmarshal([]byte(raw), &adv); err != nil {
 		logger.LegacyPrintf("service.ops_cleanup",
@@ -240,6 +286,24 @@ func (s *OpsCleanupService) computeEffectiveLocked(ctx context.Context) {
 	if dr.HourlyMetricsRetentionDays >= 0 {
 		base.HourlyMetricsRetentionDays = dr.HourlyMetricsRetentionDays
 	}
+}
+
+func (s *OpsCleanupService) readSettingsFingerprint(ctx context.Context) string {
+	if s == nil || s.settingRepo == nil {
+		return "no-repository"
+	}
+	raw, err := s.settingRepo.GetValue(ctx, SettingKeyOpsAdvancedSettings)
+	if err != nil {
+		if errors.Is(err, ErrSettingNotFound) {
+			return "not-found"
+		}
+		return "read-error"
+	}
+	return opsCleanupFingerprint(raw)
+}
+
+func opsCleanupFingerprint(raw string) string {
+	return fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(raw)))
 }
 
 // snapshotEffective 取一份 effective 副本（runCleanupOnce 等读路径使用）。

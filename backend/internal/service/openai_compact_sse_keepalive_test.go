@@ -124,6 +124,8 @@ func TestWriteOpenAICompactSSEBridge_AfterKeepaliveCommitFailureEmitsFailedEvent
 	streamErr, ok := GetOpsStreamError(c)
 	require.True(t, ok)
 	require.Equal(t, http.StatusBadGateway, streamErr.IntendedStatus)
+	require.True(t, streamErr.CountTowardsSLA)
+	require.Equal(t, "upstream_error", streamErr.Code)
 }
 
 // 心跳未提交时非 2xx 行为不变：返回 false，调用方按原 JSON+状态码写回。

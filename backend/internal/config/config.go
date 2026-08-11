@@ -10,6 +10,7 @@ import (
 	"net/textproto"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -21,6 +22,12 @@ import (
 const (
 	RunModeStandard = "standard"
 	RunModeSimple   = "simple"
+)
+
+const (
+	ProcessRoleAll    = "all"
+	ProcessRoleAPI    = "api"
+	ProcessRoleWorker = "worker"
 )
 
 // 使用量记录队列溢出策略
@@ -96,6 +103,7 @@ type Config struct {
 	UsageCleanup            UsageCleanupConfig            `mapstructure:"usage_cleanup"`
 	Concurrency             ConcurrencyConfig             `mapstructure:"concurrency"`
 	TokenRefresh            TokenRefreshConfig            `mapstructure:"token_refresh"`
+	Deployment              DeploymentConfig              `mapstructure:"deployment"`
 	RunMode                 string                        `mapstructure:"run_mode" yaml:"run_mode"`
 	Timezone                string                        `mapstructure:"timezone"` // e.g. "Asia/Shanghai", "UTC"
 	Gemini                  GeminiConfig                  `mapstructure:"gemini"`
@@ -684,10 +692,70 @@ type ServerConfig struct {
 	ReadHeaderTimeout        int       `mapstructure:"read_header_timeout"`   // 读取请求头超时（秒）
 	MaxHeaderBytes           int       `mapstructure:"max_header_bytes"`      // 请求头最大字节数（HTTP/2 映射为 header-list 上限）
 	IdleTimeout              int       `mapstructure:"idle_timeout"`          // 空闲连接超时（秒）
+	ShutdownTimeout          int       `mapstructure:"shutdown_timeout"`      // graceful shutdown 最长等待时间（秒）
 	TrustedProxies           []string  `mapstructure:"trusted_proxies"`       // 可信代理列表（CIDR/IP）
 	TrustedProxiesConfigured bool      `mapstructure:"-" json:"-" yaml:"-"`   // 是否显式配置了可信代理列表
 	MaxRequestBodySize       int64     `mapstructure:"max_request_body_size"` // 全局最大请求体限制
 	H2C                      H2CConfig `mapstructure:"h2c"`                   // HTTP/2 Cleartext 配置
+}
+
+// DeploymentConfig identifies this process inside a blue-green release and
+// separates request-serving replicas from singleton background workers.
+type DeploymentConfig struct {
+	ProcessRole string `mapstructure:"process_role"`
+	Slot        string `mapstructure:"slot"`
+	ReleaseID   string `mapstructure:"release_id"`
+	Version     string `mapstructure:"version"`
+	Digest      string `mapstructure:"digest"`
+}
+
+var (
+	deploymentIDPattern       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}$`)
+	deploymentDigestPattern   = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
+	deploymentSlotNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
+)
+
+func (d DeploymentConfig) Validate() error {
+	switch d.ProcessRole {
+	case ProcessRoleAll, ProcessRoleAPI, ProcessRoleWorker:
+	default:
+		return fmt.Errorf("process_role must be one of all, api, worker")
+	}
+
+	if d.Slot != "" && !deploymentSlotNamePattern.MatchString(d.Slot) {
+		return fmt.Errorf("slot contains invalid characters")
+	}
+	if d.ReleaseID != "" && !deploymentIDPattern.MatchString(d.ReleaseID) {
+		return fmt.Errorf("release_id contains invalid characters")
+	}
+	if d.Version != "" && !deploymentIDPattern.MatchString(d.Version) {
+		return fmt.Errorf("version contains invalid characters")
+	}
+	if d.Digest != "" && !deploymentDigestPattern.MatchString(d.Digest) {
+		return fmt.Errorf("digest must be an immutable sha256 digest")
+	}
+
+	if d.ProcessRole == ProcessRoleAll {
+		return nil
+	}
+	if d.ReleaseID == "" || d.Version == "" || d.Digest == "" {
+		return fmt.Errorf("release_id, version, and digest are required for %s role", d.ProcessRole)
+	}
+	if d.ProcessRole == ProcessRoleAPI && d.Slot != "blue" && d.Slot != "green" {
+		return fmt.Errorf("api role slot must be blue or green")
+	}
+	if d.ProcessRole == ProcessRoleWorker && d.Slot != "worker" {
+		return fmt.Errorf("worker role slot must be worker")
+	}
+	return nil
+}
+
+func (d DeploymentConfig) RunsSingletonJobs() bool {
+	return d.ProcessRole != ProcessRoleAPI
+}
+
+func (d DeploymentConfig) ServesAPI() bool {
+	return d.ProcessRole != ProcessRoleWorker
 }
 
 // H2CConfig HTTP/2 Cleartext 配置
@@ -1546,20 +1614,52 @@ func (d *DatabaseConfig) DSN() string {
 
 // DSNWithTimezone returns DSN with timezone setting
 func (d *DatabaseConfig) DSNWithTimezone(tz string) string {
+	return d.DSNWithTimezoneAndDeployment(tz, DeploymentConfig{})
+}
+
+// DSNWithTimezoneAndDeployment attaches trusted process identity to every
+// PostgreSQL session. New usage/error rows can then inherit the identity from
+// database defaults without expanding every high-volume INSERT statement.
+func (d *DatabaseConfig) DSNWithTimezoneAndDeployment(tz string, deployment DeploymentConfig) string {
 	if tz == "" {
 		tz = "Asia/Shanghai"
 	}
+	var dsn string
 	// 当密码为空时不包含 password 参数，避免 libpq 解析错误
 	if d.Password == "" {
-		return fmt.Sprintf(
+		dsn = fmt.Sprintf(
 			"host=%s port=%d user=%s dbname=%s sslmode=%s TimeZone=%s",
 			d.Host, d.Port, d.User, d.DBName, d.SSLMode, tz,
 		)
+	} else {
+		dsn = fmt.Sprintf(
+			"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s TimeZone=%s",
+			d.Host, d.Port, d.User, d.Password, d.DBName, d.SSLMode, tz,
+		)
 	}
-	return fmt.Sprintf(
-		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s TimeZone=%s",
-		d.Host, d.Port, d.User, d.Password, d.DBName, d.SSLMode, tz,
-	)
+
+	options := make([]string, 0, 10)
+	for _, option := range []struct {
+		key   string
+		value string
+	}{
+		{key: "sub2api.deployment_slot", value: deployment.Slot},
+		{key: "sub2api.release_id", value: deployment.ReleaseID},
+		{key: "sub2api.deployment_version", value: deployment.Version},
+		{key: "sub2api.deployment_digest", value: deployment.Digest},
+	} {
+		if option.value == "" {
+			continue
+		}
+		options = append(options, "-c", option.key+"="+option.value)
+	}
+	if len(options) == 0 {
+		return dsn
+	}
+	if deployment.Slot != "" {
+		dsn += " application_name=sub2api-" + deployment.Slot
+	}
+	return dsn + " options='" + strings.Join(options, " ") + "'"
 }
 
 // RedisConfig Redis 连接配置
@@ -1769,6 +1869,14 @@ func NormalizeRunMode(value string) string {
 	}
 }
 
+func normalizeProcessRole(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return ProcessRoleAll
+	}
+	return value
+}
+
 // Load 读取并校验完整配置（要求 jwt.secret 已显式提供）。
 func Load() (*Config, error) {
 	return load(false)
@@ -1836,6 +1944,11 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 	}
 
 	cfg.RunMode = NormalizeRunMode(cfg.RunMode)
+	cfg.Deployment.ProcessRole = normalizeProcessRole(cfg.Deployment.ProcessRole)
+	cfg.Deployment.Slot = strings.ToLower(strings.TrimSpace(cfg.Deployment.Slot))
+	cfg.Deployment.ReleaseID = strings.TrimSpace(cfg.Deployment.ReleaseID)
+	cfg.Deployment.Version = strings.TrimSpace(cfg.Deployment.Version)
+	cfg.Deployment.Digest = strings.ToLower(strings.TrimSpace(cfg.Deployment.Digest))
 	cfg.Server.Mode = strings.ToLower(strings.TrimSpace(cfg.Server.Mode))
 	if cfg.Server.Mode == "" {
 		cfg.Server.Mode = "debug"
@@ -1988,6 +2101,16 @@ func configureConfigSource(setConfigFile, addConfigPath func(string)) {
 
 func setDefaults() {
 	viper.SetDefault("run_mode", RunModeStandard)
+	viper.SetDefault("deployment.process_role", ProcessRoleAll)
+	viper.SetDefault("deployment.slot", "")
+	viper.SetDefault("deployment.release_id", "")
+	viper.SetDefault("deployment.version", "")
+	viper.SetDefault("deployment.digest", "")
+	_ = viper.BindEnv("deployment.process_role", "SUB2API_PROCESS_ROLE")
+	_ = viper.BindEnv("deployment.slot", "SUB2API_DEPLOYMENT_SLOT")
+	_ = viper.BindEnv("deployment.release_id", "SUB2API_RELEASE_ID")
+	_ = viper.BindEnv("deployment.version", "SUB2API_DEPLOYMENT_VERSION")
+	_ = viper.BindEnv("deployment.digest", "SUB2API_DEPLOYMENT_DIGEST")
 
 	// Server
 	viper.SetDefault("server.host", "0.0.0.0")
@@ -1998,6 +2121,7 @@ func setDefaults() {
 	viper.SetDefault("server.read_header_timeout", 10) // 10秒读取请求头
 	viper.SetDefault("server.max_header_bytes", 64*1024)
 	viper.SetDefault("server.idle_timeout", 120) // 120秒空闲超时
+	viper.SetDefault("server.shutdown_timeout", 900)
 	viper.SetDefault("server.max_request_body_size", int64(256*1024*1024))
 	// H2C 默认配置
 	viper.SetDefault("server.h2c.enabled", false)
@@ -2644,6 +2768,9 @@ func setEnvReachableDefaults() {
 }
 
 func (c *Config) Validate() error {
+	if err := c.Deployment.Validate(); err != nil {
+		return fmt.Errorf("deployment: %w", err)
+	}
 	forwardedClientIPHeaders, err := NormalizeForwardedClientIPHeaders(c.Security.ForwardedClientIPHeaders)
 	if err != nil {
 		return fmt.Errorf("security.forwarded_client_ip_headers: %w", err)
@@ -2672,6 +2799,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.IdleTimeout <= 0 {
 		return fmt.Errorf("server.idle_timeout must be positive")
+	}
+	if c.Server.ShutdownTimeout < 5 || c.Server.ShutdownTimeout > 3600 {
+		return fmt.Errorf("server.shutdown_timeout must be between 5 and 3600 seconds")
 	}
 	if c.Server.MaxRequestBodySize < 0 {
 		return fmt.Errorf("server.max_request_body_size must be non-negative")
