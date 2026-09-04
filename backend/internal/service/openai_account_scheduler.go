@@ -2243,6 +2243,13 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	if strings.TrimSpace(previousResponseID) == "" {
 		guardianParentAccountID = s.resolveOpenAIGuardianParentAccountID(ctx, groupID)
 	}
+	ctx = withOpenAIStickyPriorityReclaim(
+		ctx,
+		groupID,
+		strings.TrimSpace(previousResponseID),
+		guardianParentAccountID,
+		requiredImageCapability != "",
+	)
 	scheduler := s.getOpenAIAccountScheduler(ctx)
 	if scheduler == nil {
 		decision.Layer = openAIAccountScheduleLayerLoadBalance

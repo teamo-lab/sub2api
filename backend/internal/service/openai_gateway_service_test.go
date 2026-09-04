@@ -1281,6 +1281,128 @@ func TestOpenAISelectAccountWithLoadAwareness_StickyCapacitySpilloverKeepsBindin
 	}
 }
 
+func TestOpenAISelectAccountWithLoadAwareness_ReclaimsP2StickyWhenP1HasSlot(t *testing.T) {
+	sessionHash := "p2-sticky-reclaim"
+	groupID := openAIStickyPriorityReclaimGroupID
+	repo := groupAwareStubOpenAIAccountRepo{stubOpenAIAccountRepo{accounts: []Account{
+		{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, Concurrency: 3, Priority: 1, GroupIDs: []int64{groupID}},
+		{ID: 69, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true, Concurrency: 400, Priority: 2, GroupIDs: []int64{groupID}},
+	}}}
+	cache := &stubGatewayCache{sessionBindings: map[string]int64{"openai:" + sessionHash: 69}}
+	concurrencyCache := stubConcurrencyCache{
+		acquireResults: map[int64]bool{1: true, 69: true},
+		loadMap: map[int64]*AccountLoadInfo{
+			1:  {AccountID: 1, LoadRate: 0},
+			69: {AccountID: 69, LoadRate: 0},
+		},
+	}
+	cfg := &config.Config{RunMode: config.RunModeStandard}
+	cfg.Gateway.Scheduling.LoadBatchEnabled = true
+	svc := &OpenAIGatewayService{
+		accountRepo:        repo,
+		cache:              cache,
+		cfg:                cfg,
+		concurrencyService: NewConcurrencyService(concurrencyCache),
+	}
+	ctx := withOpenAIStickyPriorityReclaim(context.Background(), &groupID, "", 0, false)
+
+	selection, err := svc.selectAccountWithLoadAwareness(ctx, &groupID, PlatformOpenAI, sessionHash, "gpt-5.6-sol", nil, false, "", true)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.NotNil(t, selection.Account)
+	require.Equal(t, int64(1), selection.Account.ID)
+	require.Equal(t, int64(1), cache.sessionBindings["openai:"+sessionHash])
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+}
+
+func TestOpenAISelectAccountWithLoadAwareness_KeepsP2StickyWhenP1IsBusy(t *testing.T) {
+	sessionHash := "p2-sticky-p1-busy"
+	groupID := openAIStickyPriorityReclaimGroupID
+	repo := groupAwareStubOpenAIAccountRepo{stubOpenAIAccountRepo{accounts: []Account{
+		{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, Concurrency: 3, Priority: 1, GroupIDs: []int64{groupID}},
+		{ID: 69, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true, Concurrency: 400, Priority: 2, GroupIDs: []int64{groupID}},
+	}}}
+	cache := &stubGatewayCache{sessionBindings: map[string]int64{"openai:" + sessionHash: 69}}
+	concurrencyCache := stubConcurrencyCache{
+		acquireResults: map[int64]bool{1: false, 69: true},
+		loadMap: map[int64]*AccountLoadInfo{
+			1:  {AccountID: 1, CurrentConcurrency: 3, LoadRate: 100},
+			69: {AccountID: 69, CurrentConcurrency: 0, LoadRate: 0},
+		},
+	}
+	cfg := &config.Config{RunMode: config.RunModeStandard}
+	cfg.Gateway.Scheduling.LoadBatchEnabled = true
+	svc := &OpenAIGatewayService{
+		accountRepo:        repo,
+		cache:              cache,
+		cfg:                cfg,
+		concurrencyService: NewConcurrencyService(concurrencyCache),
+	}
+	ctx := withOpenAIStickyPriorityReclaim(context.Background(), &groupID, "", 0, false)
+
+	selection, err := svc.selectAccountWithLoadAwareness(ctx, &groupID, PlatformOpenAI, sessionHash, "gpt-5.6-sol", nil, false, "", true)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.NotNil(t, selection.Account)
+	require.Equal(t, int64(69), selection.Account.ID)
+	require.Equal(t, int64(69), cache.sessionBindings["openai:"+sessionHash])
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+}
+
+func TestOpenAISelectAccountWithLoadAwareness_DoesNotReclaimWithoutRequestGate(t *testing.T) {
+	sessionHash := "p2-sticky-no-reclaim"
+	groupID := openAIStickyPriorityReclaimGroupID
+	repo := groupAwareStubOpenAIAccountRepo{stubOpenAIAccountRepo{accounts: []Account{
+		{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, Concurrency: 3, Priority: 1, GroupIDs: []int64{groupID}},
+		{ID: 69, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true, Concurrency: 400, Priority: 2, GroupIDs: []int64{groupID}},
+	}}}
+	cache := &stubGatewayCache{sessionBindings: map[string]int64{"openai:" + sessionHash: 69}}
+	concurrencyCache := stubConcurrencyCache{acquireResults: map[int64]bool{1: true, 69: true}}
+	cfg := &config.Config{RunMode: config.RunModeStandard}
+	cfg.Gateway.Scheduling.LoadBatchEnabled = true
+	svc := &OpenAIGatewayService{
+		accountRepo:        repo,
+		cache:              cache,
+		cfg:                cfg,
+		concurrencyService: NewConcurrencyService(concurrencyCache),
+	}
+
+	selection, err := svc.selectAccountWithLoadAwareness(context.Background(), &groupID, PlatformOpenAI, sessionHash, "gpt-5.6-sol", nil, false, "", true)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.NotNil(t, selection.Account)
+	require.Equal(t, int64(69), selection.Account.ID)
+	require.Equal(t, int64(69), cache.sessionBindings["openai:"+sessionHash])
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+}
+
+func TestWithOpenAIStickyPriorityReclaim_GatesUnsafeRequestShapes(t *testing.T) {
+	groupID := openAIStickyPriorityReclaimGroupID
+	otherGroupID := groupID + 1
+
+	require.True(t, openAIStickyPriorityReclaimEnabled(
+		withOpenAIStickyPriorityReclaim(context.Background(), &groupID, "", 0, false),
+	))
+	require.False(t, openAIStickyPriorityReclaimEnabled(
+		withOpenAIStickyPriorityReclaim(context.Background(), &groupID, "resp_owner", 0, false),
+	), "previous_response_id must stay on its upstream owner")
+	require.False(t, openAIStickyPriorityReclaimEnabled(
+		withOpenAIStickyPriorityReclaim(context.Background(), &groupID, "", 69, false),
+	), "guardian-parent routes must preserve their binding")
+	require.False(t, openAIStickyPriorityReclaimEnabled(
+		withOpenAIStickyPriorityReclaim(context.Background(), &groupID, "", 0, true),
+	), "image requests are outside the text canary")
+	require.False(t, openAIStickyPriorityReclaimEnabled(
+		withOpenAIStickyPriorityReclaim(context.Background(), &otherGroupID, "", 0, false),
+	), "the canary must remain scoped to group 80")
+}
+
 func TestOpenAISelectAccountWithLoadAwareness_PrefersLowerLoad(t *testing.T) {
 	groupID := int64(1)
 	repo := stubOpenAIAccountRepo{
