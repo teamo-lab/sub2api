@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent } from 'vue'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 
 const { updateAccountMock, checkMixedChannelRiskMock, authIsSimpleMode } = vi.hoisted(() => ({
   updateAccountMock: vi.fn(),
@@ -326,6 +326,21 @@ function mountModal(account = buildAccount()) {
 describe('EditAccountModal', () => {
   beforeEach(() => {
     authIsSimpleMode.value = true
+  })
+
+  it('loads and persists the per-account sticky burst value', async () => {
+    const account = buildOpenAIOAuthParentAccount()
+    account.extra = { openai_sticky_burst: 3 }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+
+    const wrapper = mountModal(account)
+    expect((wrapper.get('[data-testid="account-sticky-burst"]').element as HTMLInputElement).value).toBe('3')
+
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_sticky_burst).toBe(3)
   })
 
   it('reopening the same account rehydrates the OpenAI whitelist from props', async () => {

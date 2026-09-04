@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+action="${1:-status}"
+source_ip="${2:-}"
+legacy_container="${SUB2API_LEGACY_CONTAINER:-sub2api}"
+entry_port="${SUB2API_ROLLOUT_ENTRY_PORT:-18080}"
+public_port="${SUB2API_PUBLIC_PORT:-8080}"
+general_comment="sub2api-bluegreen-entry-v1"
+test_comment="sub2api-bluegreen-entry-test-v1"
+
+fail() {
+  printf '{"ok":false,"error_code":"%s","message":"%s"}\n' "$1" "$2"
+  exit "${3:-4}"
+}
+
+rule_exists() {
+  local comment="$1"
+  shift
+  iptables -t nat -C PREROUTING "$@" -m comment --comment "$comment" -j REDIRECT --to-ports "$entry_port" >/dev/null 2>&1
+}
+
+legacy_healthy() {
+  [[ "$(docker inspect --format '{{.State.Health.Status}}' "$legacy_container" 2>/dev/null || true)" == "healthy" ]]
+}
+
+haproxy_healthy() {
+  [[ "$(docker inspect --format '{{.State.Health.Status}}' sub2api-haproxy 2>/dev/null || true)" == "healthy" ]] \
+    && curl -fsS --max-time 5 "http://127.0.0.1:$entry_port/health" >/dev/null
+}
+
+final_haproxy_healthy() {
+  [[ "$(docker inspect --format '{{.State.Health.Status}}' sub2api-haproxy-final 2>/dev/null || true)" == "healthy" ]] \
+    && curl -fsS --max-time 5 "http://127.0.0.1:$public_port/health" >/dev/null
+}
+
+test_rule_sources() {
+  iptables-save -t nat | awk -v wanted="$test_comment" '
+    $0 ~ "--comment " wanted "([[:space:]]|$)" {
+      for (field = 1; field <= NF; field++) {
+        if ($field == "-s" && (field + 1) <= NF) print $(field + 1)
+      }
+    }
+  '
+}
+
+remove_test_rules() {
+  local test_source
+  while IFS= read -r test_source; do
+    [[ -z "$test_source" ]] && continue
+    [[ "$test_source" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$ ]] \
+      || fail unsafe_test_rule 'A test redirect has an unexpected source format.'
+    while rule_exists "$test_comment" -s "$test_source" -p tcp --dport "$public_port" -m conntrack --ctstate NEW; do
+      iptables -t nat -D PREROUTING -s "$test_source" -p tcp --dport "$public_port" -m conntrack --ctstate NEW \
+        -m comment --comment "$test_comment" -j REDIRECT --to-ports "$entry_port"
+    done
+  done < <(test_rule_sources)
+}
+
+case "$action" in
+  status)
+    if rule_exists "$general_comment" -p tcp --dport "$public_port" -m conntrack --ctstate NEW; then
+      active=true
+    else
+      active=false
+    fi
+    test_rule_count="$(test_rule_sources | awk 'END {print NR+0}')"
+    printf '{"ok":true,"action":"status","haproxy_entry_active":%s,"test_entry_rules":%s,"legacy_healthy":%s,"haproxy_healthy":%s,"final_haproxy_healthy":%s}\n' \
+      "$active" "$test_rule_count" "$(legacy_healthy && printf true || printf false)" \
+      "$(haproxy_healthy && printf true || printf false)" "$(final_haproxy_healthy && printf true || printf false)"
+    ;;
+  test)
+    [[ "$source_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || fail invalid_source_ip 'A valid IPv4 source is required.' 2
+    haproxy_healthy || fail haproxy_unhealthy 'HAProxy entry is not healthy.'
+    if ! rule_exists "$test_comment" -s "$source_ip" -p tcp --dport "$public_port" -m conntrack --ctstate NEW; then
+      iptables -t nat -I PREROUTING 1 -s "$source_ip" -p tcp --dport "$public_port" -m conntrack --ctstate NEW \
+        -m comment --comment "$test_comment" -j REDIRECT --to-ports "$entry_port"
+    fi
+    printf '{"ok":true,"action":"test","source":"%s","haproxy_entry_active":false}\n' "$source_ip"
+    ;;
+  activate)
+    legacy_healthy || fail legacy_unhealthy 'Legacy fallback is not healthy.'
+    haproxy_healthy || fail haproxy_unhealthy 'HAProxy entry is not healthy.'
+    if ! rule_exists "$general_comment" -p tcp --dport "$public_port" -m conntrack --ctstate NEW; then
+      iptables -t nat -I PREROUTING 1 -p tcp --dport "$public_port" -m conntrack --ctstate NEW \
+        -m comment --comment "$general_comment" -j REDIRECT --to-ports "$entry_port"
+    fi
+    printf '{"ok":true,"action":"activate","haproxy_entry_active":true,"legacy_fallback_available":true}\n'
+    ;;
+  rollback)
+    legacy_healthy || fail legacy_unhealthy 'Legacy fallback is not healthy; entry was not changed.'
+    while rule_exists "$general_comment" -p tcp --dport "$public_port" -m conntrack --ctstate NEW; do
+      iptables -t nat -D PREROUTING -p tcp --dport "$public_port" -m conntrack --ctstate NEW \
+        -m comment --comment "$general_comment" -j REDIRECT --to-ports "$entry_port"
+    done
+    if [[ -n "$source_ip" ]]; then
+      while rule_exists "$test_comment" -s "$source_ip" -p tcp --dport "$public_port" -m conntrack --ctstate NEW; do
+        iptables -t nat -D PREROUTING -s "$source_ip" -p tcp --dport "$public_port" -m conntrack --ctstate NEW \
+          -m comment --comment "$test_comment" -j REDIRECT --to-ports "$entry_port"
+      done
+    else
+      remove_test_rules
+    fi
+    printf '{"ok":true,"action":"rollback","haproxy_entry_active":false,"legacy_fallback_active":true}\n'
+    ;;
+  finalize)
+    final_haproxy_healthy || fail final_haproxy_unhealthy 'Final HAProxy entry is not healthy.'
+    while rule_exists "$general_comment" -p tcp --dport "$public_port" -m conntrack --ctstate NEW; do
+      iptables -t nat -D PREROUTING -p tcp --dport "$public_port" -m conntrack --ctstate NEW \
+        -m comment --comment "$general_comment" -j REDIRECT --to-ports "$entry_port"
+    done
+    remove_test_rules
+    printf '{"ok":true,"action":"finalize","haproxy_entry_active":false,"final_entry_active":true}\n'
+    ;;
+  restore-proxy)
+    haproxy_healthy || fail haproxy_unhealthy 'Temporary HAProxy entry is not healthy.'
+    if ! rule_exists "$general_comment" -p tcp --dport "$public_port" -m conntrack --ctstate NEW; then
+      iptables -t nat -I PREROUTING 1 -p tcp --dport "$public_port" -m conntrack --ctstate NEW \
+        -m comment --comment "$general_comment" -j REDIRECT --to-ports "$entry_port"
+    fi
+    printf '{"ok":true,"action":"restore-proxy","haproxy_entry_active":true}\n'
+    ;;
+  *)
+    fail invalid_arguments 'Usage: entry-switch [status|test IPv4|activate|rollback [IPv4]|finalize [IPv4]|restore-proxy]' 2
+    ;;
+esac

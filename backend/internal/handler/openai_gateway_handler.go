@@ -748,6 +748,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			}()
 			return h.gatewayService.Forward(c.Request.Context(), c, account, attemptBody)
 		}()
+		h.gatewayService.ObserveOpenAIStickyBurstResult(
+			c.Request.Context(), apiKey.GroupID, sessionHash, account.ID, reqModel,
+			selection.StickyBurstBypass, err == nil && openAIForwardSucceededForScheduling(result), err,
+		)
 		var cyberBlockBodyHTTP []byte
 		if service.GetOpsCyberPolicy(c) != nil {
 			cyberBlockBodyHTTP = sessionHashBody
@@ -1313,6 +1317,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			}()
 			return h.gatewayService.ForwardAsAnthropic(c.Request.Context(), c, account, forwardBody, promptCacheKey, defaultMappedModel)
 		}()
+		h.gatewayService.ObserveOpenAIStickyBurstResult(
+			c.Request.Context(), apiKey.GroupID, sessionHash, account.ID, currentRoutingModel,
+			selection.StickyBurstBypass, err == nil && openAIForwardSucceededForScheduling(result), err,
+		)
 		var cyberBlockBodyMsg []byte
 		if service.GetOpsCyberPolicy(c) != nil {
 			cyberBlockBodyMsg = body

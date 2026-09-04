@@ -248,6 +248,10 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			}()
 			return h.gatewayService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody, promptCacheKey, "")
 		}()
+		h.gatewayService.ObserveOpenAIStickyBurstResult(
+			c.Request.Context(), apiKey.GroupID, sessionHash, account.ID, reqModel,
+			selection.StickyBurstBypass, err == nil && openAIForwardSucceededForScheduling(result), err,
+		)
 		var cyberBlockBodyChat []byte
 		if service.GetOpsCyberPolicy(c) != nil {
 			cyberBlockBodyChat = body

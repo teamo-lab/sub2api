@@ -1211,6 +1211,28 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 							return selection, nil
 						}
 
+						// A recently successful sticky session may borrow a bounded,
+						// account-configured number of temporary slots before entering
+						// the legacy 30-second wait path. The same Redis ZSET owns both
+						// durable and burst slots, so the hard ceiling remains
+						// account.Concurrency + account.OpenAIStickyBurstExtraSlots().
+						burstExtra := account.OpenAIStickyBurstExtraSlots()
+						if err == nil && result != nil && !result.Acquired && burstExtra > 0 &&
+							s.openAIStickyBurstEligible(groupID, requestedModel, account) &&
+							s.hasRecentOpenAIStickyBurstSession(ctx, groupID, sessionHash, accountID) {
+							burstResult, burstErr := s.tryAcquireAccountSlot(ctx, accountID, account.Concurrency+burstExtra)
+							if burstErr == nil && burstResult != nil && burstResult.Acquired {
+								selection, selectErr := s.newAcquiredSelectionResult(ctx, account, burstResult.ReleaseFunc)
+								if selectErr != nil {
+									return nil, selectErr
+								}
+								selection.StickyBurstBypass = true
+								_ = s.refreshStickySessionTTL(ctx, groupID, sessionHash, openaiStickySessionTTL)
+								s.recordOpenAIStickyBurstAcquired(ctx, accountID)
+								return selection, nil
+							}
+						}
+
 						waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, accountID)
 						if waitingCount < cfg.StickySessionMaxWaiting {
 							return s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{

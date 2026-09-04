@@ -2922,11 +2922,24 @@
         <ProxySelector v-model="form.proxy_id" :proxies="proxies" />
       </div>
 
-      <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">
+      <div class="grid grid-cols-2 gap-4 lg:grid-cols-5">
         <div>
           <label class="input-label">{{ t('admin.accounts.concurrency') }}</label>
           <input v-model.number="form.concurrency" type="number" min="1" class="input"
             @input="form.concurrency = Math.max(1, form.concurrency || 1)" />
+        </div>
+        <div v-if="form.platform === 'openai' && form.type === 'oauth'">
+          <label class="input-label">{{ t('admin.accounts.stickyBurst') }}</label>
+          <input
+            v-model.number="form.sticky_burst"
+            type="number"
+            min="0"
+            max="10"
+            class="input"
+            data-testid="account-sticky-burst"
+            @input="form.sticky_burst = Math.min(10, Math.max(0, form.sticky_burst ?? 1))"
+          />
+          <p class="input-hint">{{ t('admin.accounts.stickyBurstHint') }}</p>
         </div>
         <div>
           <label class="input-label">{{ t('admin.accounts.loadFactor') }}</label>
@@ -4521,6 +4534,7 @@ const form = reactive({
   credentials: {} as Record<string, unknown>,
   proxy_id: null as number | null,
   concurrency: 10,
+  sticky_burst: 1,
   load_factor: null as number | null,
   priority: 1,
   rate_multiplier: 1,
@@ -4667,6 +4681,7 @@ watch(
       addMethod.value = 'oauth'
       modelRestrictionMode.value = 'mapping'
       form.concurrency = 1
+      form.sticky_burst = 1
       form.load_factor = null
     }
     if (newPlatform !== 'gemini' && newPlatform !== 'anthropic' && accountCategory.value === 'service_account') {
@@ -5093,6 +5108,7 @@ const resetForm = () => {
   form.credentials = {}
   form.proxy_id = null
   form.concurrency = 10
+  form.sticky_burst = 1
   form.load_factor = null
   form.priority = 1
   form.rate_multiplier = 1
@@ -5209,6 +5225,11 @@ const buildOpenAIExtra = (base?: Record<string, unknown>): Record<string, unknow
   }
 
   const extra: Record<string, unknown> = { ...(base || {}) }
+  if (form.type === 'oauth') {
+    extra.openai_sticky_burst = Math.min(10, Math.max(0, form.sticky_burst ?? 1))
+  } else {
+    delete extra.openai_sticky_burst
+  }
   if (accountCategory.value === 'oauth-based') {
     extra.openai_oauth_responses_websockets_v2_mode = openaiOAuthResponsesWebSocketV2Mode.value
     extra.openai_oauth_responses_websockets_v2_enabled = isOpenAIWSModeEnabled(openaiOAuthResponsesWebSocketV2Mode.value)

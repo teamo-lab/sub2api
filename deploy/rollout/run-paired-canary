@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+requests="${1:-200}"
+duration="${2:-600}"
+concurrency="${3:-4}"
+root="${SUB2API_DEPLOY_ROOT:-/opt/sub2api/deploy}"
+runtime="$root/rollout/runtime"
+secret_file="$runtime/canary-test.env"
+load_tool="$runtime/poc_load_gate.py"
+reports_root="$root/reports"
+
+fail() {
+  printf '{"ok":false,"error_code":"%s","message":"%s"}\n' "$1" "$2"
+  exit "${3:-4}"
+}
+
+[[ "$requests" =~ ^[1-9][0-9]*$ ]] || fail invalid_requests 'requests must be a positive integer' 2
+[[ "$duration" =~ ^[1-9][0-9]*$ ]] || fail invalid_duration 'duration must be a positive integer' 2
+[[ "$concurrency" =~ ^[1-9][0-9]*$ ]] || fail invalid_concurrency 'concurrency must be a positive integer' 2
+(( requests <= 1000 && duration <= 3600 && concurrency <= 20 )) || fail unsafe_load 'paired load exceeds the safety envelope' 4
+[[ -f "$secret_file" && "$(stat -c '%a' "$secret_file")" == 600 ]] || fail missing_test_identity 'root-only canary identity is unavailable'
+[[ -x "$load_tool" ]] || fail missing_load_tool 'paired load tool is unavailable'
+
+install -d -o root -g root -m 0700 "$reports_root" "$runtime"
+exec 9>"$runtime/paired-canary.lock"
+flock -n 9 || fail paired_canary_locked 'another paired canary is already running' 5
+
+blue_pid=""
+green_pid=""
+cleanup_children() {
+  local rc=$?
+  trap - EXIT HUP INT TERM
+  for pid in "$blue_pid" "$green_pid"; do
+    if [[ "$pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$pid" 2>/dev/null; then
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+  done
+  for pid in "$blue_pid" "$green_pid"; do
+    if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
+      wait "$pid" 2>/dev/null || true
+    fi
+  done
+  exit "$rc"
+}
+trap cleanup_children EXIT HUP INT TERM
+
+# shellcheck disable=SC1090 -- root-owned runtime secret generated for this rollout only.
+source "$secret_file"
+export SUB2API_CANARY_KEY="$TEST_KEY"
+unset TEST_KEY
+
+blue_ip="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' sub2api-blue)"
+green_ip="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' sub2api-green)"
+[[ "$blue_ip" =~ ^[0-9.]+$ && "$green_ip" =~ ^[0-9.]+$ ]] || fail slot_address_invalid 'slot address discovery failed'
+curl -fsS --max-time 5 "http://$blue_ip:8080/health" >/dev/null || fail blue_unhealthy 'blue direct health check failed'
+curl -fsS --max-time 5 "http://$green_ip:8080/health" >/dev/null || fail green_unhealthy 'green direct health check failed'
+
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+report_dir="$reports_root/paired-$stamp"
+install -d -o root -g root -m 0700 "$report_dir"
+window_start="$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ)"
+
+python3 "$load_tool" --url "http://$blue_ip:8080/v1/responses" \
+  --requests "$requests" --duration "$duration" --concurrency "$concurrency" \
+  >"$report_dir/blue.json" 2>"$report_dir/blue.stderr" &
+blue_pid=$!
+python3 "$load_tool" --url "http://$green_ip:8080/v1/responses" \
+  --requests "$requests" --duration "$duration" --concurrency "$concurrency" \
+  >"$report_dir/green.json" 2>"$report_dir/green.stderr" &
+green_pid=$!
+
+set +e
+wait "$blue_pid"
+blue_rc=$?
+wait "$green_pid"
+green_rc=$?
+set -e
+trap - EXIT HUP INT TERM
+window_end="$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ)"
+unset SUB2API_CANARY_KEY
+
+chmod 0600 "$report_dir"/*
+jq -n \
+  --arg window_start "$window_start" --arg window_end "$window_end" \
+  --argjson requests "$requests" --argjson duration "$duration" --argjson concurrency "$concurrency" \
+  --argjson blue_rc "$blue_rc" --argjson green_rc "$green_rc" \
+  '{window_start:$window_start,window_end:$window_end,requests_per_slot:$requests,duration_seconds:$duration,concurrency_per_slot:$concurrency,blue_exit_code:$blue_rc,green_exit_code:$green_rc}' \
+  >"$report_dir/window.json"
+chmod 0600 "$report_dir/window.json"
+
+(( blue_rc == 0 && green_rc == 0 )) || fail paired_load_failed 'one or both slot load processes failed' 8
+jq -e --argjson expected "$requests" '.requests == $expected' "$report_dir/blue.json" >/dev/null || fail blue_report_invalid 'blue report is incomplete' 8
+jq -e --argjson expected "$requests" '.requests == $expected' "$report_dir/green.json" >/dev/null || fail green_report_invalid 'green report is incomplete' 8
+for slot in blue green; do
+  jq -e '
+    ((.statuses["401"] // 0) == 0) and
+    ((.statuses["403"] // 0) == 0) and
+    ((.statuses["200"] // 0) > 0) and
+    ((.terminals["response.completed"] // 0) > 0)
+  ' "$report_dir/$slot.json" >/dev/null || fail "${slot}_probe_identity_invalid" "$slot probes did not produce authenticated completed Responses evidence" 8
+done
+
+jq -n --arg report_dir "$report_dir" \
+  --slurpfile window "$report_dir/window.json" --slurpfile blue "$report_dir/blue.json" --slurpfile green "$report_dir/green.json" \
+  '{ok:true,report_dir:$report_dir,window:$window[0],blue:$blue[0],green:$green[0]}'

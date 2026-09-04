@@ -253,6 +253,7 @@ type stubConcurrencyCache struct {
 	loadBatchErr    error
 	loadMap         map[int64]*AccountLoadInfo
 	acquireResults  map[int64]bool
+	acquireByLimit  map[int64]map[int]bool
 	waitCounts      map[int64]int
 	skipDefaultLoad bool
 }
@@ -298,6 +299,11 @@ func (w *failingGinWriter) Write(p []byte) (int, error) {
 }
 
 func (c stubConcurrencyCache) AcquireAccountSlot(ctx context.Context, accountID int64, maxConcurrency int, requestID string) (bool, error) {
+	if byLimit, ok := c.acquireByLimit[accountID]; ok {
+		if result, exists := byLimit[maxConcurrency]; exists {
+			return result, nil
+		}
+	}
 	if c.acquireResults != nil {
 		if result, ok := c.acquireResults[accountID]; ok {
 			return result, nil
@@ -708,6 +714,8 @@ func (c stubConcurrencyCache) GetAccountWaitingCount(ctx context.Context, accoun
 type stubGatewayCache struct {
 	sessionBindings map[string]int64
 	deletedSessions map[string]int
+	burstRecent     map[string]int64
+	burstMetrics    map[string]int64
 }
 
 func (c *stubGatewayCache) GetSessionAccountID(ctx context.Context, groupID int64, sessionHash string) (int64, error) {
@@ -738,6 +746,29 @@ func (c *stubGatewayCache) DeleteSessionAccountID(ctx context.Context, groupID i
 	}
 	c.deletedSessions[sessionHash]++
 	delete(c.sessionBindings, sessionHash)
+	return nil
+}
+
+func (c *stubGatewayCache) GetOpenAIStickyBurstRecent(_ context.Context, groupID int64, sessionKey string) (int64, error) {
+	if id, ok := c.burstRecent[fmt.Sprintf("%d:%s", groupID, sessionKey)]; ok {
+		return id, nil
+	}
+	return 0, ErrOpenAIStickyBurstRecentNotFound
+}
+
+func (c *stubGatewayCache) SetOpenAIStickyBurstRecent(_ context.Context, groupID int64, sessionKey string, accountID int64, _ time.Duration) error {
+	if c.burstRecent == nil {
+		c.burstRecent = make(map[string]int64)
+	}
+	c.burstRecent[fmt.Sprintf("%d:%s", groupID, sessionKey)] = accountID
+	return nil
+}
+
+func (c *stubGatewayCache) IncrementOpenAIStickyBurstMetric(_ context.Context, accountID int64, event string, _ time.Duration) error {
+	if c.burstMetrics == nil {
+		c.burstMetrics = make(map[string]int64)
+	}
+	c.burstMetrics[fmt.Sprintf("%d:%s", accountID, event)]++
 	return nil
 }
 

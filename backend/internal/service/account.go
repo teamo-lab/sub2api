@@ -89,6 +89,15 @@ type OpenAIEndpointCapability string
 const openAILongContextBillingEnabledKey = "openai_long_context_billing_enabled"
 
 const (
+	// OpenAIStickyBurstExtraKey stores the per-account number of temporary slots
+	// available to an already-successful sticky session. It is deliberately kept
+	// in account.extra so older binaries and databases remain compatible.
+	OpenAIStickyBurstExtraKey = "openai_sticky_burst"
+	OpenAIStickyBurstDefault  = 1
+	OpenAIStickyBurstMax      = 10
+)
+
+const (
 	OpenAIEndpointCapabilityChatCompletions OpenAIEndpointCapability = "chat_completions"
 	OpenAIEndpointCapabilityEmbeddings      OpenAIEndpointCapability = "embeddings"
 	OpenAIEndpointCapabilityAlphaSearch     OpenAIEndpointCapability = "alpha_search"
@@ -176,6 +185,65 @@ func (a *Account) EffectiveLoadFactor() int {
 		return a.Concurrency
 	}
 	return 1
+}
+
+// OpenAIStickyBurstExtraSlots returns the bounded, per-account sticky burst.
+// Missing values use the product default; zero explicitly disables bursting.
+func (a *Account) OpenAIStickyBurstExtraSlots() int {
+	if a == nil || a.Extra == nil {
+		return OpenAIStickyBurstDefault
+	}
+	raw, exists := a.Extra[OpenAIStickyBurstExtraKey]
+	if !exists || raw == nil {
+		return OpenAIStickyBurstDefault
+	}
+	value := parseExtraInt(raw)
+	if value < 0 {
+		return 0
+	}
+	if value > OpenAIStickyBurstMax {
+		return OpenAIStickyBurstMax
+	}
+	return value
+}
+
+// NormalizeOpenAIStickyBurstExtra validates and canonicalizes the optional
+// admin/API value. Missing is intentionally left missing so legacy rows inherit
+// the default without a migration.
+func NormalizeOpenAIStickyBurstExtra(extra map[string]any) error {
+	if extra == nil {
+		return nil
+	}
+	raw, exists := extra[OpenAIStickyBurstExtraKey]
+	if !exists || raw == nil {
+		return nil
+	}
+	value, ok := strictStickyBurstInt(raw)
+	if !ok || value < 0 || value > OpenAIStickyBurstMax {
+		return errors.New("openai_sticky_burst must be an integer between 0 and 10")
+	}
+	extra[OpenAIStickyBurstExtraKey] = value
+	return nil
+}
+
+func strictStickyBurstInt(raw any) (int, bool) {
+	switch value := raw.(type) {
+	case int:
+		return value, true
+	case int64:
+		return int(value), true
+	case float64:
+		parsed := int(value)
+		return parsed, float64(parsed) == value
+	case json.Number:
+		parsed, err := value.Int64()
+		return int(parsed), err == nil
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
 }
 
 func (a *Account) IsSchedulable() bool {

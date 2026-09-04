@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mode="${1:---check}"
+deploy_root="${SUB2API_DEPLOY_ROOT:-/opt/sub2api/deploy}"
+legacy_container="${SUB2API_LEGACY_CONTAINER:-sub2api}"
+postgres_container="${SUB2API_POSTGRES_CONTAINER:-sub2api-postgres}"
+redis_container="${SUB2API_REDIS_CONTAINER:-sub2api-redis}"
+network_name="${SUB2API_DOCKER_NETWORK:-deploy_sub2api-network}"
+rollout_dir="$deploy_root/rollout"
+backup_dir="${SUB2API_BACKUP_DIR:-/opt/sub2api/backups}"
+
+fail() {
+  printf '{"ok":false,"error_code":"%s","message":"%s"}\n' "$1" "$2"
+  exit "${3:-4}"
+}
+
+if [[ "$mode" != "--check" && "$mode" != "--prepare" ]]; then
+  fail invalid_arguments 'Usage: prepare-bluegreen [--check|--prepare]' 2
+fi
+if [[ "$deploy_root" != /* || "$rollout_dir" != /* || "$backup_dir" != /* ]]; then
+  fail invalid_path 'Deployment paths must be absolute.' 2
+fi
+
+for command_name in docker jq awk df; do
+  command -v "$command_name" >/dev/null 2>&1 || fail missing_dependency "Missing required command: $command_name"
+done
+
+legacy_health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$legacy_container" 2>/dev/null || true)"
+postgres_health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$postgres_container" 2>/dev/null || true)"
+redis_health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$redis_container" 2>/dev/null || true)"
+legacy_digest="$(docker inspect --format '{{.Image}}' "$legacy_container" 2>/dev/null || true)"
+
+[[ "$legacy_health" == "healthy" ]] || fail legacy_unhealthy 'Legacy Sub2API container is not healthy.'
+[[ "$postgres_health" == "healthy" ]] || fail postgres_unhealthy 'PostgreSQL container is not healthy.'
+[[ "$redis_health" == "healthy" ]] || fail redis_unhealthy 'Redis container is not healthy.'
+[[ "$legacy_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || fail legacy_digest_invalid 'Legacy image ID is not immutable.'
+docker network inspect "$network_name" >/dev/null 2>&1 || fail network_missing 'Production Docker network is missing.'
+
+memory_available_kb="$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)"
+disk_available_kb="$(df -Pk "$deploy_root" | awk 'NR==2 {print $4}')"
+[[ "$memory_available_kb" =~ ^[0-9]+$ ]] || fail memory_check_failed 'Cannot read available memory.'
+[[ "$disk_available_kb" =~ ^[0-9]+$ ]] || fail disk_check_failed 'Cannot read available disk.'
+(( memory_available_kb >= 2097152 )) || fail insufficient_memory 'Available memory is below 2 GiB.'
+(( disk_available_kb >= 15728640 )) || fail insufficient_disk 'Available disk is below 15 GiB.'
+
+if [[ "$mode" == "--check" ]]; then
+  printf '{"ok":true,"mode":"check","legacy_health":"healthy","postgres_health":"healthy","redis_health":"healthy","legacy_digest":"%s","memory_available_kb":%s,"disk_available_kb":%s}\n' \
+    "$legacy_digest" "$memory_available_kb" "$disk_available_kb"
+  exit 0
+fi
+
+umask 077
+install -d -m 0700 "$rollout_dir" "$rollout_dir/runtime" "$backup_dir"
+
+environment_tmp="$(mktemp "$rollout_dir/.runtime.env.XXXXXX")"
+cleanup() {
+  [[ -z "${environment_tmp:-}" ]] || rm -f -- "$environment_tmp"
+}
+trap cleanup EXIT
+
+docker inspect "$legacy_container" | jq -e 'all(.[0].Config.Env[]; (contains("\n") or contains("\r")) | not)' >/dev/null \
+  || fail unsafe_environment 'Legacy container environment cannot be represented safely.'
+docker inspect "$legacy_container" | jq -r '
+  .[0].Config.Env[]
+  | select((split("=")[0]) as $key
+      | ["SUB2API_PROCESS_ROLE", "SUB2API_DEPLOYMENT_SLOT", "SUB2API_RELEASE_ID",
+         "SUB2API_DEPLOYMENT_VERSION", "SUB2API_DEPLOYMENT_DIGEST", "SERVER_SHUTDOWN_TIMEOUT"]
+      | index($key) | not)
+' >"$environment_tmp"
+chmod 0600 "$environment_tmp"
+mv -f -- "$environment_tmp" "$rollout_dir/runtime.env"
+environment_tmp=""
+
+source_data="$deploy_root/data"
+[[ -d "$source_data" ]] || fail legacy_data_missing 'Legacy application data directory is missing.'
+for slot_name in blue green worker; do
+  target_data="$rollout_dir/data-$slot_name"
+  install -d -m 0750 -o 1000 -g 1000 "$target_data"
+  for data_name in .installed config.yaml model_pricing.json model_pricing.sha256; do
+    if [[ -f "$source_data/$data_name" ]]; then
+      install -m 0640 -o 1000 -g 1000 "$source_data/$data_name" "$target_data/$data_name"
+    fi
+  done
+done
+
+backup_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+backup_path="$backup_dir/pre-bluegreen-$backup_stamp.dump"
+backup_tmp="$backup_path.tmp"
+docker exec "$postgres_container" sh -c 'exec pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' >"$backup_tmp"
+[[ -s "$backup_tmp" ]] || fail backup_empty 'PostgreSQL backup is empty.'
+chmod 0600 "$backup_tmp"
+mv -f -- "$backup_tmp" "$backup_path"
+
+printf '{"ok":true,"mode":"prepared","legacy_health":"healthy","postgres_health":"healthy","redis_health":"healthy","legacy_digest":"%s","backup_created":true,"runtime_env_created":true,"slot_data_created":true}\n' "$legacy_digest"

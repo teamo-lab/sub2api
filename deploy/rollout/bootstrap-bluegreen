@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+release_id="${1:-}"
+version="${2:-}"
+root="${SUB2API_DEPLOY_ROOT:-/opt/sub2api/deploy}"
+legacy="${SUB2API_LEGACY_CONTAINER:-sub2api}"
+compose=(docker compose -p sub2api-rollout -f "$root/docker-compose.bluegreen.yml")
+
+fail() {
+  jq -n --arg code "$1" --arg message "$2" '{ok:false,error_code:$code,message:$message}'
+  exit "${3:-4}"
+}
+
+[[ "$release_id" =~ ^[A-Za-z0-9._:+@/-]{1,128}$ ]] || fail invalid_release_id 'release ID is required' 2
+[[ "$version" =~ ^[A-Za-z0-9._:+@/-]{1,128}$ ]] || fail invalid_version 'version is required' 2
+for command_name in docker jq python3 iptables; do
+  command -v "$command_name" >/dev/null 2>&1 || fail missing_dependency "Missing required command: $command_name"
+done
+
+"$root/rollout/prepare-bluegreen" --check >/dev/null
+"$root/rollout/prepare-bluegreen" --prepare >/dev/null
+
+install -d -o root -g root -m 0755 "$root/bin"
+for script in sub2api-rollout entry-switch finalize-entry stage-identical-release stage-image-release run-paired-canary; do
+  install -o root -g root -m 0755 "$root/rollout/$script" "$root/bin/sub2api-${script#sub2api-}"
+done
+digest="$(docker inspect --format '{{.Image}}' "$legacy")"
+[[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || fail legacy_digest_invalid 'legacy image ID is not immutable'
+
+common_env=(
+  SUB2API_BLUE_IMAGE="$digest" SUB2API_BLUE_RELEASE_ID="$release_id" SUB2API_BLUE_VERSION="$version" SUB2API_BLUE_DIGEST="$digest"
+  SUB2API_GREEN_IMAGE="$digest" SUB2API_GREEN_RELEASE_ID="$release_id" SUB2API_GREEN_VERSION="$version" SUB2API_GREEN_DIGEST="$digest"
+  SUB2API_WORKER_IMAGE="$digest" SUB2API_WORKER_RELEASE_ID="$release_id" SUB2API_WORKER_VERSION="$version" SUB2API_WORKER_DIGEST="$digest"
+)
+env "${common_env[@]}" "${compose[@]}" --profile candidate up -d --no-deps --no-build haproxy sub2api-blue sub2api-green >/dev/null
+
+for container in sub2api-haproxy sub2api-blue sub2api-green; do
+  health=""
+  for _ in $(seq 1 90); do
+    health="$(docker inspect --format '{{.State.Health.Status}}' "$container" 2>/dev/null || true)"
+    [[ "$health" == healthy ]] && break
+    sleep 2
+  done
+  [[ "$health" == healthy && "$(docker inspect --format '{{.RestartCount}}' "$container")" == 0 ]] \
+    || fail bootstrap_container_unhealthy "$container did not become healthy" 6
+done
+
+for slot in blue green; do
+  ip="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "sub2api-$slot")"
+  observed="$(curl -fsS -D - -o /dev/null --max-time 5 "http://$ip:8080/health" | awk -F': ' 'tolower($1)=="x-sub2api-deployment-slot" {gsub("\\r", "", $2); print $2}')"
+  [[ "$observed" == "$slot" ]] || fail slot_identity_mismatch "$slot identity header is missing or invalid" 6
+done
+
+"$root/bin/sub2api-rollout" init \
+  --release-id "$release_id" \
+  --blue-version "$version" --blue-digest "$digest" \
+  --green-version "$version" --green-digest "$digest" --json >/dev/null
+"$root/bin/sub2api-rollout" persist-runtime-state --json >/dev/null
+
+"$root/bin/sub2api-rollout" status --json | jq '{ok:true,result:"bluegreen_bootstrapped",phase,active_slot,stable_slot,candidate_slot,rollback_target_slot,blue,green}'

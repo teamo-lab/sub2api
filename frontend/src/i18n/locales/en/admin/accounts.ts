@@ -935,6 +935,8 @@ export default {
       proxy: 'Proxy',
       noProxy: 'No Proxy',
       concurrency: 'Concurrency',
+      stickyBurst: 'Sticky Burst',
+      stickyBurstHint: 'Temporary extra slots for an established sticky session. Defaults to 1; set 0 to disable.',
       loadFactor: 'Load Factor',
       loadFactorHint: 'Higher load factor increases scheduling frequency',
       priority: 'Priority',
