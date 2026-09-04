@@ -25,8 +25,9 @@ install -d -o root -g root -m 0755 "$root/bin"
 for script in sub2api-rollout entry-switch finalize-entry stage-identical-release stage-image-release run-paired-canary; do
   install -o root -g root -m 0755 "$root/rollout/$script" "$root/bin/sub2api-${script#sub2api-}"
 done
-digest="$(docker inspect --format '{{.Image}}' "$legacy")"
+digest="${SUB2API_BOOTSTRAP_IMAGE:-$(docker inspect --format '{{.Image}}' "$legacy")}"
 [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || fail legacy_digest_invalid 'legacy image ID is not immutable'
+docker image inspect "$digest" >/dev/null 2>&1 || fail bootstrap_image_missing 'bootstrap image is not present on this host'
 
 common_env=(
   SUB2API_BLUE_IMAGE="$digest" SUB2API_BLUE_RELEASE_ID="$release_id" SUB2API_BLUE_VERSION="$version" SUB2API_BLUE_DIGEST="$digest"
