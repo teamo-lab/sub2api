@@ -29,6 +29,17 @@ class DependencyClientTest(unittest.TestCase):
         with patch.dict(os.environ, {'SUB2API_DEPENDENCY_MODE': 'local'}), patch.object(m, 'inspect', return_value={'State': {'Health': {'Status': 'unhealthy'}}}):
             with self.assertRaises(RuntimeError): m.db_command('pg_dump', ['-Fc'])
 
+    def test_dump_does_not_consume_parent_bootstrap_stdin(self):
+        import subprocess
+        def dump(*args, **kwargs):
+            self.assertIs(kwargs['stdin'], subprocess.DEVNULL)
+            kwargs['stdout'].write(b'PGDMPverified-dump')
+            return subprocess.CompletedProcess(args[0], 0)
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'SUB2API_BACKUP_DIR': directory}), patch.object(m, 'db_command', return_value=['pg_dump']), patch.object(m.subprocess, 'run', side_effect=dump):
+            target = pathlib.Path(directory) / 'new.dump'
+            m.backup(str(target))
+            self.assertEqual(b'PGDMPverified-dump', target.read_bytes())
+
     def test_backup_cannot_overwrite_or_escape_backup_directory(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'SUB2API_BACKUP_DIR': directory}):
             target = pathlib.Path(directory) / 'existing.dump'; target.write_bytes(b'PGDMPoriginal')

@@ -97,7 +97,7 @@ def backup(path):
     tmp = target.with_suffix('.dump.tmp')
     with tmp.open('xb') as handle:
         os.chmod(tmp, 0o600)
-        result = subprocess.run(db_command('pg_dump', ['-Fc']), stdout=handle, stderr=subprocess.DEVNULL, timeout=600)
+        result = subprocess.run(db_command('pg_dump', ['-Fc']), stdin=subprocess.DEVNULL, stdout=handle, stderr=subprocess.DEVNULL, timeout=600)
         handle.flush(); os.fsync(handle.fileno())
     if result.returncode or tmp.stat().st_size == 0: raise RuntimeError('backup failed; temporary file preserved')
     with tmp.open('rb') as handle:
