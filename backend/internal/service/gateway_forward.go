@@ -347,12 +347,13 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	if err := replaceBody(FilterWebSearchHistoryBlocks(body, reqModel)); err != nil {
 		return nil, err
 	}
-	// Pre-filter: remove thinking blocks with missing/invalid signatures before forwarding.
+	// Pre-filter: remove syntactically incomplete thinking blocks before forwarding.
 	// Clients (e.g. Claude Code) sometimes send multi-turn conversations where a historical
 	// assistant message contains a thinking block that is missing the required "signature" field,
 	// causing upstream to reject the request with 400 "thinking.signature: Field required".
-	// FilterThinkingBlocks removes only the invalid blocks; thinking blocks with valid signatures
-	// are preserved. This avoids relying solely on the post-error retry path, which can time out
+	// Opaque assistant signatures and redacted_thinking.data are preserved, independently
+	// of the next turn's thinking mode; only upstream can verify signatures. This avoids
+	// relying solely on the post-error retry path, which can time out
 	// (maxRetryElapsed = 10s) for long conversations before the retry budget is exhausted.
 	//
 	// 仅 anthropic-strict 模型族执行此过滤；passback-required 上游 (DeepSeek/Kimi/GLM 等)
