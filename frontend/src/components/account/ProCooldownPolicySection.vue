@@ -12,10 +12,16 @@
     </div>
     <div class="mt-3 flex flex-wrap gap-2 text-xs">
       <span class="rounded-full bg-white px-3 py-1 text-gray-700 ring-1 ring-gray-200 dark:bg-dark-700 dark:text-gray-200">{{ enrolled ? (isControl ? '对照组 · 不主动冷却' : '实验组 · 按策略冷却') : '尚未加入运行试验' }}</span>
-      <span class="rounded-full bg-white px-3 py-1 text-gray-700 ring-1 ring-gray-200 dark:bg-dark-700 dark:text-gray-200">观察窗口 30 分钟</span>
+      <span class="rounded-full bg-white px-3 py-1 text-gray-700 ring-1 ring-gray-200 dark:bg-dark-700 dark:text-gray-200">观察窗口 {{ modelValue.window_minutes }} 分钟</span>
       <span class="rounded-full bg-white px-3 py-1 text-gray-700 ring-1 ring-gray-200 dark:bg-dark-700 dark:text-gray-200">单次冷却 30 分钟</span>
     </div>
     <p class="mt-3 text-xs text-gray-500">运行中的试验在保存后下一轮检查生效（最长约 5 分钟）。调参会记录为新阶段；对照组不主动冷却，试验结束后不再执行。</p>
+    <label class="mt-4 block">
+      <span class="input-label">观察窗口（分钟）</span>
+      <select :value="modelValue.window_minutes" @change="set('window_minutes', Number(($event.target as HTMLSelectElement).value))" aria-label="观察窗口（分钟）" class="input">
+        <option v-for="minutes in [5, 15, 30, 60]" :key="minutes" :value="minutes">{{ minutes }} 分钟</option>
+      </select>
+    </label>
     <div class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
       <label v-for="field in cooldownFields.slice(0, 8)" :key="field.key" class="block">
         <span class="input-label">{{ field.label }}</span>

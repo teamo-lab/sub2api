@@ -30,7 +30,8 @@ export function readCooldownPolicy(raw: unknown): CooldownPolicy {
 }
 export function validateCooldownPolicy(policy: CooldownPolicy): string | null {
   if (typeof policy.enabled !== 'boolean') return '冷却策略开关无效'
-  if (policy.window_minutes !== 30 || policy.cooldown_minutes !== 30) return '当前策略的观察窗口和冷却时长固定为 30 分钟'
+  if (![5, 15, 30, 60].includes(policy.window_minutes)) return '观察窗口须为 5、15、30 或 60 分钟'
+  if (policy.cooldown_minutes !== 30) return '当前单次冷却时长固定为 30 分钟'
   for (const field of cooldownFields) {
     const value = policy[field.key]
     if (typeof value !== 'number' || !Number.isFinite(value) || value < field.min || value > field.max || (field.step === 1 && !Number.isInteger(value))) {
