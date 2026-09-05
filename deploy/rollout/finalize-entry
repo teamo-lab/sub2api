@@ -2,6 +2,7 @@
 set -euo pipefail
 
 root="${SUB2API_DEPLOY_ROOT:-/opt/sub2api/deploy}"
+if [[ -f "$root/rollout/site.env" ]]; then set -a; source "$root/rollout/site.env"; set +a; fi
 controller="$root/bin/sub2api-rollout"
 entry_switch="$root/bin/sub2api-entry-switch"
 state_path="$root/rollout/state.json"
@@ -40,7 +41,7 @@ flock -n 9 || fail controller_locked 'another rollout action holds the controlle
 
 count_legacy_connections() {
   local port_hex
-  port_hex="$(printf '%04X' "$public_port")"
+  port_hex="$(printf '%04X' "${SUB2API_INTERNAL_PORT:-8080}")"
   docker exec "$legacy" sh -c "awk -v suffix=\":$port_hex\$\" '\$2 ~ suffix && \$4 == \"01\" {count++} END {print count+0}' /proc/net/tcp /proc/net/tcp6" 2>/dev/null || printf '%s\n' 999
 }
 

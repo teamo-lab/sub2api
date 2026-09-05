@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""Private database/Redis checks and backups for local or managed dependencies.
+
+Credentials are read only inside the target app/container and never emitted.
+No restore operation is provided.
+"""
+import hashlib
+import json
+import os
+import pathlib
+import socket
+import ssl
+import subprocess
+import sys
+
+ROOT = pathlib.Path(os.environ.get('SUB2API_DEPLOY_ROOT', '/opt/sub2api/deploy'))
+
+
+def site_environment():
+    site = ROOT / 'rollout/site.env'
+    if site.exists():
+        for line in site.read_text().splitlines():
+            key, sep, value = line.partition('=')
+            if sep and key.startswith(('SUB2API_', 'ROLLOUT_')):
+                os.environ.setdefault(key, value)
+
+
+def inspect(name):
+    result = subprocess.run(['docker', 'inspect', name], capture_output=True, text=True)
+    return json.loads(result.stdout)[0] if result.returncode == 0 else None
+
+
+def app_container():
+    for name in ['sub2api-worker', 'sub2api-blue', 'sub2api-green', os.environ.get('SUB2API_LEGACY_CONTAINER', 'sub2api')]:
+        data = inspect(name)
+        if data and data['State']['Running'] and data['State'].get('Health', {}).get('Status') == 'healthy':
+            return name, dict(item.split('=', 1) for item in data['Config']['Env'] if '=' in item)
+    raise RuntimeError('no healthy application container')
+
+
+def db_command(program, args):
+    if program not in {'psql', 'pg_dump'}:
+        raise RuntimeError('unsupported database command')
+    if os.environ.get('SUB2API_DEPENDENCY_MODE') == 'external':
+        name, env = app_container()
+        if not all(env.get(k) for k in ('DATABASE_HOST', 'DATABASE_USER', 'DATABASE_PASSWORD')):
+            raise RuntimeError('database configuration incomplete')
+        shell = 'export PGPASSWORD="$DATABASE_PASSWORD" PGSSLMODE="${DATABASE_SSLMODE:-disable}"; exec "$@" -h "$DATABASE_HOST" -p "${DATABASE_PORT:-5432}" -U "$DATABASE_USER" -d "${DATABASE_DBNAME:-${DATABASE_NAME:-sub2api}}"'
+    else:
+        name = os.environ.get('SUB2API_POSTGRES_CONTAINER', 'sub2api-postgres')
+        data = inspect(name)
+        if not data or data['State'].get('Health', {}).get('Status') != 'healthy':
+            raise RuntimeError('postgres container unhealthy')
+        shell = 'exec "$@" -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+    return ['docker', 'exec', '-i', name, 'sh', '-c', shell, 'sh', program, *args]
+
+
+def redis_ping():
+    if os.environ.get('SUB2API_DEPENDENCY_MODE') != 'external':
+        data = inspect(os.environ.get('SUB2API_REDIS_CONTAINER', 'sub2api-redis'))
+        if not data or data['State'].get('Health', {}).get('Status') != 'healthy':
+            raise RuntimeError('redis container unhealthy')
+        return
+    _, env = app_container()
+    with socket.create_connection((env['REDIS_HOST'], int(env.get('REDIS_PORT', '6379'))), timeout=5) as raw:
+        conn = raw
+        if env.get('REDIS_ENABLE_TLS', '').lower() in ('true', '1'):
+            conn = ssl.create_default_context().wrap_socket(raw, server_hostname=env['REDIS_HOST'])
+        with conn.makefile('rwb', buffering=0) as stream:
+            def command(*parts):
+                payload = b'*' + str(len(parts)).encode() + b'\r\n'
+                for part in parts:
+                    part = part.encode(); payload += b'$' + str(len(part)).encode() + b'\r\n' + part + b'\r\n'
+                stream.write(payload)
+                return stream.readline(4096)
+            if env.get('REDIS_PASSWORD'):
+                auth = [env['REDIS_PASSWORD']]
+                if env.get('REDIS_USERNAME'): auth.insert(0, env['REDIS_USERNAME'])
+                if command('AUTH', *auth) != b'+OK\r\n': raise RuntimeError('redis authentication failed')
+            if command('PING') != b'+PONG\r\n': raise RuntimeError('redis ping failed')
+
+
+def check():
+    query = "BEGIN READ ONLY; SET LOCAL statement_timeout='10s'; SELECT json_build_object('accounts',(SELECT count(*) FROM accounts),'api_keys',(SELECT count(*) FROM api_keys),'users',(SELECT count(*) FROM users),'groups',(SELECT count(*) FROM groups)); COMMIT;"
+    result = subprocess.run(db_command('psql', ['-X', '-Atq', '-v', 'ON_ERROR_STOP=1']), input=query, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20)
+    if result.returncode: raise RuntimeError('database read-only check failed')
+    counts = json.loads(result.stdout.strip()); redis_ping()
+    print(json.dumps({'ok': True, 'postgres': 'healthy', 'redis': 'healthy', 'counts': counts}))
+
+
+def backup(path):
+    target = pathlib.Path(path)
+    permitted = pathlib.Path(os.environ.get('SUB2API_BACKUP_DIR', '/opt/sub2api/backups')).resolve()
+    if target.parent.resolve() != permitted or target.suffix != '.dump' or target.exists():
+        raise RuntimeError('backup target invalid or already exists')
+    permitted.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp = target.with_suffix('.dump.tmp')
+    with tmp.open('xb') as handle:
+        os.chmod(tmp, 0o600)
+        result = subprocess.run(db_command('pg_dump', ['-Fc']), stdout=handle, stderr=subprocess.DEVNULL, timeout=600)
+        handle.flush(); os.fsync(handle.fileno())
+    if result.returncode or tmp.stat().st_size == 0: raise RuntimeError('backup failed; temporary file preserved')
+    with tmp.open('rb') as handle:
+        if handle.read(5) != b'PGDMP': raise RuntimeError('invalid custom backup header')
+    tmp.replace(target)
+    digest = hashlib.file_digest(target.open('rb'), 'sha256').hexdigest()
+    print(json.dumps({'ok': True, 'backup': str(target), 'bytes': target.stat().st_size, 'sha256': digest}))
+
+
+if __name__ == '__main__':
+    os.umask(0o077)
+    site_environment()
+    try:
+        mode = sys.argv[1]
+        if mode == 'check': check()
+        elif mode == 'backup': backup(sys.argv[2])
+        elif mode == 'psql':
+            cmd = db_command('psql', sys.argv[2:]); os.execvp(cmd[0], cmd)
+        else: raise RuntimeError('unsupported operation')
+    except Exception as exc:
+        print(json.dumps({'ok': False, 'error_code': 'dependency_operation_failed', 'message': str(exc) if isinstance(exc, RuntimeError) else type(exc).__name__}), file=sys.stderr)
+        sys.exit(1)

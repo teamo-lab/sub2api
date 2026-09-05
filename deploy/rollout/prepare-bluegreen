@@ -3,6 +3,7 @@ set -euo pipefail
 
 mode="${1:---check}"
 deploy_root="${SUB2API_DEPLOY_ROOT:-/opt/sub2api/deploy}"
+if [[ -f "$deploy_root/rollout/site.env" ]]; then set -a; source "$deploy_root/rollout/site.env"; set +a; fi
 legacy_container="${SUB2API_LEGACY_CONTAINER:-sub2api}"
 postgres_container="${SUB2API_POSTGRES_CONTAINER:-sub2api-postgres}"
 redis_container="${SUB2API_REDIS_CONTAINER:-sub2api-redis}"
@@ -27,8 +28,14 @@ for command_name in docker jq awk df; do
 done
 
 legacy_health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$legacy_container" 2>/dev/null || true)"
-postgres_health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$postgres_container" 2>/dev/null || true)"
-redis_health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$redis_container" 2>/dev/null || true)"
+if [[ "${SUB2API_DEPENDENCY_MODE:-local}" == external ]]; then
+  "$rollout_dir/dependency-client" check >/dev/null || fail managed_dependencies_unhealthy 'Managed PostgreSQL or Redis check failed.'
+  postgres_health=healthy
+  redis_health=healthy
+else
+  postgres_health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$postgres_container" 2>/dev/null || true)"
+  redis_health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$redis_container" 2>/dev/null || true)"
+fi
 legacy_digest="$(docker inspect --format '{{.Image}}' "$legacy_container" 2>/dev/null || true)"
 
 [[ "$legacy_health" == "healthy" ]] || fail legacy_unhealthy 'Legacy Sub2API container is not healthy.'
@@ -72,7 +79,7 @@ chmod 0600 "$environment_tmp"
 mv -f -- "$environment_tmp" "$rollout_dir/runtime.env"
 environment_tmp=""
 
-source_data="$deploy_root/data"
+source_data="${SUB2API_LEGACY_DATA_DIR:-$deploy_root/data}"
 [[ -d "$source_data" ]] || fail legacy_data_missing 'Legacy application data directory is missing.'
 for slot_name in blue green worker; do
   target_data="$rollout_dir/data-$slot_name"
@@ -86,10 +93,6 @@ done
 
 backup_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 backup_path="$backup_dir/pre-bluegreen-$backup_stamp.dump"
-backup_tmp="$backup_path.tmp"
-docker exec "$postgres_container" sh -c 'exec pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' >"$backup_tmp"
-[[ -s "$backup_tmp" ]] || fail backup_empty 'PostgreSQL backup is empty.'
-chmod 0600 "$backup_tmp"
-mv -f -- "$backup_tmp" "$backup_path"
+"$rollout_dir/dependency-client" backup "$backup_path" >/dev/null || fail backup_failed 'PostgreSQL backup failed; existing files preserved.'
 
 printf '{"ok":true,"mode":"prepared","legacy_health":"healthy","postgres_health":"healthy","redis_health":"healthy","legacy_digest":"%s","backup_created":true,"runtime_env_created":true,"slot_data_created":true}\n' "$legacy_digest"

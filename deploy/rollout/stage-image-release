@@ -6,6 +6,7 @@ candidate_version="${2:-}"
 candidate_image="${3:-}"
 action_prefix="${4:-stage-$(date -u +%Y%m%dT%H%M%SZ)}"
 root="${SUB2API_DEPLOY_ROOT:-/opt/sub2api/deploy}"
+if [[ -f "$root/rollout/site.env" ]]; then set -a; source "$root/rollout/site.env"; set +a; fi
 controller="$root/bin/sub2api-rollout"
 compose=(docker compose -p sub2api-rollout -f "$root/docker-compose.bluegreen.yml")
 

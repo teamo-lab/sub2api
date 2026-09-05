@@ -4,6 +4,7 @@ set -euo pipefail
 release_id="${1:-}"
 version="${2:-}"
 root="${SUB2API_DEPLOY_ROOT:-/opt/sub2api/deploy}"
+if [[ -f "$root/rollout/site.env" ]]; then set -a; source "$root/rollout/site.env"; set +a; fi
 legacy="${SUB2API_LEGACY_CONTAINER:-sub2api}"
 compose=(docker compose -p sub2api-rollout -f "$root/docker-compose.bluegreen.yml")
 

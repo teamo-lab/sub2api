@@ -24,6 +24,13 @@ import urllib.request
 
 
 ROOT = pathlib.Path(os.environ.get("SUB2API_ROLLOUT_ROOT", "/opt/sub2api/deploy"))
+# Site-specific values contain paths/ports only; never dependency credentials.
+site_path = ROOT / "rollout/site.env"
+if site_path.exists():
+    for line in site_path.read_text(encoding="utf-8").splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key.startswith(("SUB2API_", "ROLLOUT_")):
+            os.environ.setdefault(key, value)
 ROLLOUT_DIR = ROOT / "rollout"
 STATE_PATH = pathlib.Path(os.environ.get("SUB2API_ROLLOUT_STATE", str(ROLLOUT_DIR / "state.json")))
 HISTORY_PATH = ROLLOUT_DIR / "history.jsonl"
@@ -856,6 +863,10 @@ def query_metrics(slot, window_start, window_end, api_key_id=None):
                "-U", POSTGRES_USER, "-d", POSTGRES_DB,
                "--set=slot=" + slot, "--set=window_start=" + window_start, "--set=window_end=" + window_end,
                "--set=api_key_id=" + (str(api_key_id) if api_key_id is not None else "")]
+    if os.environ.get("SUB2API_DEPENDENCY_MODE") == "external":
+        command = [str(ROLLOUT_DIR / "dependency-client"), "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1",
+                   "--set=slot=" + slot, "--set=window_start=" + window_start, "--set=window_end=" + window_end,
+                   "--set=api_key_id=" + (str(api_key_id) if api_key_id is not None else "")]
     result = subprocess.run(command, input=sql, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                             timeout=30, check=False)
     if result.returncode != 0:

@@ -53,3 +53,30 @@ export SUB2API_CLOUD_REMOTE_DIR=/opt/sub2api/deploy
 6. legacy 活动连接连续三次为0后执行 `finalize-entry`，让 final HAProxy 直接监听端口80。
 
 任何步骤失败均保留 legacy、镜像、数据库备份和 rollout 状态，不自动恢复数据库。
+
+## 第二台香港实例：43 的外部依赖接管
+
+`43.159.0.162`（`ins-4r9sd5og`）保留其自身数据库、Redis、账号配置和数据目录。
+受管发布目录统一为 `/opt/sub2api/deploy`，原单容器数据仍为 `/opt/sub2api/data`。
+通过 `rollout/site.env` 固化以下非敏感差异，禁止拷贝101的runtime.env或账号数据：
+
+```dotenv
+SUB2API_DEPENDENCY_MODE=external
+SUB2API_DOCKER_NETWORK=sub2api_sub2api-network
+SUB2API_LEGACY_DATA_DIR=/opt/sub2api/data
+SUB2API_PUBLIC_PORT=80
+SUB2API_INTERNAL_PORT=8080
+ROLLOUT_FINAL_ENTRY_PORT=80
+```
+
+`dependency-client` 从本机健康应用容器获取现有依赖配置：通过容器内已有 `psql/pg_dump`
+检查和备份外部 PostgreSQL，直接认证 PING 现有 Redis。凭据不写入命令参数或日志；不运行数据库恢复。
+所有备份为权限600的custom dump，并校验PGDMP文件头及SHA256。
+
+显式获准首次接管后，使用本机Skill的 `sub2api-bootstrap` 入口执行prepare、镜像import、bootstrap、
+entry-test、activate、finalize。bootstrap镜像必须支持api/worker进程角色，不能使用不支持角色隔离的旧镜像。
+切换阶段由原单容器继续执行singleton任务，蓝绿槽仅运行API；原容器连接排空后再停止原容器并启动唯一worker。
+`finalize-entry` 按容器内部8080检查活动连接，不能使用公网80替代。
+
+日常stage/canary/promote-fast/worker/complete和一键回滚仍与101共用同一套控制器。
+双机同步版本应传输同一个不可变镜像，并核对两台API、worker的image ID和编译commit；不要各自构建后仅比较版本名。
