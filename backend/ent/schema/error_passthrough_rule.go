@@ -10,6 +10,7 @@ import (
 	"entgo.io/ent/schema"
 	"entgo.io/ent/schema/field"
 	"entgo.io/ent/schema/index"
+	"github.com/Wei-Shaw/sub2api/internal/model"
 )
 
 // ErrorPassthroughRule 定义全局错误透传规则的 schema。
@@ -40,6 +41,7 @@ func (ErrorPassthroughRule) Mixin() []ent.Mixin {
 // Fields 定义错误透传规则实体的所有字段。
 func (ErrorPassthroughRule) Fields() []ent.Field {
 	return []ent.Field{
+		field.JSON("recovery_policy", &model.ErrorRecoveryPolicy{}).Optional().SchemaType(map[string]string{dialect.Postgres: "jsonb"}),
 		// name: 规则名称，用于在界面中标识规则
 		field.String("name").
 			MaxLen(100).

@@ -943,7 +943,7 @@ func init() {
 	// errorpassthroughrule.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
 	errorpassthroughrule.UpdateDefaultUpdatedAt = errorpassthroughruleDescUpdatedAt.UpdateDefault.(func() time.Time)
 	// errorpassthroughruleDescName is the schema descriptor for name field.
-	errorpassthroughruleDescName := errorpassthroughruleFields[0].Descriptor()
+	errorpassthroughruleDescName := errorpassthroughruleFields[1].Descriptor()
 	// errorpassthroughrule.NameValidator is a validator for the "name" field. It is called by the builders before save.
 	errorpassthroughrule.NameValidator = func() func(string) error {
 		validators := errorpassthroughruleDescName.Validators
@@ -961,29 +961,29 @@ func init() {
 		}
 	}()
 	// errorpassthroughruleDescEnabled is the schema descriptor for enabled field.
-	errorpassthroughruleDescEnabled := errorpassthroughruleFields[1].Descriptor()
+	errorpassthroughruleDescEnabled := errorpassthroughruleFields[2].Descriptor()
 	// errorpassthroughrule.DefaultEnabled holds the default value on creation for the enabled field.
 	errorpassthroughrule.DefaultEnabled = errorpassthroughruleDescEnabled.Default.(bool)
 	// errorpassthroughruleDescPriority is the schema descriptor for priority field.
-	errorpassthroughruleDescPriority := errorpassthroughruleFields[2].Descriptor()
+	errorpassthroughruleDescPriority := errorpassthroughruleFields[3].Descriptor()
 	// errorpassthroughrule.DefaultPriority holds the default value on creation for the priority field.
 	errorpassthroughrule.DefaultPriority = errorpassthroughruleDescPriority.Default.(int)
 	// errorpassthroughruleDescMatchMode is the schema descriptor for match_mode field.
-	errorpassthroughruleDescMatchMode := errorpassthroughruleFields[5].Descriptor()
+	errorpassthroughruleDescMatchMode := errorpassthroughruleFields[6].Descriptor()
 	// errorpassthroughrule.DefaultMatchMode holds the default value on creation for the match_mode field.
 	errorpassthroughrule.DefaultMatchMode = errorpassthroughruleDescMatchMode.Default.(string)
 	// errorpassthroughrule.MatchModeValidator is a validator for the "match_mode" field. It is called by the builders before save.
 	errorpassthroughrule.MatchModeValidator = errorpassthroughruleDescMatchMode.Validators[0].(func(string) error)
 	// errorpassthroughruleDescPassthroughCode is the schema descriptor for passthrough_code field.
-	errorpassthroughruleDescPassthroughCode := errorpassthroughruleFields[7].Descriptor()
+	errorpassthroughruleDescPassthroughCode := errorpassthroughruleFields[8].Descriptor()
 	// errorpassthroughrule.DefaultPassthroughCode holds the default value on creation for the passthrough_code field.
 	errorpassthroughrule.DefaultPassthroughCode = errorpassthroughruleDescPassthroughCode.Default.(bool)
 	// errorpassthroughruleDescPassthroughBody is the schema descriptor for passthrough_body field.
-	errorpassthroughruleDescPassthroughBody := errorpassthroughruleFields[9].Descriptor()
+	errorpassthroughruleDescPassthroughBody := errorpassthroughruleFields[10].Descriptor()
 	// errorpassthroughrule.DefaultPassthroughBody holds the default value on creation for the passthrough_body field.
 	errorpassthroughrule.DefaultPassthroughBody = errorpassthroughruleDescPassthroughBody.Default.(bool)
 	// errorpassthroughruleDescSkipMonitoring is the schema descriptor for skip_monitoring field.
-	errorpassthroughruleDescSkipMonitoring := errorpassthroughruleFields[11].Descriptor()
+	errorpassthroughruleDescSkipMonitoring := errorpassthroughruleFields[12].Descriptor()
 	// errorpassthroughrule.DefaultSkipMonitoring holds the default value on creation for the skip_monitoring field.
 	errorpassthroughrule.DefaultSkipMonitoring = errorpassthroughruleDescSkipMonitoring.Default.(bool)
 	groupMixin := schema.Group{}.Mixin()

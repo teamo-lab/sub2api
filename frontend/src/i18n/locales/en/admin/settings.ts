@@ -1240,6 +1240,7 @@ export default {
 
     // Error Passthrough Rules
     errorPassthrough: {
+      recovery: {"platformRequired":"Recovery policies currently require selecting only OpenAI.","title":"Retry and failover policy","mode":"On match","default":"Keep existing behavior","return":"Return error immediately","limited":"Bounded recovery","hint":"OpenAI HTTP / SSE. Match the conditions above, then account type, model and original error code. The budget starts on first match and is shared across accounts; replay stops after semantic output.","accountType":"Failing account type","allTypes":"OAuth and API Key","codes":"Original error codes (comma-separated, exact match)","models":"Models (exact names, empty means all)","retries":"Extra same-account retries","switches":"Maximum account switches","budget":"Recovery budget (seconds, including queue and upstream wait)","codesRequired":"Enter at least one original upstream error code"},
       title: 'Error Passthrough Rules',
       description: 'Configure how upstream errors are returned to clients',
       createRule: 'Create Rule',

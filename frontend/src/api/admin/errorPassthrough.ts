@@ -5,10 +5,21 @@
 
 import { apiClient } from '../client'
 
+export interface ErrorRecoveryPolicy {
+ mode: 'default' | 'return' | 'limited'
+ account_types: string[]
+ models: string[]
+ upstream_codes: string[]
+ same_account_retries: number
+ account_switches: number
+ budget_seconds: number
+}
+
 /**
  * Error passthrough rule interface
  */
 export interface ErrorPassthroughRule {
+  recovery_policy?: ErrorRecoveryPolicy | null
   id: number
   name: string
   enabled: boolean
@@ -31,6 +42,7 @@ export interface ErrorPassthroughRule {
  * Create rule request
  */
 export interface CreateRuleRequest {
+  recovery_policy?: ErrorRecoveryPolicy | null
   name: string
   enabled?: boolean
   priority?: number
@@ -50,6 +62,7 @@ export interface CreateRuleRequest {
  * Update rule request
  */
 export interface UpdateRuleRequest {
+  recovery_policy?: ErrorRecoveryPolicy | null
   name?: string
   enabled?: boolean
   priority?: number

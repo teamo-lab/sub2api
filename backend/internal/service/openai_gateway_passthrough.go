@@ -1964,6 +1964,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			return
 		}
 		clientOutputStarted = true
+		CompleteErrorRecovery(c)
 		failureDelivered = true
 		flushPending = true
 		flushPendingOutput()
@@ -2193,6 +2194,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				logger.LegacyPrintf("service.openai_gateway", "[OpenAI passthrough] Client disconnected during streaming, continue draining upstream for usage: account=%d", account.ID)
 			} else {
 				clientOutputStarted = true
+				CompleteErrorRecovery(c)
 				flushPending = true
 				if line == "" {
 					flushPendingOutput()

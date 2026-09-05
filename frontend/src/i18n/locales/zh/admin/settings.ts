@@ -1234,6 +1234,7 @@ export default {
 
     // Error Passthrough Rules
     errorPassthrough: {
+      recovery: {"platformRequired":"重试与换号策略当前仅支持单独选择 OpenAI 平台","title":"重试与换号策略","mode":"命中后处理","default":"沿用现有处理","return":"立即返回错误","limited":"按规则有限重试","hint":"适用于 OpenAI HTTP / SSE。先匹配上面的条件，再匹配账号类型、模型和原始错误 code。预算从第一次命中开始，跨账号共享；有效输出开始后不再重放。","accountType":"实际出错账号类型","allTypes":"OAuth 和 API Key","codes":"原始错误 code（逗号分隔，精确匹配）","models":"适用模型（精确名称，留空不限）","retries":"同账号额外重试次数","switches":"最多换号次数","budget":"累计恢复时限（秒，含排队和上游等待）","codesRequired":"请填写至少一个原始错误 code"},
       title: '错误透传规则',
       description: '配置上游错误如何返回给客户端',
       createRule: '创建规则',

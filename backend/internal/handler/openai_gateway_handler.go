@@ -551,6 +551,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	// 绑定错误透传服务，允许 service 层在非 failover 错误场景复用规则。
 	if h.errorPassthroughService != nil {
 		service.BindErrorPassthroughService(c, h.errorPassthroughService)
+		defer func() {
+			service.WriteRecoveryBudgetError(c)
+			service.CloseErrorRecovery(c)
+		}()
 	}
 
 	// Get subscription info (may be nil)
@@ -623,6 +627,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			return
 		}
 		// Select account supporting the requested model
+		if service.WriteRecoveryBudgetError(c) {
+			return
+		}
 		reqLog.Debug("openai.account_selecting", zap.Int("excluded_account_count", len(failedAccountIDs)))
 		selection, scheduleDecision, err := h.gatewayService.SelectAccountWithSchedulerForCapability(
 			c.Request.Context(),
@@ -813,6 +820,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				}
 			})
 		}
+		if service.WriteRecoveryBudgetError(c) {
+			return
+		}
 		if err != nil {
 			if result != nil && result.ImageCount > 0 {
 				reqLog.Warn("openai.forward_partial_error_with_image_result",
@@ -839,6 +849,24 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					// 但重试耗尽时仍须按已提交的 SSE 响应返回流内错误。
 					if c.Writer.Written() {
 						streamStarted = true
+					}
+					if action := service.ApplyErrorRecovery(c, account, reqModel, failoverErr); action != service.ErrorRecoveryDefault {
+						switch action {
+						case service.ErrorRecoveryRetry:
+							continue
+						case service.ErrorRecoverySwitch:
+							if switchCount >= maxAccountSwitches {
+								service.WriteErrorRecoveryExhausted(c)
+								return
+							}
+							failedAccountIDs[account.ID] = struct{}{}
+							switchCount++
+							h.gatewayService.RecordOpenAIAccountSwitch()
+							continue
+						default:
+							service.WriteErrorRecoveryExhausted(c)
+							return
+						}
 					}
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, nil), false, nil, err)
@@ -1178,6 +1206,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	// 绑定错误透传服务，允许 service 层在非 failover 错误场景复用规则。
 	if h.errorPassthroughService != nil {
 		service.BindErrorPassthroughService(c, h.errorPassthroughService)
+		defer func() {
+			service.WriteRecoveryBudgetError(c)
+			service.CloseErrorRecovery(c)
+		}()
 	}
 
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
@@ -1382,6 +1414,9 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 				}
 			})
 		}
+		if service.WriteRecoveryBudgetError(c) {
+			return
+		}
 		if err != nil {
 			if result != nil && result.ImageCount > 0 {
 				reqLog.Warn("openai_messages.forward_partial_error_with_image_result",
@@ -1403,6 +1438,24 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 						h.gatewayService.ObserveOpenAIAccountHealthFailure(c.Request.Context(), account, err)
 						h.handleAnthropicFailoverExhausted(c, failoverErr, true)
 						return
+					}
+					if action := service.ApplyErrorRecovery(c, account, reqModel, failoverErr); action != service.ErrorRecoveryDefault {
+						switch action {
+						case service.ErrorRecoveryRetry:
+							continue
+						case service.ErrorRecoverySwitch:
+							if switchCount >= maxAccountSwitches {
+								service.WriteErrorRecoveryExhausted(c)
+								return
+							}
+							failedAccountIDs[account.ID] = struct{}{}
+							switchCount++
+							h.gatewayService.RecordOpenAIAccountSwitch()
+							continue
+						default:
+							service.WriteErrorRecoveryExhausted(c)
+							return
+						}
 					}
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, currentRoutingModel, false, nil), false, nil, err)

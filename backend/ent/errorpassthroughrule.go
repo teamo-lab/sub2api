@@ -11,6 +11,7 @@ import (
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/sql"
 	"github.com/Wei-Shaw/sub2api/ent/errorpassthroughrule"
+	"github.com/Wei-Shaw/sub2api/internal/model"
 )
 
 // ErrorPassthroughRule is the model entity for the ErrorPassthroughRule schema.
@@ -22,6 +23,8 @@ type ErrorPassthroughRule struct {
 	CreatedAt time.Time `json:"created_at,omitempty"`
 	// UpdatedAt holds the value of the "updated_at" field.
 	UpdatedAt time.Time `json:"updated_at,omitempty"`
+	// RecoveryPolicy holds the value of the "recovery_policy" field.
+	RecoveryPolicy *model.ErrorRecoveryPolicy `json:"recovery_policy,omitempty"`
 	// Name holds the value of the "name" field.
 	Name string `json:"name,omitempty"`
 	// Enabled holds the value of the "enabled" field.
@@ -56,7 +59,7 @@ func (*ErrorPassthroughRule) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case errorpassthroughrule.FieldErrorCodes, errorpassthroughrule.FieldKeywords, errorpassthroughrule.FieldPlatforms:
+		case errorpassthroughrule.FieldRecoveryPolicy, errorpassthroughrule.FieldErrorCodes, errorpassthroughrule.FieldKeywords, errorpassthroughrule.FieldPlatforms:
 			values[i] = new([]byte)
 		case errorpassthroughrule.FieldEnabled, errorpassthroughrule.FieldPassthroughCode, errorpassthroughrule.FieldPassthroughBody, errorpassthroughrule.FieldSkipMonitoring:
 			values[i] = new(sql.NullBool)
@@ -98,6 +101,14 @@ func (_m *ErrorPassthroughRule) assignValues(columns []string, values []any) err
 				return fmt.Errorf("unexpected type %T for field updated_at", values[i])
 			} else if value.Valid {
 				_m.UpdatedAt = value.Time
+			}
+		case errorpassthroughrule.FieldRecoveryPolicy:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field recovery_policy", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.RecoveryPolicy); err != nil {
+					return fmt.Errorf("unmarshal field recovery_policy: %w", err)
+				}
 			}
 		case errorpassthroughrule.FieldName:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -227,6 +238,9 @@ func (_m *ErrorPassthroughRule) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("updated_at=")
 	builder.WriteString(_m.UpdatedAt.Format(time.ANSIC))
+	builder.WriteString(", ")
+	builder.WriteString("recovery_policy=")
+	builder.WriteString(fmt.Sprintf("%v", _m.RecoveryPolicy))
 	builder.WriteString(", ")
 	builder.WriteString("name=")
 	builder.WriteString(_m.Name)

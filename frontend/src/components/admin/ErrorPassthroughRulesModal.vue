@@ -148,6 +148,10 @@
                       {{ rule.passthrough_body ? t('admin.errorPassthrough.passthrough') : t('admin.errorPassthrough.custom') }}
                     </span>
                   </div>
+                  <div v-if="rule.recovery_policy && rule.recovery_policy.mode !== 'default'" class="text-xs text-primary-600 dark:text-primary-400">
+                    {{ rule.recovery_policy.account_types?.join(' / ') || 'OAuth / API Key' }} ·
+                    {{ rule.recovery_policy.mode === 'return' ? t('admin.errorPassthrough.recovery.return') : `${t('admin.errorPassthrough.recovery.retries')} ${rule.recovery_policy.same_account_retries} / ${t('admin.errorPassthrough.recovery.switches')} ${rule.recovery_policy.account_switches} / ${rule.recovery_policy.budget_seconds}s` }}
+                  </div>
                   <div v-if="rule.skip_monitoring" class="flex items-center gap-1">
                     <Icon
                       name="checkCircle"
@@ -322,6 +326,36 @@
           </div>
         </div>
 
+        <div class="rounded-lg border border-gray-200 p-3 dark:border-dark-600 space-y-3">
+          <h4 class="text-sm font-medium">{{ t('admin.errorPassthrough.recovery.title') }}</h4>
+          <label class="block"><span class="input-label">{{ t('admin.errorPassthrough.recovery.mode') }}</span>
+            <select v-model="recovery.mode" class="input w-full" data-testid="recovery-mode">
+              <option value="default">{{ t('admin.errorPassthrough.recovery.default') }}</option>
+              <option value="return">{{ t('admin.errorPassthrough.recovery.return') }}</option>
+              <option value="limited">{{ t('admin.errorPassthrough.recovery.limited') }}</option>
+            </select>
+          </label>
+          <template v-if="recovery.mode !== 'default'">
+            <p class="input-hint">{{ t('admin.errorPassthrough.recovery.hint') }}</p>
+            <label class="block"><span class="input-label">{{ t('admin.errorPassthrough.recovery.accountType') }}</span>
+              <select v-model="recoveryAccountType" class="input w-full" data-testid="recovery-account-type">
+                <option value="">{{ t('admin.errorPassthrough.recovery.allTypes') }}</option><option value="oauth">OAuth</option><option value="apikey">API Key</option>
+              </select>
+            </label>
+            <label class="block"><span class="input-label">{{ t('admin.errorPassthrough.recovery.codes') }}</span>
+              <input v-model="recoveryCodes" class="input w-full" placeholder="server_is_overloaded, slow_down" data-testid="recovery-codes" />
+            </label>
+            <label class="block"><span class="input-label">{{ t('admin.errorPassthrough.recovery.models') }}</span>
+              <input v-model="recoveryModels" class="input w-full" placeholder="gpt-6-astra, gpt-5.6-sol" />
+            </label>
+            <div v-if="recovery.mode === 'limited'" class="grid grid-cols-2 gap-3">
+              <label><span class="input-label">{{ t('admin.errorPassthrough.recovery.retries') }}</span><input v-model.number="recovery.same_account_retries" type="number" min="0" max="10" required class="input w-full" data-testid="recovery-retries" /></label>
+              <label><span class="input-label">{{ t('admin.errorPassthrough.recovery.switches') }}</span><input v-model.number="recovery.account_switches" type="number" min="0" max="10" required class="input w-full" data-testid="recovery-switches" /></label>
+            </div>
+            <label v-if="recovery.mode === 'limited'" class="block"><span class="input-label">{{ t('admin.errorPassthrough.recovery.budget') }}</span><input v-model.number="recovery.budget_seconds" type="number" min="1" max="120" required class="input w-full" data-testid="recovery-budget" /></label>
+          </template>
+        </div>
+
         <!-- Response Behavior -->
         <div class="rounded-lg border border-gray-200 p-3 dark:border-dark-600">
           <h4 class="mb-2 text-sm font-medium text-gray-900 dark:text-white">
@@ -381,6 +415,7 @@
           <input
             type="checkbox"
             v-model="form.skip_monitoring"
+            :disabled="recovery.mode !== 'default'"
             class="h-3.5 w-3.5 rounded border-gray-300 text-yellow-600 focus:ring-yellow-500"
           />
           <span class="text-xs font-medium text-gray-700 dark:text-gray-300">
@@ -435,7 +470,7 @@ import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { CONCRETE_PLATFORM_OPTIONS } from '@/constants/platforms'
 import { adminAPI } from '@/api/admin'
-import type { ErrorPassthroughRule } from '@/api/admin/errorPassthrough'
+import type { ErrorPassthroughRule, ErrorRecoveryPolicy } from '@/api/admin/errorPassthrough'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
@@ -466,6 +501,11 @@ const deletingRule = ref<ErrorPassthroughRule | null>(null)
 // Form inputs for arrays
 const errorCodesInput = ref('')
 const keywordsInput = ref('')
+const recovery = reactive<ErrorRecoveryPolicy>({ mode: 'default', account_types: [], models: [], upstream_codes: [], same_account_retries: 1, account_switches: 1, budget_seconds: 10 })
+const recoveryAccountType = ref('')
+const recoveryCodes = ref('')
+const recoveryModels = ref('')
+const splitRecoveryList = (s: string) => s.split(/[\n,]/).map(v => v.trim()).filter(Boolean)
 
 const form = reactive({
   name: '',
@@ -508,6 +548,8 @@ const loadRules = async () => {
 }
 
 const resetForm = () => {
+  Object.assign(recovery, { mode: 'default', same_account_retries: 1, account_switches: 1, budget_seconds: 10 })
+  recoveryAccountType.value = ''; recoveryCodes.value = ''; recoveryModels.value = ''
   form.name = ''
   form.enabled = true
   form.priority = 0
@@ -531,6 +573,13 @@ const closeFormModal = () => {
 }
 
 const handleEdit = (rule: ErrorPassthroughRule) => {
+  resetForm()
+  if (rule.recovery_policy) {
+    Object.assign(recovery, rule.recovery_policy)
+    recoveryAccountType.value = rule.recovery_policy.account_types?.[0] || ''
+    recoveryCodes.value = (rule.recovery_policy.upstream_codes || []).join(', ')
+    recoveryModels.value = (rule.recovery_policy.models || []).join(', ')
+  }
   editingRule.value = rule
   form.name = rule.name
   form.enabled = rule.enabled
@@ -584,8 +633,22 @@ const handleSubmit = async () => {
   }
 
   submitting.value = true
+  if (recovery.mode !== 'default' && !splitRecoveryList(recoveryCodes.value).length) {
+    appStore.showError(t('admin.errorPassthrough.recovery.codesRequired'))
+    submitting.value = false
+    return
+  }
+  if (recovery.mode !== 'default') {
+    if (form.platforms.length !== 1 || form.platforms[0] !== 'openai') {
+      appStore.showError(t('admin.errorPassthrough.recovery.platformRequired'))
+      submitting.value = false
+      return
+    }
+    form.skip_monitoring = false
+  }
   try {
     const data = {
+      recovery_policy: { ...recovery, account_types: recoveryAccountType.value ? [recoveryAccountType.value] : [], models: splitRecoveryList(recoveryModels.value), upstream_codes: splitRecoveryList(recoveryCodes.value) },
       name: form.name.trim(),
       enabled: form.enabled,
       priority: form.priority,

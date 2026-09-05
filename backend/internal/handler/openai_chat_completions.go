@@ -119,6 +119,10 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 
 	if h.errorPassthroughService != nil {
 		service.BindErrorPassthroughService(c, h.errorPassthroughService)
+		defer func() {
+			service.WriteRecoveryBudgetError(c)
+			service.CloseErrorRecovery(c)
+		}()
 	}
 
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
@@ -162,6 +166,9 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 
 	for {
 		if failoverClientGone(c) {
+			return
+		}
+		if service.WriteRecoveryBudgetError(c) {
 			return
 		}
 		reqLog.Debug("openai_chat_completions.account_selecting", zap.Int("excluded_account_count", len(failedAccountIDs)))
@@ -311,6 +318,9 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 				}
 			})
 		}
+		if service.WriteRecoveryBudgetError(c) {
+			return
+		}
 		if err != nil {
 			if result != nil && result.ImageCount > 0 {
 				reqLog.Warn("openai_chat_completions.forward_partial_error_with_image_result",
@@ -332,6 +342,24 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						h.gatewayService.ObserveOpenAIAccountHealthFailure(c.Request.Context(), account, err)
 						h.handleFailoverExhausted(c, failoverErr, true)
 						return
+					}
+					if action := service.ApplyErrorRecovery(c, account, reqModel, failoverErr); action != service.ErrorRecoveryDefault {
+						switch action {
+						case service.ErrorRecoveryRetry:
+							continue
+						case service.ErrorRecoverySwitch:
+							if switchCount >= maxAccountSwitches {
+								service.WriteErrorRecoveryExhausted(c)
+								return
+							}
+							failedAccountIDs[account.ID] = struct{}{}
+							switchCount++
+							h.gatewayService.RecordOpenAIAccountSwitch()
+							continue
+						default:
+							service.WriteErrorRecoveryExhausted(c)
+							return
+						}
 					}
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, reqModel, false, nil), false, nil, err)

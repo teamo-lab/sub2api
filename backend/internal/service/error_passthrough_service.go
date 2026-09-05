@@ -165,7 +165,7 @@ func (s *ErrorPassthroughService) MatchRule(platform string, statusCode int, bod
 	var bodyLowerDone bool
 
 	for _, rule := range rules {
-		if !rule.Enabled {
+		if !rule.Enabled || (rule.RecoveryPolicy != nil && rule.RecoveryPolicy.Mode != "default") {
 			continue
 		}
 		if !s.platformMatchesCached(rule, lowerPlatform) {

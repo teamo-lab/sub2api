@@ -14,6 +14,7 @@ import (
 	"entgo.io/ent/schema/field"
 	"github.com/Wei-Shaw/sub2api/ent/errorpassthroughrule"
 	"github.com/Wei-Shaw/sub2api/ent/predicate"
+	"github.com/Wei-Shaw/sub2api/internal/model"
 )
 
 // ErrorPassthroughRuleUpdate is the builder for updating ErrorPassthroughRule entities.
@@ -32,6 +33,18 @@ func (_u *ErrorPassthroughRuleUpdate) Where(ps ...predicate.ErrorPassthroughRule
 // SetUpdatedAt sets the "updated_at" field.
 func (_u *ErrorPassthroughRuleUpdate) SetUpdatedAt(v time.Time) *ErrorPassthroughRuleUpdate {
 	_u.mutation.SetUpdatedAt(v)
+	return _u
+}
+
+// SetRecoveryPolicy sets the "recovery_policy" field.
+func (_u *ErrorPassthroughRuleUpdate) SetRecoveryPolicy(v *model.ErrorRecoveryPolicy) *ErrorPassthroughRuleUpdate {
+	_u.mutation.SetRecoveryPolicy(v)
+	return _u
+}
+
+// ClearRecoveryPolicy clears the value of the "recovery_policy" field.
+func (_u *ErrorPassthroughRuleUpdate) ClearRecoveryPolicy() *ErrorPassthroughRuleUpdate {
+	_u.mutation.ClearRecoveryPolicy()
 	return _u
 }
 
@@ -304,6 +317,11 @@ func (_u *ErrorPassthroughRuleUpdate) defaults() {
 
 // check runs all checks and user-defined validators on the builder.
 func (_u *ErrorPassthroughRuleUpdate) check() error {
+	if v, ok := _u.mutation.RecoveryPolicy(); ok {
+		if err := v.Validate(); err != nil {
+			return &ValidationError{Name: "recovery_policy", err: fmt.Errorf(`ent: validator failed for field "ErrorPassthroughRule.recovery_policy": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.Name(); ok {
 		if err := errorpassthroughrule.NameValidator(v); err != nil {
 			return &ValidationError{Name: "name", err: fmt.Errorf(`ent: validator failed for field "ErrorPassthroughRule.name": %w`, err)}
@@ -331,6 +349,12 @@ func (_u *ErrorPassthroughRuleUpdate) sqlSave(ctx context.Context) (_node int, e
 	}
 	if value, ok := _u.mutation.UpdatedAt(); ok {
 		_spec.SetField(errorpassthroughrule.FieldUpdatedAt, field.TypeTime, value)
+	}
+	if value, ok := _u.mutation.RecoveryPolicy(); ok {
+		_spec.SetField(errorpassthroughrule.FieldRecoveryPolicy, field.TypeJSON, value)
+	}
+	if _u.mutation.RecoveryPolicyCleared() {
+		_spec.ClearField(errorpassthroughrule.FieldRecoveryPolicy, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.Name(); ok {
 		_spec.SetField(errorpassthroughrule.FieldName, field.TypeString, value)
@@ -433,6 +457,18 @@ type ErrorPassthroughRuleUpdateOne struct {
 // SetUpdatedAt sets the "updated_at" field.
 func (_u *ErrorPassthroughRuleUpdateOne) SetUpdatedAt(v time.Time) *ErrorPassthroughRuleUpdateOne {
 	_u.mutation.SetUpdatedAt(v)
+	return _u
+}
+
+// SetRecoveryPolicy sets the "recovery_policy" field.
+func (_u *ErrorPassthroughRuleUpdateOne) SetRecoveryPolicy(v *model.ErrorRecoveryPolicy) *ErrorPassthroughRuleUpdateOne {
+	_u.mutation.SetRecoveryPolicy(v)
+	return _u
+}
+
+// ClearRecoveryPolicy clears the value of the "recovery_policy" field.
+func (_u *ErrorPassthroughRuleUpdateOne) ClearRecoveryPolicy() *ErrorPassthroughRuleUpdateOne {
+	_u.mutation.ClearRecoveryPolicy()
 	return _u
 }
 
@@ -718,6 +754,11 @@ func (_u *ErrorPassthroughRuleUpdateOne) defaults() {
 
 // check runs all checks and user-defined validators on the builder.
 func (_u *ErrorPassthroughRuleUpdateOne) check() error {
+	if v, ok := _u.mutation.RecoveryPolicy(); ok {
+		if err := v.Validate(); err != nil {
+			return &ValidationError{Name: "recovery_policy", err: fmt.Errorf(`ent: validator failed for field "ErrorPassthroughRule.recovery_policy": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.Name(); ok {
 		if err := errorpassthroughrule.NameValidator(v); err != nil {
 			return &ValidationError{Name: "name", err: fmt.Errorf(`ent: validator failed for field "ErrorPassthroughRule.name": %w`, err)}
@@ -762,6 +803,12 @@ func (_u *ErrorPassthroughRuleUpdateOne) sqlSave(ctx context.Context) (_node *Er
 	}
 	if value, ok := _u.mutation.UpdatedAt(); ok {
 		_spec.SetField(errorpassthroughrule.FieldUpdatedAt, field.TypeTime, value)
+	}
+	if value, ok := _u.mutation.RecoveryPolicy(); ok {
+		_spec.SetField(errorpassthroughrule.FieldRecoveryPolicy, field.TypeJSON, value)
+	}
+	if _u.mutation.RecoveryPolicyCleared() {
+		_spec.ClearField(errorpassthroughrule.FieldRecoveryPolicy, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.Name(); ok {
 		_spec.SetField(errorpassthroughrule.FieldName, field.TypeString, value)
