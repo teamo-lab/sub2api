@@ -53,6 +53,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/userplatformquota"
 	"github.com/Wei-Shaw/sub2api/ent/usersubscription"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
+	"github.com/Wei-Shaw/sub2api/internal/model"
 )
 
 const (
@@ -20763,6 +20764,7 @@ type ErrorPassthroughRuleMutation struct {
 	id                *int64
 	created_at        *time.Time
 	updated_at        *time.Time
+	recovery_policy   **model.ErrorRecoveryPolicy
 	name              *string
 	enabled           *bool
 	priority          *int
@@ -20955,6 +20957,55 @@ func (m *ErrorPassthroughRuleMutation) OldUpdatedAt(ctx context.Context) (v time
 // ResetUpdatedAt resets all changes to the "updated_at" field.
 func (m *ErrorPassthroughRuleMutation) ResetUpdatedAt() {
 	m.updated_at = nil
+}
+
+// SetRecoveryPolicy sets the "recovery_policy" field.
+func (m *ErrorPassthroughRuleMutation) SetRecoveryPolicy(mrp *model.ErrorRecoveryPolicy) {
+	m.recovery_policy = &mrp
+}
+
+// RecoveryPolicy returns the value of the "recovery_policy" field in the mutation.
+func (m *ErrorPassthroughRuleMutation) RecoveryPolicy() (r *model.ErrorRecoveryPolicy, exists bool) {
+	v := m.recovery_policy
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRecoveryPolicy returns the old "recovery_policy" field's value of the ErrorPassthroughRule entity.
+// If the ErrorPassthroughRule object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ErrorPassthroughRuleMutation) OldRecoveryPolicy(ctx context.Context) (v *model.ErrorRecoveryPolicy, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRecoveryPolicy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRecoveryPolicy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRecoveryPolicy: %w", err)
+	}
+	return oldValue.RecoveryPolicy, nil
+}
+
+// ClearRecoveryPolicy clears the value of the "recovery_policy" field.
+func (m *ErrorPassthroughRuleMutation) ClearRecoveryPolicy() {
+	m.recovery_policy = nil
+	m.clearedFields[errorpassthroughrule.FieldRecoveryPolicy] = struct{}{}
+}
+
+// RecoveryPolicyCleared returns if the "recovery_policy" field was cleared in this mutation.
+func (m *ErrorPassthroughRuleMutation) RecoveryPolicyCleared() bool {
+	_, ok := m.clearedFields[errorpassthroughrule.FieldRecoveryPolicy]
+	return ok
+}
+
+// ResetRecoveryPolicy resets all changes to the "recovery_policy" field.
+func (m *ErrorPassthroughRuleMutation) ResetRecoveryPolicy() {
+	m.recovery_policy = nil
+	delete(m.clearedFields, errorpassthroughrule.FieldRecoveryPolicy)
 }
 
 // SetName sets the "name" field.
@@ -21626,12 +21677,15 @@ func (m *ErrorPassthroughRuleMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *ErrorPassthroughRuleMutation) Fields() []string {
-	fields := make([]string, 0, 15)
+	fields := make([]string, 0, 16)
 	if m.created_at != nil {
 		fields = append(fields, errorpassthroughrule.FieldCreatedAt)
 	}
 	if m.updated_at != nil {
 		fields = append(fields, errorpassthroughrule.FieldUpdatedAt)
+	}
+	if m.recovery_policy != nil {
+		fields = append(fields, errorpassthroughrule.FieldRecoveryPolicy)
 	}
 	if m.name != nil {
 		fields = append(fields, errorpassthroughrule.FieldName)
@@ -21684,6 +21738,8 @@ func (m *ErrorPassthroughRuleMutation) Field(name string) (ent.Value, bool) {
 		return m.CreatedAt()
 	case errorpassthroughrule.FieldUpdatedAt:
 		return m.UpdatedAt()
+	case errorpassthroughrule.FieldRecoveryPolicy:
+		return m.RecoveryPolicy()
 	case errorpassthroughrule.FieldName:
 		return m.Name()
 	case errorpassthroughrule.FieldEnabled:
@@ -21723,6 +21779,8 @@ func (m *ErrorPassthroughRuleMutation) OldField(ctx context.Context, name string
 		return m.OldCreatedAt(ctx)
 	case errorpassthroughrule.FieldUpdatedAt:
 		return m.OldUpdatedAt(ctx)
+	case errorpassthroughrule.FieldRecoveryPolicy:
+		return m.OldRecoveryPolicy(ctx)
 	case errorpassthroughrule.FieldName:
 		return m.OldName(ctx)
 	case errorpassthroughrule.FieldEnabled:
@@ -21771,6 +21829,13 @@ func (m *ErrorPassthroughRuleMutation) SetField(name string, value ent.Value) er
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetUpdatedAt(v)
+		return nil
+	case errorpassthroughrule.FieldRecoveryPolicy:
+		v, ok := value.(*model.ErrorRecoveryPolicy)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRecoveryPolicy(v)
 		return nil
 	case errorpassthroughrule.FieldName:
 		v, ok := value.(string)
@@ -21920,6 +21985,9 @@ func (m *ErrorPassthroughRuleMutation) AddField(name string, value ent.Value) er
 // mutation.
 func (m *ErrorPassthroughRuleMutation) ClearedFields() []string {
 	var fields []string
+	if m.FieldCleared(errorpassthroughrule.FieldRecoveryPolicy) {
+		fields = append(fields, errorpassthroughrule.FieldRecoveryPolicy)
+	}
 	if m.FieldCleared(errorpassthroughrule.FieldErrorCodes) {
 		fields = append(fields, errorpassthroughrule.FieldErrorCodes)
 	}
@@ -21952,6 +22020,9 @@ func (m *ErrorPassthroughRuleMutation) FieldCleared(name string) bool {
 // error if the field is not defined in the schema.
 func (m *ErrorPassthroughRuleMutation) ClearField(name string) error {
 	switch name {
+	case errorpassthroughrule.FieldRecoveryPolicy:
+		m.ClearRecoveryPolicy()
+		return nil
 	case errorpassthroughrule.FieldErrorCodes:
 		m.ClearErrorCodes()
 		return nil
@@ -21983,6 +22054,9 @@ func (m *ErrorPassthroughRuleMutation) ResetField(name string) error {
 		return nil
 	case errorpassthroughrule.FieldUpdatedAt:
 		m.ResetUpdatedAt()
+		return nil
+	case errorpassthroughrule.FieldRecoveryPolicy:
+		m.ResetRecoveryPolicy()
 		return nil
 	case errorpassthroughrule.FieldName:
 		m.ResetName()

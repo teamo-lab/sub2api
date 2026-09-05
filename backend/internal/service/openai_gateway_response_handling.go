@@ -297,6 +297,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 					logger.LegacyPrintf("service.openai_gateway", "Client disconnected during streaming flush, continuing to drain upstream for billing")
 				} else {
 					clientOutputStarted = true
+					CompleteErrorRecovery(c)
 					lastDownstreamWriteAt = time.Now()
 				}
 			}
@@ -333,6 +334,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			return
 		}
 		clientOutputStarted = true
+		CompleteErrorRecovery(c)
 		lastDownstreamWriteAt = time.Now()
 	}
 
@@ -365,6 +367,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			return
 		}
 		clientOutputStarted = true
+		CompleteErrorRecovery(c)
 		lastDownstreamWriteAt = time.Now()
 	}
 	finalizeStream := func() (*openaiStreamingResult, error) {
@@ -779,6 +782,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 						logger.LegacyPrintf("service.openai_gateway", "Client disconnected during streaming flush, continuing to drain upstream for billing")
 					} else {
 						clientOutputStarted = true
+						CompleteErrorRecovery(c)
 						lastDownstreamWriteAt = time.Now()
 					}
 				}

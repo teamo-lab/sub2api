@@ -57,6 +57,9 @@ func (r *errorPassthroughRepository) Create(ctx context.Context, rule *model.Err
 		SetPassthroughBody(rule.PassthroughBody).
 		SetSkipMonitoring(rule.SkipMonitoring)
 
+	if rule.RecoveryPolicy != nil {
+		builder.SetRecoveryPolicy(rule.RecoveryPolicy)
+	}
 	if len(rule.ErrorCodes) > 0 {
 		builder.SetErrorCodes(rule.ErrorCodes)
 	}
@@ -95,6 +98,11 @@ func (r *errorPassthroughRepository) Update(ctx context.Context, rule *model.Err
 		SetSkipMonitoring(rule.SkipMonitoring)
 
 	// 处理可选字段
+	if rule.RecoveryPolicy != nil {
+		builder.SetRecoveryPolicy(rule.RecoveryPolicy)
+	} else {
+		builder.ClearRecoveryPolicy()
+	}
 	if len(rule.ErrorCodes) > 0 {
 		builder.SetErrorCodes(rule.ErrorCodes)
 	} else {
@@ -141,6 +149,7 @@ func (r *errorPassthroughRepository) Delete(ctx context.Context, id int64) error
 // toModel 将 Ent 实体转换为服务模型
 func (r *errorPassthroughRepository) toModel(e *ent.ErrorPassthroughRule) *model.ErrorPassthroughRule {
 	rule := &model.ErrorPassthroughRule{
+		RecoveryPolicy:  e.RecoveryPolicy,
 		ID:              int64(e.ID),
 		Name:            e.Name,
 		Enabled:         e.Enabled,
