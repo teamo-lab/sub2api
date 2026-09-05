@@ -351,7 +351,9 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	if account.Proxy != nil {
 		proxyURL = account.Proxy.URL()
 	}
+	upstreamStartedAt := time.Now()
 	resp, err := s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+	SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStartedAt).Milliseconds())
 	if err != nil {
 		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)
 	}
