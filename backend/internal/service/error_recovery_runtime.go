@@ -195,6 +195,13 @@ func WriteRecoveryBudgetError(c *gin.Context) bool {
 	WriteErrorRecoveryExhausted(c)
 	return true
 }
+func WriteActiveErrorRecovery(c *gin.Context) bool {
+	if recoveryState(c) == nil {
+		return false
+	}
+	WriteErrorRecoveryExhausted(c)
+	return true
+}
 func WriteErrorRecoveryExhausted(c *gin.Context) {
 	s := recoveryState(c)
 	if s == nil || s.parent.Err() != nil || s.written {

@@ -85,6 +85,9 @@ func newOpenAIResponsesFailoverTestHandler(t *testing.T, upstream service.HTTPUp
 		}
 	}
 	cfg := &config.Config{RunMode: config.RunModeSimple}
+	if len(accountTypes) > 1 && accountTypes[1] == "single" {
+		accountRepo.accounts = accountRepo.accounts[:1]
+	}
 	gatewayService := service.NewOpenAIGatewayService(
 		accountRepo,
 		nil,

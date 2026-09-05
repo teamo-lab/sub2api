@@ -668,6 +668,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				h.handleStreamingAwareError(c, cls.Status, cls.ErrType, cls.Message, streamStarted)
 				return
 			}
+			if service.WriteActiveErrorRecovery(c) {
+				return
+			}
 			if lastFailoverErr != nil {
 				h.handleFailoverExhausted(c, lastFailoverErr, streamStarted)
 			} else {
@@ -855,6 +858,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 						case service.ErrorRecoveryRetry:
 							continue
 						case service.ErrorRecoverySwitch:
+							lastFailoverErr = failoverErr
 							if switchCount >= maxAccountSwitches {
 								service.WriteErrorRecoveryExhausted(c)
 								return
@@ -1298,6 +1302,9 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 					return
 				}
 			} else {
+				if service.WriteActiveErrorRecovery(c) {
+					return
+				}
 				if lastFailoverErr != nil {
 					h.handleAnthropicFailoverExhausted(c, lastFailoverErr, streamStarted)
 				} else {
@@ -1444,6 +1451,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 						case service.ErrorRecoveryRetry:
 							continue
 						case service.ErrorRecoverySwitch:
+							lastFailoverErr = failoverErr
 							if switchCount >= maxAccountSwitches {
 								service.WriteErrorRecoveryExhausted(c)
 								return

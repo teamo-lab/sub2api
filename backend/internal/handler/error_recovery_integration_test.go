@@ -79,3 +79,15 @@ func TestErrorRecoveryHandlerAttemptsAndDeadline(t *testing.T) {
 		})
 	}
 }
+
+func TestErrorRecoveryHandlerNoNextAccountPreservesError(t *testing.T) {
+	u := &recoveryUpstream{}
+	h := newOpenAIResponsesFailoverTestHandler(t, u, "apikey", "single")
+	rule := &model.ErrorPassthroughRule{ID: 9, Enabled: true, Name: "test", MatchMode: "all", Platforms: []string{"openai"}, ErrorCodes: []int{503}, PassthroughCode: true, PassthroughBody: true, RecoveryPolicy: &model.ErrorRecoveryPolicy{Mode: "limited", AccountTypes: []string{"apikey"}, UpstreamCodes: []string{"server_is_overloaded"}, SameAccountRetries: 0, AccountSwitches: 1, BudgetSeconds: 10}}
+	h.errorPassthroughService = service.NewErrorPassthroughService(recoveryRuleRepo{rule: rule}, nil)
+	c, w := newOpenAIResponsesFailoverTestContext(t, nil)
+	h.Responses(c)
+	require.Equal(t, []int64{1}, u.calls)
+	require.Equal(t, 503, w.Code)
+	require.Equal(t, "server_is_overloaded", gjson.GetBytes(w.Body.Bytes(), "error.code").String())
+}

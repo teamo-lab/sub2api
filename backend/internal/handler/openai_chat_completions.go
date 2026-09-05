@@ -204,6 +204,9 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 				h.handleStreamingAwareError(c, cls.Status, cls.ErrType, cls.Message, streamStarted)
 				return
 			} else {
+				if service.WriteActiveErrorRecovery(c) {
+					return
+				}
 				if lastFailoverErr != nil {
 					h.handleFailoverExhausted(c, lastFailoverErr, streamStarted)
 				} else {
@@ -348,6 +351,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						case service.ErrorRecoveryRetry:
 							continue
 						case service.ErrorRecoverySwitch:
+							lastFailoverErr = failoverErr
 							if switchCount >= maxAccountSwitches {
 								service.WriteErrorRecoveryExhausted(c)
 								return
