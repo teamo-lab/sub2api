@@ -1098,6 +1098,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				)
 				continue
 			}
+			if rejected := newOpenAIContentAuditRejection(c, account, upstreamModel, resp.StatusCode, respBody); rejected != nil {
+				return nil, rejected
+			}
 			if s.shouldFailoverOpenAIUpstreamResponse(resp.StatusCode, upstreamMsg, respBody) {
 				upstreamDetail := ""
 				if s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {

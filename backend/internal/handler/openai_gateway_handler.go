@@ -1548,6 +1548,10 @@ func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, 
 	if failoverErr != nil {
 		copyFailoverRetryAfter(c, failoverErr.ResponseHeaders)
 	}
+	if failoverErr != nil && failoverErr.Reason == service.OpenAIContentAuditRejectedReason {
+		h.anthropicStreamingAwareError(c, http.StatusForbidden, "permission_error", failoverErr.ClientMessage, streamStarted)
+		return
+	}
 	if failoverErr != nil && failoverErr.IsCredentialFailure() {
 		status, message := credentialFailoverClientResponse(failoverErr)
 		h.anthropicStreamingAwareError(c, status, "api_error", message, streamStarted)
@@ -3195,6 +3199,16 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 		h.handleFailoverExhaustedSimple(c, http.StatusBadGateway, streamStarted)
 		return
 	}
+	if failoverErr.Reason == service.OpenAIContentAuditRejectedReason {
+		service.SetOpsUpstreamError(c, http.StatusForbidden, failoverErr.ClientMessage, "")
+		if !streamStarted && !c.Writer.Written() && gjson.GetBytes(failoverErr.ResponseBody, "error").IsObject() {
+			service.MarkResponseCommitted(c)
+			c.Data(http.StatusForbidden, "application/json", failoverErr.ResponseBody)
+		} else {
+			h.handleStreamingAwareError(c, http.StatusForbidden, "permission_error", failoverErr.ClientMessage, streamStarted)
+		}
+		return
+	}
 	if failoverErr.IsOpenAIRequestBodyTooLarge() {
 		service.SetOpsUpstreamError(c, http.StatusRequestEntityTooLarge, service.OpenAIRequestBodyTooLargeClientMessage, "")
 		h.handleStreamingAwareError(
@@ -3647,6 +3661,12 @@ func closeOpenAIWSFailoverExhausted(c *gin.Context, conn *coderws.Conn, failover
 		}
 	}
 
+	if failoverErr != nil && failoverErr.Reason == service.OpenAIContentAuditRejectedReason {
+		intendedStatus = http.StatusForbidden
+		errorType = "permission_error"
+		message = failoverErr.ClientMessage
+		closeStatus = coderws.StatusPolicyViolation
+	}
 	service.MarkOpsStreamFailure(c, errorType, errorCode, message, intendedStatus)
 	closeOpenAIClientWS(conn, closeStatus, message)
 }

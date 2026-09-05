@@ -2454,6 +2454,10 @@ func (s *OpenAIGatewayService) ObserveOpenAIAccountHealthFailure(ctx context.Con
 	if s == nil || s.rateLimitService == nil || account == nil || observedErr == nil {
 		return false
 	}
+	var terminal *UpstreamFailoverError
+	if errors.As(observedErr, &terminal) && terminal.Reason == OpenAIContentAuditRejectedReason {
+		return false
+	}
 	return s.rateLimitService.ObserveOpenAIAPIKeyHealthFailure(ctx, account, observedErr)
 }
 

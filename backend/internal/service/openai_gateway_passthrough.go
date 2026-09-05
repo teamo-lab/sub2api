@@ -423,6 +423,9 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 			// 透传模式默认保持原样代理；容量错误以及 API-key 上游的瞬时
 			// 5xx 应先触发多账号 failover，且此时尚未写入下游响应。
 			// probeBody 已在上方任务探测时读取过一次，直接复用避免重复读取。
+			if rejected := newOpenAIContentAuditRejection(c, account, reqModel, resp.StatusCode, probeBody); rejected != nil {
+				return nil, rejected
+			}
 			if shouldFailoverOpenAIPassthroughResponse(account, resp.StatusCode, probeBody) {
 				return nil, s.handleFailoverErrorResponsePassthrough(ctx, resp, c, account, body, probeBody)
 			}
@@ -1605,6 +1608,9 @@ func (s *OpenAIGatewayService) handleOpenAIStreamTerminalAccountSideEffects(
 	canonicalModel ...string,
 ) (int, bool) {
 	statusCode := openAIStreamFailureStatus(payload, message)
+	if isOpenAIGPTContentAuditRejection(account, firstNonEmpty(canonicalModel...), statusCode, payload) {
+		return statusCode, false
+	}
 	switch statusCode {
 	case http.StatusForbidden:
 		if !openAIStream403AccountFailure(payload, message) {
@@ -1723,6 +1729,9 @@ func (s *OpenAIGatewayService) newOpenAIStreamFailoverErrorWithModel(
 	var headers http.Header
 	if len(responseHeaders) > 0 && responseHeaders[0] != nil {
 		headers = responseHeaders[0].Clone()
+	}
+	if rejected := newOpenAIContentAuditRejection(c, account, canonicalModel, openAIStreamFailureStatus(payload, message), payload); rejected != nil {
+		return rejected
 	}
 	statusCode, shouldDisable := s.handleOpenAIStreamTerminalAccountSideEffects(c, account, payload, message, headers, canonicalModel)
 	// 流内 failed 事件承载于 HTTP 200；使用事件的语义状态更新账号健康，
