@@ -20,7 +20,7 @@ fail() {
 rule_exists() {
   local comment="$1"
   shift
-  iptables -t nat -C PREROUTING "$@" -m comment --comment "$comment" -j REDIRECT --to-ports "$entry_port" >/dev/null 2>&1
+  iptables -t nat -C PREROUTING "$@" -m addrtype --dst-type LOCAL -m comment --comment "$comment" -j REDIRECT --to-ports "$entry_port" >/dev/null 2>&1
 }
 
 legacy_healthy() {
@@ -55,7 +55,7 @@ remove_test_rules() {
       || fail unsafe_test_rule 'A test redirect has an unexpected source format.'
     while rule_exists "$test_comment" -s "$test_source" -p tcp --dport "$public_port" -m conntrack --ctstate NEW; do
       iptables -t nat -D PREROUTING -s "$test_source" -p tcp --dport "$public_port" -m conntrack --ctstate NEW \
-        -m comment --comment "$test_comment" -j REDIRECT --to-ports "$entry_port"
+        -m addrtype --dst-type LOCAL -m comment --comment "$test_comment" -j REDIRECT --to-ports "$entry_port"
     done
   done < <(test_rule_sources)
 }
@@ -77,7 +77,7 @@ case "$action" in
     haproxy_healthy || fail haproxy_unhealthy 'HAProxy entry is not healthy.'
     if ! rule_exists "$test_comment" -s "$source_ip" -p tcp --dport "$public_port" -m conntrack --ctstate NEW; then
       iptables -t nat -I PREROUTING 1 -s "$source_ip" -p tcp --dport "$public_port" -m conntrack --ctstate NEW \
-        -m comment --comment "$test_comment" -j REDIRECT --to-ports "$entry_port"
+        -m addrtype --dst-type LOCAL -m comment --comment "$test_comment" -j REDIRECT --to-ports "$entry_port"
     fi
     printf '{"ok":true,"action":"test","source":"%s","haproxy_entry_active":false}\n' "$source_ip"
     ;;
@@ -86,7 +86,7 @@ case "$action" in
     haproxy_healthy || fail haproxy_unhealthy 'HAProxy entry is not healthy.'
     if ! rule_exists "$general_comment" -p tcp --dport "$public_port" -m conntrack --ctstate NEW; then
       iptables -t nat -I PREROUTING 1 -p tcp --dport "$public_port" -m conntrack --ctstate NEW \
-        -m comment --comment "$general_comment" -j REDIRECT --to-ports "$entry_port"
+        -m addrtype --dst-type LOCAL -m comment --comment "$general_comment" -j REDIRECT --to-ports "$entry_port"
     fi
     printf '{"ok":true,"action":"activate","haproxy_entry_active":true,"legacy_fallback_available":true}\n'
     ;;
@@ -94,12 +94,12 @@ case "$action" in
     legacy_healthy || fail legacy_unhealthy 'Legacy fallback is not healthy; entry was not changed.'
     while rule_exists "$general_comment" -p tcp --dport "$public_port" -m conntrack --ctstate NEW; do
       iptables -t nat -D PREROUTING -p tcp --dport "$public_port" -m conntrack --ctstate NEW \
-        -m comment --comment "$general_comment" -j REDIRECT --to-ports "$entry_port"
+        -m addrtype --dst-type LOCAL -m comment --comment "$general_comment" -j REDIRECT --to-ports "$entry_port"
     done
     if [[ -n "$source_ip" ]]; then
       while rule_exists "$test_comment" -s "$source_ip" -p tcp --dport "$public_port" -m conntrack --ctstate NEW; do
         iptables -t nat -D PREROUTING -s "$source_ip" -p tcp --dport "$public_port" -m conntrack --ctstate NEW \
-          -m comment --comment "$test_comment" -j REDIRECT --to-ports "$entry_port"
+          -m addrtype --dst-type LOCAL -m comment --comment "$test_comment" -j REDIRECT --to-ports "$entry_port"
       done
     else
       remove_test_rules
@@ -110,7 +110,7 @@ case "$action" in
     final_haproxy_healthy || fail final_haproxy_unhealthy 'Final HAProxy entry is not healthy.'
     while rule_exists "$general_comment" -p tcp --dport "$public_port" -m conntrack --ctstate NEW; do
       iptables -t nat -D PREROUTING -p tcp --dport "$public_port" -m conntrack --ctstate NEW \
-        -m comment --comment "$general_comment" -j REDIRECT --to-ports "$entry_port"
+        -m addrtype --dst-type LOCAL -m comment --comment "$general_comment" -j REDIRECT --to-ports "$entry_port"
     done
     remove_test_rules
     printf '{"ok":true,"action":"finalize","haproxy_entry_active":false,"final_entry_active":true}\n'
@@ -119,7 +119,7 @@ case "$action" in
     haproxy_healthy || fail haproxy_unhealthy 'Temporary HAProxy entry is not healthy.'
     if ! rule_exists "$general_comment" -p tcp --dport "$public_port" -m conntrack --ctstate NEW; then
       iptables -t nat -I PREROUTING 1 -p tcp --dport "$public_port" -m conntrack --ctstate NEW \
-        -m comment --comment "$general_comment" -j REDIRECT --to-ports "$entry_port"
+        -m addrtype --dst-type LOCAL -m comment --comment "$general_comment" -j REDIRECT --to-ports "$entry_port"
     fi
     printf '{"ok":true,"action":"restore-proxy","haproxy_entry_active":true}\n'
     ;;

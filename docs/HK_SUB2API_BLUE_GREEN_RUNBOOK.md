@@ -22,6 +22,8 @@ export SUB2API_CLOUD_REMOTE_DIR=/opt/sub2api/deploy
 
 发布代码必须已提交并有 tag 指向 HEAD。
 
+涉及101和43时，先取得一个覆盖整轮双机发布的 fleet release lease。两台严格串行：101完成并观察一个完整5分钟窗口后，才能开始43。任何其他任务发现lease已占用时只能只读。
+
 ```bash
 ~/.codex/skills/sub2api-rollout/scripts/sub2api-release stage \
   /absolute/repo/path <release-id> <version>
@@ -80,3 +82,32 @@ entry-test、activate、finalize。bootstrap镜像必须支持api/worker进程�
 
 日常stage/canary/promote-fast/worker/complete和一键回滚仍与101共用同一套控制器。
 双机同步版本应传输同一个不可变镜像，并核对两台API、worker的image ID和编译commit；不要各自构建后仅比较版本名。
+
+## 跨机鉴权门禁
+
+43依赖101的生产API Key。发布前记录43生产账号、101 API-key ID、Key指纹、Base URL、group、model mapping和账号状态，禁止记录Key本体。
+
+在101候选0%、10%、100%，以及43候选0%、10%、100%和公网入口接管后，都必须从43实际服务容器的网络命名空间使用原生产Key验证：
+
+- 101私网与公网 `/v1/models` 返回200；
+- `/v1/responses` 的 `gpt-reserve` 和实际生产模型返回200；
+- SSE必须出现 `response.completed`；
+- 43对应账号保持 `active + schedulable`，并发、priority、Base URL不漂移；
+- 对应阶段开始后的新增上游401为0。
+
+mock上游、管理后台测试连接、单机curl、health和功能单测均不能替代这组门禁。后台测试连接可能改变账号状态，只用于诊断。
+
+任意一次401或 `INVALID_API_KEY` 立即停止双机发布：先执行43的 `entry-switch rollback` 恢复legacy新连接，再按101 controller的 `rollback_target_slot` 回滚。已有长连接自然排空。禁止用 `restore-proxy` 冒充恢复legacy，禁止在事故中换Key、刷新凭据或重建账号。
+
+43 的入口 NAT 规则必须包含 `-m addrtype --dst-type LOCAL`。缺少该条件时，容器访问其他主机的
+目的端口80流量也会命中 PREROUTING `REDIRECT`，例如 `172.19.16.3:80` 会被错误送回43本机，
+导致101的上游Key在43鉴权并返回 `INVALID_API_KEY`。安装或升级入口脚本后，必须同时验证公网请求
+进入蓝绿槽、容器访问101仍到达101的deployment slot。
+
+## 发布并发与singleton
+
+- 一轮发布只能有一个task owner；从首个stage到两台最终验证期间不得释放lease。
+- 首次接管时，legacy存活期间唯一singleton owner是legacy，worker必须停止。
+- 只有入口已接管、legacy连接排空、真实鉴权门禁通过后，才停止legacy并启动唯一worker。
+- 每次worker动作后必须列出所有all/worker角色，确认只有一个singleton owner。
+- 任何阶段发现另一个任务正在写、controller状态与公网slot不一致或双worker，立即停止并恢复上一已验证状态。
