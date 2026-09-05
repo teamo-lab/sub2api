@@ -319,6 +319,7 @@ const (
 	configuredCodexGrokContext         = 500_000
 	configuredCodexGrokBuildContext    = 256_000
 	configuredCodexGPT56MaxContext     = 872_000
+	configuredCodexGPT6AstraContext    = 1_050_000
 	configuredCodexToolOutputMaxTokens = 10_000
 )
 
@@ -477,15 +478,7 @@ func newConfiguredCodexModelDescriptor(modelID string) configuredCodexModelDescr
 		descriptor.DisplayName = openaiCodexDisplayName(modelID)
 		descriptor.Description = "OpenAI GPT coding model routed through Sub2API."
 		descriptor.SupportsParallelToolCalls = true
-		if configuredCodexSupportsPriorityServiceTier(modelID) {
-			descriptor.ServiceTiers = []configuredCodexServiceTier{
-				{
-					ID:          "priority",
-					Name:        "Fast",
-					Description: "Priority processing for lower latency.",
-				},
-			}
-		}
+		descriptor.ServiceTiers = configuredCodexServiceTiersForModel(modelID)
 		if isOpenAICodexReasoningGPTModel(modelID) {
 			defaultReasoningLevel := "medium"
 			if getNormalizedCodexModel(modelID) == "gpt-5.6-sol" {
@@ -498,6 +491,10 @@ func newConfiguredCodexModelDescriptor(modelID string) configuredCodexModelDescr
 			if isOpenAIGPT56Model(modelID) {
 				descriptor.MaxContextWindow = configuredCodexGPT56MaxContext
 			}
+			if isOpenAIGPT6AstraModel(modelID) {
+				descriptor.ContextWindow = configuredCodexGPT6AstraContext
+				descriptor.MaxContextWindow = configuredCodexGPT6AstraContext
+			}
 		}
 		if SupportsVerbosity(modelID) {
 			defaultVerbosity := "low"
@@ -509,6 +506,25 @@ func newConfiguredCodexModelDescriptor(modelID string) configuredCodexModelDescr
 	return descriptor
 }
 
+func configuredCodexServiceTiersForModel(modelID string) []configuredCodexServiceTier {
+	tiers := make([]configuredCodexServiceTier, 0, 2)
+	if configuredCodexSupportsPriorityServiceTier(modelID) {
+		tiers = append(tiers, configuredCodexServiceTier{
+			ID:          OpenAIFastTierPriority,
+			Name:        "Fast",
+			Description: "Priority processing for lower latency.",
+		})
+	}
+	if configuredCodexSupportsUltrafastServiceTier(modelID) {
+		tiers = append(tiers, configuredCodexServiceTier{
+			ID:          OpenAIFastTierUltrafast,
+			Name:        "Ultrafast",
+			Description: "Ultra-low latency processing.",
+		})
+	}
+	return tiers
+}
+
 func configuredCodexSupportsPriorityServiceTier(modelID string) bool {
 	normalized := canonicalizeOpenAIModelAliasSpelling(modelID)
 	for _, family := range []string{"gpt-5.4", "gpt-5.5", "gpt-5.6"} {
@@ -516,7 +532,12 @@ func configuredCodexSupportsPriorityServiceTier(modelID string) bool {
 			return true
 		}
 	}
-	return false
+	// GPT-6 Astra advertises Fast via service_tier=priority in public model metadata.
+	return isOpenAIGPT6AstraModel(modelID)
+}
+
+func configuredCodexSupportsUltrafastServiceTier(modelID string) bool {
+	return normalizeKnownOpenAICodexModel(modelID) == "gpt-5.6-sol"
 }
 
 func configuredCodexGrokReasoningLevels(modelID string) []configuredCodexReasoningLevel {
@@ -575,7 +596,7 @@ func configuredCodexGPTReasoningLevels(modelID string) []configuredCodexReasonin
 		{Effort: "xhigh", Description: "Extra-high reasoning depth for difficult tasks"},
 	}
 	normalized := getNormalizedCodexModel(modelID)
-	if isOpenAIGPT56Model(modelID) {
+	if isOpenAIGPT56Model(modelID) || isOpenAIGPT6AstraModel(modelID) {
 		levels = append(levels, configuredCodexReasoningLevel{
 			Effort:      "max",
 			Description: "Maximum reasoning depth for complex tasks",
@@ -600,12 +621,13 @@ func isOpenAICodexGPTModel(modelID string) bool {
 
 func isOpenAICodexReasoningGPTModel(modelID string) bool {
 	normalized := canonicalizeOpenAIModelAliasSpelling(modelID)
-	return strings.HasPrefix(normalized, "gpt-5")
+	return isOpenAIGPT6AstraModel(normalized) || strings.HasPrefix(normalized, "gpt-5")
 }
 
 func isOpenAICodexImageInputModel(modelID string) bool {
 	normalized := canonicalizeOpenAIModelAliasSpelling(modelID)
-	return strings.HasPrefix(normalized, "gpt-5") ||
+	return isOpenAIGPT6AstraModel(normalized) ||
+		strings.HasPrefix(normalized, "gpt-5") ||
 		strings.HasPrefix(normalized, "gpt-4o") ||
 		strings.HasPrefix(normalized, "gpt-4.1") ||
 		strings.HasPrefix(normalized, "gpt-4.5") ||
@@ -847,7 +869,7 @@ func buildCodexModelsManifest(
 	modelMetadata map[string]codexModelMetadataOverride,
 ) ([]byte, error) {
 	seen := make(map[string]struct{}, len(modelIDs))
-	models := make([]configuredCodexModelDescriptor, 0, len(modelIDs))
+	models := make([]json.RawMessage, 0, len(modelIDs))
 	for _, modelID := range modelIDs {
 		modelID = strings.TrimSpace(modelID)
 		if modelID == "" {
@@ -877,10 +899,25 @@ func buildCodexModelsManifest(
 			descriptor.DisplayName = modelID
 			descriptor.Description = configuredCodexCustomDescription
 		}
-		models = append(models, descriptor)
+		encoded, err := json.Marshal(descriptor)
+		if err != nil {
+			return nil, err
+		}
+		if capabilities := modelMetadata[modelID].CodexToolCapabilities; len(capabilities) > 0 {
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(encoded, &fields); err != nil {
+				return nil, err
+			}
+			applyCodexToolCapabilities(fields, capabilities, true)
+			encoded, err = json.Marshal(fields)
+			if err != nil {
+				return nil, err
+			}
+		}
+		models = append(models, encoded)
 	}
 	return json.Marshal(struct {
-		Models []configuredCodexModelDescriptor `json:"models"`
+		Models []json.RawMessage `json:"models"`
 	}{Models: models})
 }
 
@@ -1872,7 +1909,7 @@ func (s *OpenAIGatewayService) fetchCodexModelsManifestUpstream(ctx context.Cont
 				retryable: true,
 			}
 		}
-		body, err = adjustAPIKeyCodexModelsManifest(body)
+		body, err = adjustAPIKeyCodexModelsManifest(body, request.credentialAccount)
 		if err != nil {
 			return nil, &codexModelsManifestUpstreamError{
 				err: infraerrors.Newf(
@@ -1911,6 +1948,7 @@ func CodexModelsManifestETag(body []byte) string {
 }
 
 var apiKeyCodexModelsWithoutResponsesLite = map[string]struct{}{
+	"gpt-6-astra":   {},
 	"gpt-5.6-sol":   {},
 	"gpt-5.6-terra": {},
 	"gpt-5.6-luna":  {},
@@ -1920,7 +1958,7 @@ var apiKeyCodexModelsWithoutResponsesLite = map[string]struct{}{
 // Lite for custom API key providers. Those clients do not install web.run in
 // Lite mode, so the affected model manifests must advertise the full Responses
 // path. Return the original body when no targeted true value is present.
-func adjustAPIKeyCodexModelsManifest(body []byte) ([]byte, error) {
+func adjustAPIKeyCodexModelsManifest(body []byte, account *Account) ([]byte, error) {
 	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal(body, &envelope); err != nil {
 		return nil, fmt.Errorf("decode JSON object: %w", err)
@@ -1940,7 +1978,14 @@ func adjustAPIKeyCodexModelsManifest(body []byte) ([]byte, error) {
 		if err := json.Unmarshal(model["slug"], &slug); err != nil {
 			continue
 		}
-		if _, targeted := apiKeyCodexModelsWithoutResponsesLite[slug]; !targeted {
+		target := slug
+		if account != nil {
+			target = account.GetMappedModel(slug)
+		}
+		if isOpenAIGPT6AstraModel(target) {
+			target = "gpt-6-astra"
+		}
+		if _, targeted := apiKeyCodexModelsWithoutResponsesLite[target]; !targeted {
 			continue
 		}
 		var useResponsesLite bool
@@ -1993,19 +2038,33 @@ func convertOpenAIModelListToCodexManifestForAccount(body []byte, account *Accou
 	if !ok {
 		return body
 	}
-	var entries []struct {
-		ID string `json:"id"`
-	}
+	var entries []map[string]json.RawMessage
 	if err := json.Unmarshal(data, &entries); err != nil {
 		return body
 	}
 	modelIDs := make([]string, 0, len(entries))
+	modelMetadata := make(map[string]codexModelMetadataOverride, len(entries))
+	metadataModels := make(map[string]string, len(entries))
 	for _, entry := range entries {
-		id := strings.TrimSpace(entry.ID)
+		var id string
+		if err := json.Unmarshal(entry["id"], &id); err != nil {
+			continue
+		}
+		id = strings.TrimSpace(id)
 		if id == "" {
 			continue
 		}
 		modelIDs = append(modelIDs, id)
+		capabilityModel := id
+		if account != nil {
+			capabilityModel = account.GetMappedModel(id)
+		}
+		metadataModels[id] = capabilityModel
+		capabilities := accountCodexToolCapabilities(account, capabilityModel)
+		applyCodexToolCapabilities(capabilities, entry, true)
+		modelMetadata[id] = codexModelMetadataOverride{UpstreamModelMetadata: UpstreamModelMetadata{
+			CodexToolCapabilities: capabilities,
+		}}
 	}
 	if len(modelIDs) == 0 {
 		return body
@@ -2022,7 +2081,7 @@ func convertOpenAIModelListToCodexManifestForAccount(body []byte, account *Accou
 			searchToolModels[modelID] = true
 		}
 	}
-	converted, err := buildCodexModelsManifest(modelIDs, imageInputModels, searchToolModels, nil, nil)
+	converted, err := buildCodexModelsManifest(modelIDs, imageInputModels, searchToolModels, metadataModels, modelMetadata)
 	if err != nil {
 		return body
 	}
@@ -2059,7 +2118,7 @@ func (s *OpenAIGatewayService) CompleteAPIKeyCodexModelsManifestForClient(manife
 	if err != nil {
 		return err
 	}
-	body, err = adjustAPIKeyCodexModelsManifest(body)
+	body, err = adjustAPIKeyCodexModelsManifest(body, account)
 	if err != nil {
 		return err
 	}
@@ -2094,9 +2153,14 @@ func applySyncedAPIKeyCodexModelMetadata(body []byte, account *Account, overwrit
 			continue
 		}
 		slug = strings.TrimSpace(slug)
-		metadata, ok := snapshot.Models[slug]
+		lookupModel := account.GetMappedModel(slug)
+		metadata, ok := snapshot.Models[lookupModel]
 		if !ok {
 			continue
+		}
+		if lookupModel != slug {
+			metadata.DisplayName = ""
+			metadata.Description = ""
 		}
 
 		descriptor := newConfiguredCodexModelDescriptor(slug)
@@ -2130,7 +2194,8 @@ func applySyncedAPIKeyCodexModelMetadata(body []byte, account *Account, overwrit
 			fields = append(fields, "context_window", "max_context_window")
 		}
 
-		modelChanged := false
+		// List conversion has already applied live fields over account capabilities.
+		modelChanged := applyCodexToolCapabilities(model, metadata.CodexToolCapabilities, false)
 		for _, field := range fields {
 			value, exists := syncedFields[field]
 			if !exists {
@@ -2241,13 +2306,18 @@ func completeAPIKeyCodexModelsManifestMetadata(body []byte, completeAll bool, ac
 			return nil, fmt.Errorf("decode default model %q: %w", slug, err)
 		}
 
-		modelChanged := false
+		capabilityModel := slug
+		if account != nil {
+			capabilityModel = account.GetMappedModel(slug)
+		}
+		capabilities := accountCodexToolCapabilities(account, capabilityModel)
+		modelChanged := applyCodexToolCapabilities(model, capabilities, false)
 		if completeDescriptor {
 			merged, err := mergeMissingCodexModelFields(model, defaults)
 			if err != nil {
 				return nil, fmt.Errorf("complete model %q: %w", slug, err)
 			}
-			modelChanged = merged
+			modelChanged = merged || modelChanged
 		}
 		if forceOfficialImage {
 			modalities, err := json.Marshal([]string{"text", "image"})
@@ -2294,6 +2364,9 @@ func mergeMissingCodexModelFields(current, defaults map[string]json.RawMessage) 
 	changed := false
 	for key, defaultValue := range defaults {
 		currentValue, exists := current[key]
+		if exists && stringSliceContains(codexToolCapabilityFields, key) {
+			continue
+		}
 		if !exists || (bytes.Equal(bytes.TrimSpace(currentValue), []byte("null")) &&
 			!bytes.Equal(bytes.TrimSpace(defaultValue), []byte("null"))) {
 			current[key] = defaultValue
