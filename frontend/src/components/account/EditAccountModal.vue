@@ -1543,6 +1543,8 @@
         <ProxySelector v-model="form.proxy_id" :proxies="proxies" />
       </div>
 
+      <ProCooldownPolicySection v-if="showProCooldownPolicy" v-model="proCooldownPolicy" />
+
       <UpstreamRequestIdHeaderField
         v-model="upstreamRequestIdHeader"
         :platform="account.platform"
@@ -2934,6 +2936,8 @@ import type {
   OllamaCloudUsageState
 } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
+import ProCooldownPolicySection from '@/components/account/ProCooldownPolicySection.vue'
+import { readCooldownPolicy, validateCooldownPolicy } from '@/utils/proCooldownPolicy'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Select from '@/components/common/Select.vue'
 import HelpTooltip from '@/components/common/HelpTooltip.vue'
@@ -3741,6 +3745,9 @@ const applyOpenAIModelMappingCredentials = (credentials: Record<string, unknown>
   }
 }
 
+const proCooldownPolicy = ref(readCooldownPolicy(null))
+const showProCooldownPolicy = computed(() => props.account?.platform === 'openai' && (props.account?.credentials?.plan_type === 'pro' || props.account?.credentials?.chatgpt_plan_type === 'pro'))
+
 const syncFormFromAccount = (newAccount: Account | null) => {
   if (!newAccount) {
     return
@@ -3755,6 +3762,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   mixedChannelWarningDetails.value = null
   mixedChannelWarningRawMessage.value = ''
   mixedChannelWarningAction.value = null
+  proCooldownPolicy.value = readCooldownPolicy(newAccount.extra?.pro_cooldown_policy)
   form.name = newAccount.name
   form.notes = newAccount.notes || ''
   form.proxy_id = newAccount.proxy_id
@@ -4707,6 +4715,10 @@ const submitUpdateAccount = async (accountID: number, updatePayload: Record<stri
 }
 
 const handleSubmit = async () => {
+  if (showProCooldownPolicy.value) {
+    const error = validateCooldownPolicy(proCooldownPolicy.value)
+    if (error) { appStore.showError(error); return }
+  }
   if (!props.account) return
   const accountID = props.account.id
 
@@ -5239,6 +5251,7 @@ const handleSubmit = async () => {
     if (props.account.platform === 'openai' && (props.account.type === 'oauth' || props.account.type === 'setup-token' || props.account.type === 'apikey')) {
       const currentExtra = (props.account.extra as Record<string, unknown>) || {}
       const newExtra: Record<string, unknown> = { ...currentExtra }
+      if (showProCooldownPolicy.value) newExtra.pro_cooldown_policy = { ...proCooldownPolicy.value }
 	  if (props.account.type === 'oauth' && !isSparkShadow.value) {
 		newExtra.openai_sticky_burst = Math.min(10, Math.max(0, form.sticky_burst ?? 1))
 	  } else {
