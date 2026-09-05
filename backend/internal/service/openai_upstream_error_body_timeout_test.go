@@ -4,12 +4,39 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestReadOpenAIUpstreamErrorBodyWithTimeoutRealHTTP(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("{\"error\":"))
+		w.(http.Flusher).Flush()
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+	resp, err := server.Client().Get(server.URL)
+	require.NoError(t, err)
+	done := make(chan bool, 1)
+	go func() {
+		_, timedOut, _ := readOpenAIUpstreamErrorBodyWithTimeout(resp.Body, 4096, 20*time.Millisecond)
+		done <- timedOut
+	}()
+	select {
+	case timedOut := <-done:
+		require.True(t, timedOut)
+	case <-time.After(time.Second):
+		t.Fatal("real HTTP body read remained blocked after deadline")
+	}
+}
 
 type closeUnblocksErrorBody struct {
 	payload []byte
