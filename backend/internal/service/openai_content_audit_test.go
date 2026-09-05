@@ -25,6 +25,7 @@ func TestOpenAIGPTContentAuditScope(t *testing.T) {
 	}{
 		{"gpt", PlatformOpenAI, "gpt-5.6-terra", 403, audit403Body, true},
 		{"code", PlatformOpenAI, "gpt-5.6-sol", 403, []byte(`{"error":{"code":"content_policy_violation","message":"blocked"}}`), true},
+		{"production type", PlatformOpenAI, "gpt-5.6-terra", 403, []byte(`{"error":{"type":"content_policy_violation","message":"blocked"}}`), true},
 		{"nested", PlatformOpenAI, "gpt-5.6-sol", 403, []byte(`{"response":{"error":{"code":"content_filter","message":"blocked"}}}`), true},
 		{"auth", PlatformOpenAI, "gpt-5.6-terra", 403, []byte(`{"error":{"code":"invalid_api_key","message":"forbidden"}}`), false},
 		{"status", PlatformOpenAI, "gpt-5.6-terra", 429, audit403Body, false},

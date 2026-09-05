@@ -99,6 +99,11 @@ mock上游、管理后台测试连接、单机curl、health和功能单测均不
 
 任意一次401或 `INVALID_API_KEY` 立即停止双机发布：先执行43的 `entry-switch rollback` 恢复legacy新连接，再按101 controller的 `rollback_target_slot` 回滚。已有长连接自然排空。禁止用 `restore-proxy` 冒充恢复legacy，禁止在事故中换Key、刷新凭据或重建账号。
 
+43 的入口 NAT 规则必须包含 `-m addrtype --dst-type LOCAL`。缺少该条件时，容器访问其他主机的
+目的端口80流量也会命中 PREROUTING `REDIRECT`，例如 `172.19.16.3:80` 会被错误送回43本机，
+导致101的上游Key在43鉴权并返回 `INVALID_API_KEY`。安装或升级入口脚本后，必须同时验证公网请求
+进入蓝绿槽、容器访问101仍到达101的deployment slot。
+
 ## 发布并发与singleton
 
 - 一轮发布只能有一个task owner；从首个stage到两台最终验证期间不得释放lease。

@@ -25,9 +25,11 @@ func isOpenAIGPTContentAuditRejection(account *Account, model string, status int
 	if !err.IsObject() {
 		return false
 	}
-	switch strings.ToLower(strings.TrimSpace(err.Get("code").String())) {
-	case "content_policy_violation", "content_filter", "content_filter_error", "content_moderation_blocked":
-		return true
+	for _, field := range []string{"code", "type"} {
+		switch strings.ToLower(strings.TrimSpace(err.Get(field).String())) {
+		case "content_policy_violation", "content_filter", "content_filter_error", "content_moderation_blocked":
+			return true
+		}
 	}
 	return strings.Contains(err.Get("message").String(), "内容审计命中风险规则")
 }
