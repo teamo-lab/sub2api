@@ -181,7 +181,7 @@
 - **当前候选版本**：Sub2API outcome 协议候选来自 `teamo-lab/sub2api` 的已提交 commit 和 release tag；Router Gateway 候选来自 Router 的已提交 commit。发布必须使用 commit archive 或 `sub2api-release` 审计脚本，禁止在主机上直接 `docker compose up`、手改 HAProxy 或用临时 SSH 命令替代 controller。
 - **发布 owner/lease**：先取得唯一的 `sub2api-fleet-release-lease`，owner、release ID 从 101 stage 开始一直保持到 43 最终验证；不得由多个任务分别操作两台机器。
 - **固定顺序**：先 101 `stage → 0% 健康 → 10% canary → 真实链路门禁 → 100% → worker/complete`，观察完整 5 分钟且真正的 43（`ins-4r9sd5og`）→101 新增 401 为 0；之后才能对 43 执行同样流程。101 未完成时，43 候选不得保持 10% 或更高流量。
-- **基线账号选择**：不能固定依赖历史 account22。每轮发布前从 43 数据库实时筛选 `status=active AND schedulable=true` 的候选，核对其实际 Base URL、模型映射和 Key ID；只记录 Key ID 与指纹哈希，不输出 Key。若候选是已撤销 OAuth、`error`、`schedulable=false` 或 Base URL 不符合基线，立即换一个合规候选，禁止修改/刷新凭据来“修”门禁。
+- **基线账号选择**：不能固定依赖历史 account22。每轮发布前必须从真正的 43 运行面或其受信任管理源实时确认候选 `status=active AND schedulable=true`、实际 Base URL、模型映射和 Key ID；不能假设 43 一定有本地 PostgreSQL，也不能从 49 或其他机器数据库借用账号/Key。只记录 Key ID 与指纹哈希，不输出 Key。若候选是已撤销 OAuth、`error`、`schedulable=false` 或 Base URL 不符合基线，立即换一个合规候选，禁止修改/刷新凭据来“修”门禁。
 - **真实 Key 门禁**：候选必须从 43 active 容器网络命名空间验证 101 公网和私网 Base URL 的 `/v1/models`、`gpt-reserve`、实际生产 GPT 模型 Responses SSE，均须 HTTP 200 且有 `response.completed`。只通过公网不算通过；私网不可达时停止发布并修复网络/路由后再试。
 - **替代账号的等价性**：换账号只能换“真实可用的同一交付链路基线”，不能用任意 active API Key 代替。至少核对 43/101 Key ID 或指纹、group/model mapping、Base URL、协议和账号状态；后续请求必须证明仍然走同一 43→101 链路。
 - **错误处理**：任何一次新的 401、`INVALID_API_KEY`、账号状态漂移、私网/公网链路不一致，立即停止整轮；先用 controller 回滚新请求到稳定槽，保留 action ID 和现场，再排查。不得继续 canary、换 Key、删账号、重建数据库或跳过门禁。
