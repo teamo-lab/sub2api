@@ -3196,10 +3196,16 @@ func (h *OpenAIGatewayHandler) handleConcurrencyError(c *gin.Context, err error,
 
 func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverErr *service.UpstreamFailoverError, streamStarted bool) {
 	if failoverErr == nil {
+		if streamStarted || (c != nil && c.Writer.Written()) {
+			service.SetRouterOutcome(c, service.RouterOutcomeBusinessCommit)
+		} else {
+			service.SetRouterOutcome(c, service.RouterOutcomeRetryableAbort)
+		}
 		h.handleFailoverExhaustedSimple(c, http.StatusBadGateway, streamStarted)
 		return
 	}
 	if failoverErr.Reason == service.OpenAIContentAuditRejectedReason {
+		service.SetRouterOutcome(c, service.RouterOutcomeTerminalError)
 		service.SetOpsUpstreamError(c, http.StatusForbidden, failoverErr.ClientMessage, "")
 		if !streamStarted && !c.Writer.Written() && gjson.GetBytes(failoverErr.ResponseBody, "error").IsObject() {
 			service.MarkResponseCommitted(c)
@@ -3210,6 +3216,7 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 		return
 	}
 	if failoverErr.IsOpenAIRequestBodyTooLarge() {
+		service.SetRouterOutcome(c, service.RouterOutcomeTerminalError)
 		service.SetOpsUpstreamError(c, http.StatusRequestEntityTooLarge, service.OpenAIRequestBodyTooLargeClientMessage, "")
 		h.handleStreamingAwareError(
 			c,
@@ -3221,6 +3228,7 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 		return
 	}
 	if failoverErr.Reason == service.OpenAIHTTPContinuationUnsupportedReason {
+		service.SetRouterOutcome(c, service.RouterOutcomeTerminalError)
 		message := strings.TrimSpace(failoverErr.ClientMessage)
 		if message == "" {
 			message = "previous_response_id requires an OpenAI API-key account for HTTP requests"
@@ -3229,6 +3237,11 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 		return
 	}
 	copyFailoverRetryAfter(c, failoverErr.ResponseHeaders)
+	if streamStarted || (c != nil && c.Writer.Written()) {
+		service.SetRouterOutcome(c, service.RouterOutcomeBusinessCommit)
+	} else {
+		service.SetRouterOutcome(c, service.RouterOutcomeRetryableAbort)
+	}
 	if failoverErr.IsCredentialFailure() {
 		status, message := credentialFailoverClientResponse(failoverErr)
 		h.handleStreamingAwareError(c, status, "upstream_error", message, streamStarted)
@@ -3329,6 +3342,11 @@ func isSafeRetryAfter(value string) bool {
 
 // handleFailoverExhaustedSimple 简化版本，用于没有响应体的情况
 func (h *OpenAIGatewayHandler) handleFailoverExhaustedSimple(c *gin.Context, statusCode int, streamStarted bool) {
+	if streamStarted || (c != nil && c.Writer.Written()) {
+		service.SetRouterOutcome(c, service.RouterOutcomeBusinessCommit)
+	} else {
+		service.SetRouterOutcome(c, service.RouterOutcomeRetryableAbort)
+	}
 	status, errType, errMsg := h.mapUpstreamError(statusCode)
 	service.SetOpsUpstreamError(c, statusCode, errMsg, "")
 	h.handleStreamingAwareError(c, status, errType, errMsg, streamStarted)
