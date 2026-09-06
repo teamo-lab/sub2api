@@ -2484,8 +2484,11 @@ func setDefaults() {
 	viper.SetDefault("gateway.image_nonstream_keepalive_interval", 0)
 	viper.SetDefault("gateway.max_line_size", 500*1024*1024)
 	viper.SetDefault("gateway.scheduling.sticky_session_max_waiting", 3)
-	viper.SetDefault("gateway.scheduling.sticky_session_wait_timeout", 120*time.Second)
-	viper.SetDefault("gateway.scheduling.fallback_wait_timeout", 30*time.Second)
+	// Keep sticky sessions briefly warm while failing over quickly when an
+	// account pool is saturated. The fallback timeout must stay positive:
+	// Sub2API rejects zero during config validation.
+	viper.SetDefault("gateway.scheduling.sticky_session_wait_timeout", 30*time.Second)
+	viper.SetDefault("gateway.scheduling.fallback_wait_timeout", time.Second)
 	viper.SetDefault("gateway.scheduling.fallback_max_waiting", 100)
 	viper.SetDefault("gateway.scheduling.fallback_selection_mode", "last_used")
 	viper.SetDefault("gateway.scheduling.prefer_soonest_reset", false)

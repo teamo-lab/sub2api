@@ -526,10 +526,10 @@ gateway:
     sticky_session_max_waiting: 3
     # Sticky session wait timeout (duration)
     # 粘性会话等待超时（时间段）
-    sticky_session_wait_timeout: 120s
+    sticky_session_wait_timeout: 30s
     # Fallback wait timeout (duration)
     # 兜底排队等待超时（时间段）
-    fallback_wait_timeout: 30s
+    fallback_wait_timeout: 1s
     # Fallback max waiting queue size
     # 兜底最大排队长度
     fallback_max_waiting: 100
