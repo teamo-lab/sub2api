@@ -1277,6 +1277,78 @@ func (s *OpenAIGatewayService) openAITTFTMode(ctx context.Context) string {
 	return normalizeOpenAITTFTMode(mode)
 }
 
+// openAIStreamDataStartsAnswerOutput reports whether an event carries answer
+// output that the client can act on: message text, refusal, tool-call
+// arguments, custom tool input or image bytes. Reasoning items and reasoning
+// summaries are deliberately excluded: they are visible progress, but a
+// request that has only produced reasoning can still be replayed on another
+// account without the client having received any answer it must keep.
+func openAIStreamDataStartsAnswerOutput(data, eventType string) bool {
+	trimmed := strings.TrimSpace(data)
+	if trimmed == "" || trimmed == "[DONE]" || !gjson.Valid(trimmed) {
+		return false
+	}
+	eventType = strings.TrimSpace(eventType)
+	if eventType == "" {
+		eventType = strings.TrimSpace(gjson.Get(trimmed, "type").String())
+	}
+	if strings.HasPrefix(eventType, "response.reasoning") {
+		return false
+	}
+	switch eventType {
+	case "response.output_item.added", "response.output_item.done":
+		item := gjson.Get(trimmed, "item")
+		if strings.TrimSpace(item.Get("type").String()) == "reasoning" {
+			return false
+		}
+		return openAIStreamItemHasVisibleOutput(item)
+	case "response.completed", "response.done":
+		for _, item := range gjson.Get(trimmed, "response.output").Array() {
+			if strings.TrimSpace(item.Get("type").String()) == "reasoning" {
+				continue
+			}
+			if openAIStreamItemHasVisibleOutput(item) {
+				return true
+			}
+		}
+		return false
+	}
+	return openAIStreamDataStartsVisibleOutput(trimmed, eventType)
+}
+
+// openAIStreamFailedEventFailoverAfterReasoning decides whether a failed/error
+// event that arrived after reasoning-only output may still fail over to another
+// account. The predicates are the same ones used before any output: the only
+// thing that changed is that the client already saw reasoning progress, which
+// the caller marks with SafeToFailoverAfterWrite.
+func openAIStreamFailedEventFailoverAfterReasoning(payload []byte, eventType, message string) bool {
+	if strings.TrimSpace(eventType) == "error" {
+		return openAIStreamErrorEventShouldFailover(payload, message)
+	}
+	return openAIStreamFailedEventShouldFailover(payload, message)
+}
+
+func logOpenAIFailoverAfterReasoningOutput(
+	ctx context.Context,
+	account *Account,
+	path string,
+	upstreamRequestID string,
+	eventType string,
+) {
+	fields := []zap.Field{
+		zap.String("path", path),
+		zap.String("event_type", strings.TrimSpace(eventType)),
+		zap.String("upstream_request_id", strings.TrimSpace(upstreamRequestID)),
+	}
+	if account != nil {
+		fields = append(fields,
+			zap.Int64("account_id", account.ID),
+			zap.String("platform", account.Platform),
+		)
+	}
+	logger.FromContext(ctx).Warn("gateway.failover_after_reasoning_output", fields...)
+}
+
 func openAIStreamDataStartsTTFT(data, eventType string, forceOutput bool, mode string) bool {
 	if mode == OpenAITTFTModeVisible {
 		return openAIStreamDataStartsVisibleOutput(data, eventType)
@@ -1877,6 +1949,11 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	terminalEventType := ""
 	semanticOutputSeen := false
 	capacityFailoverSuppressedLogged := false
+	// answerOutputStarted flips once answer output (not reasoning) was written to
+	// the client; pendingAnswerOutput marks answer output still held in pendingLines.
+	answerOutputStarted := false
+	pendingAnswerOutput := false
+	answerOutputReached := func() bool { return answerOutputStarted || pendingAnswerOutput }
 	failedMessage := ""
 	clientOutputStarted := false
 	codexFailureTerminal := account != nil && account.Platform == PlatformOpenAI
@@ -2040,7 +2117,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			}
 			if !capacityFailoverSuppressedLogged && account != nil && account.Platform == PlatformOpenAI &&
 				(eventType == "error" || eventType == "response.failed") &&
-				openAIStreamClientOutputStarted(c, clientOutputStarted) &&
+				answerOutputReached() &&
 				isOpenAIUpstreamCapacityShedEvent(dataBytes) {
 				logOpenAICapacityFailoverSuppressed(ctx, account, "passthrough_sse", upstreamRequestID, eventType)
 				capacityFailoverSuppressedLogged = true
@@ -2079,6 +2156,17 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 					if compactErr := newOpenAICompactFallbackSignal(c, dataBytes, failedMessage); compactErr != nil {
 						return resultWithUsage(), compactErr
 					}
+				}
+				// Reasoning-only output reached the client: the upstream failed before
+				// any answer, so replay on another account instead of forwarding the
+				// terminal error (see native_sse for the same rule).
+				if outputStarted && !answerOutputReached() && !cyberHit && !clientDisconnected &&
+					account != nil && account.Platform == PlatformOpenAI &&
+					openAIStreamFailedEventFailoverAfterReasoning(dataBytes, eventType, failedMessage) {
+					failoverErr := s.newOpenAIStreamFailoverErrorWithModel(c, account, true, upstreamRequestID, dataBytes, failedMessage, mappedModel, resp.Header)
+					failoverErr.SafeToFailoverAfterWrite = true
+					logOpenAIFailoverAfterReasoningOutput(ctx, account, "passthrough_sse", upstreamRequestID, eventType)
+					return resultWithUsage(), failoverErr
 				}
 				if outputStarted && !cyberHit {
 					if codexFailureTerminal && eventType == "error" {
@@ -2150,6 +2238,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			if lineStartsClientOutput && trimmedData != "[DONE]" && !openAIStreamEventTypeIsTerminal(eventType) {
 				semanticOutputSeen = true
 			}
+			if openAIStreamDataStartsAnswerOutput(trimmedData, eventType) {
+				pendingAnswerOutput = true
+			}
 			// OpenAI Responses streams that terminate with an empty
 			// response.completed (no output, no usage, no error, nothing sent
 			// to the client) are silent upstream refusals: fail over instead of
@@ -2194,6 +2285,10 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				logger.LegacyPrintf("service.openai_gateway", "[OpenAI passthrough] Client disconnected during streaming, continue draining upstream for usage: account=%d", account.ID)
 			} else {
 				clientOutputStarted = true
+				if pendingAnswerOutput {
+					answerOutputStarted = true
+					pendingAnswerOutput = false
+				}
 				CompleteErrorRecovery(c)
 				flushPending = true
 				if line == "" {
@@ -2254,6 +2349,12 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		if !openAIStreamClientOutputStarted(c, clientOutputStarted) {
 			return resultWithUsage(),
 				s.newOpenAIStreamFailoverError(c, account, true, upstreamRequestID, nil, "OpenAI stream ended before a terminal event")
+		}
+		if !answerOutputReached() && account != nil && account.Platform == PlatformOpenAI {
+			failoverErr := s.newOpenAIStreamFailoverError(c, account, true, upstreamRequestID, nil, "OpenAI stream ended after reasoning-only output")
+			failoverErr.SafeToFailoverAfterWrite = true
+			logOpenAIFailoverAfterReasoningOutput(ctx, account, "passthrough_sse", upstreamRequestID, "eof")
+			return resultWithUsage(), failoverErr
 		}
 		s.recordOpenAIProxyStreamDisconnect(account, errors.New("stream ended before terminal event"), upstreamRequestID)
 		return resultWithUsage(), errors.New("stream usage incomplete: missing terminal event")

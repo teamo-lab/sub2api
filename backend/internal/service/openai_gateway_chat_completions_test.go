@@ -1136,3 +1136,55 @@ func TestBuildChatStreamErrorSSE(t *testing.T) {
 	require.Equal(t, "cyber_policy", gjson.Get(payload, "error.code").String())
 	require.Equal(t, "blocked by policy", gjson.Get(payload, "error.message").String())
 }
+
+// 回归：Chat 桥接流已向客户端推出 reasoning_content（推理）但尚无正文/tool_calls 时
+// 上游降载，仍要换账号重试；failover 错误需标记 SafeToFailoverAfterWrite，且降载
+// 事件不得作为 error chunk 下发。
+func TestForwardAsChatCompletions_StreamOverloadAfterReasoningOnlyFailsOver(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logSink, restore := captureStructuredLog(t)
+	defer restore()
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{"model":"gpt-6-astra","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstreamBody := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-6-astra","status":"in_progress","output":[]}}`,
+		"",
+		`event: response.output_item.added`,
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[]}}`,
+		"",
+		`event: response.reasoning_summary_text.delta`,
+		`data: {"type":"response.reasoning_summary_text.delta","output_index":0,"summary_index":0,"delta":"thinking about it"}`,
+		"",
+		`event: response.failed`,
+		`data: {"type":"response.failed","response":{"id":"resp_1","object":"response","model":"gpt-6-astra","status":"failed","output":[],"error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}`,
+		"",
+	}, "\n")
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_chat_overload_reasoning"}},
+		Body:       io.NopCloser(strings.NewReader(upstreamBody)),
+	}}
+	svc := &OpenAIGatewayService{httpUpstream: upstream}
+	account := &Account{
+		ID: 1, Name: "openai-key", Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Concurrency: 1,
+		Credentials: map[string]any{"api_key": "sk-test", "base_url": "https://relay.example"},
+	}
+
+	_, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "gpt-6-astra")
+	require.Error(t, err)
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.True(t, failoverErr.SafeToFailoverAfterWrite)
+	require.True(t, failoverErr.RequestScopedTransient)
+	out := rec.Body.String()
+	require.Contains(t, out, "thinking about it")
+	require.NotContains(t, out, "server_is_overloaded")
+	require.NotContains(t, out, "currently overloaded")
+	require.True(t, logSink.ContainsMessage("gateway.failover_after_reasoning_output"))
+	require.True(t, logSink.ContainsFieldValue("path", "chat_completions"))
+}
