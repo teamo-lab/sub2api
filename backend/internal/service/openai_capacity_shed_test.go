@@ -517,3 +517,23 @@ func TestOpenAIStreamDataStartsAnswerOutputExcludesReasoning(t *testing.T) {
 		})
 	}
 }
+
+func TestOpenAIStreamErrorEventShouldFailoverOnRelayUnavailableMessages(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+		message string
+		want    bool
+	}{
+		{"relay temporarily unavailable (message only)", `{"type":"error","error":{"type":"upstream_error","message":"Upstream service temporarily unavailable"}}`, "Upstream service temporarily unavailable", true},
+		{"relay unavailable via status_code 503", `{"type":"error","error":{"status_code":503,"message":"x"}}`, "x", true},
+		{"overloaded server_error", `{"type":"error","error":{"type":"server_error","message":"Our servers are currently overloaded. Please try again later."}}`, "Our servers are currently overloaded. Please try again later.", true},
+		{"invalid request stays terminal", `{"type":"error","error":{"type":"invalid_request_error","message":"Missing required parameter: input[3].encrypted_content"}}`, "Missing required parameter", false},
+		{"content policy stays terminal", `{"type":"error","error":{"type":"invalid_request_error","code":"content_policy_violation","message":"This request violates our usage policy"}}`, "violates", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, openAIStreamErrorEventShouldFailover([]byte(tc.payload), tc.message))
+		})
+	}
+}

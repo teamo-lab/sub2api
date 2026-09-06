@@ -1666,15 +1666,26 @@ func openAIStreamErrorEventShouldFailover(payload []byte, message string) bool {
 	case http.StatusUnauthorized, http.StatusTooManyRequests, 529:
 		return true
 	}
+	// An explicit upstream 5xx carried inside the error frame (relay
+	// "temporarily unavailable", capacity shedding, gateway timeout) is not
+	// actionable by the client: another account may serve the same request.
+	for _, path := range []string{"response.error.status_code", "error.status_code", "status_code"} {
+		if status := int(gjson.GetBytes(payload, path).Int()); status >= 500 && status <= 504 {
+			return true
+		}
+	}
 	if isOpenAITransientProcessingError(http.StatusBadRequest, message, payload) {
 		return true
 	}
 	combined := strings.ToLower(strings.TrimSpace(message + " " +
 		gjson.GetBytes(payload, "error.message").String() + " " +
 		gjson.GetBytes(payload, "response.error.message").String()))
-	return strings.Contains(combined, "temporary") ||
-		strings.Contains(combined, "try again") ||
-		strings.Contains(combined, "please retry")
+	for _, marker := range []string{"temporary", "temporarily", "unavailable", "overloaded", "try again", "please retry"} {
+		if strings.Contains(combined, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *OpenAIGatewayService) handleOpenAIStreamTerminalAccountSideEffects(
