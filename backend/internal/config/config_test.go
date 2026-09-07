@@ -384,11 +384,11 @@ func TestLoadDefaultSchedulingConfig(t *testing.T) {
 	if cfg.Gateway.Scheduling.StickySessionMaxWaiting != 3 {
 		t.Fatalf("StickySessionMaxWaiting = %d, want 3", cfg.Gateway.Scheduling.StickySessionMaxWaiting)
 	}
-	if cfg.Gateway.Scheduling.StickySessionWaitTimeout != 120*time.Second {
-		t.Fatalf("StickySessionWaitTimeout = %v, want 120s", cfg.Gateway.Scheduling.StickySessionWaitTimeout)
+	if cfg.Gateway.Scheduling.StickySessionWaitTimeout != 30*time.Second {
+		t.Fatalf("StickySessionWaitTimeout = %v, want 30s", cfg.Gateway.Scheduling.StickySessionWaitTimeout)
 	}
-	if cfg.Gateway.Scheduling.FallbackWaitTimeout != 30*time.Second {
-		t.Fatalf("FallbackWaitTimeout = %v, want 30s", cfg.Gateway.Scheduling.FallbackWaitTimeout)
+	if cfg.Gateway.Scheduling.FallbackWaitTimeout != time.Second {
+		t.Fatalf("FallbackWaitTimeout = %v, want 1s", cfg.Gateway.Scheduling.FallbackWaitTimeout)
 	}
 	if cfg.Gateway.Scheduling.FallbackMaxWaiting != 100 {
 		t.Fatalf("FallbackMaxWaiting = %d, want 100", cfg.Gateway.Scheduling.FallbackMaxWaiting)
