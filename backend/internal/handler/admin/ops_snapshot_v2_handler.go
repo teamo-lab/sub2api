@@ -50,8 +50,6 @@ func (h *OpsHandler) GetDashboardSnapshotV2(c *gin.Context) {
 		response.BadRequest(c, err.Error())
 		return
 	}
-	startTime, endTime = alignModelDashboardPresetWindow(c, startTime, endTime)
-
 	filter := &service.OpsDashboardFilter{
 		StartTime: startTime,
 		EndTime:   endTime,
