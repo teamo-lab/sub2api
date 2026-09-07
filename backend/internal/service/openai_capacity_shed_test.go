@@ -374,3 +374,166 @@ func TestCodexOutboundVersionHasSingleSource(t *testing.T) {
 		"codexCLIVersion=%q 不得低于上游最低门槛 %q", codexCLIVersion, codexUpstreamMinVersion,
 	)
 }
+
+// 回归：Astra 长推理阶段（已向客户端推出 reasoning 摘要，但尚无正文/工具输出）
+// 上游降载并以 response.failed 收尾。推理不是客户端必须保留的答案，因此仍要
+// 换账号重试；failover 错误需标记 SafeToFailoverAfterWrite，让 handler 允许在
+// 已写出的流上继续切换；降载帧不得转发给客户端。
+func TestOpenAIStreamCapacityShedAfterReasoningOnlyOutputFailsOver(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logSink, restore := captureStructuredLog(t)
+	defer restore()
+	stream := strings.Join([]string{
+		"event: response.created",
+		`data: {"type":"response.created","response":{"id":"resp_1"},"sequence_number":0}`,
+		"",
+		"event: response.output_item.added",
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[]},"sequence_number":1}`,
+		"",
+		"event: response.reasoning_summary_part.added",
+		`data: {"type":"response.reasoning_summary_part.added","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""},"sequence_number":2}`,
+		"",
+		"event: response.reasoning_summary_text.delta",
+		`data: {"type":"response.reasoning_summary_text.delta","output_index":0,"summary_index":0,"delta":"thinking about it","sequence_number":3}`,
+		"",
+		"event: error",
+		`data: {"type":"error","error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."},"sequence_number":4}`,
+		"",
+		"event: response.failed",
+		`data: {"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}},"sequence_number":5}`,
+		"",
+	}, "\n")
+
+	tests := []struct {
+		name string
+		path string
+		run  func(*OpenAIGatewayService, *gin.Context, *http.Response, *Account) error
+	}{
+		{
+			name: "native",
+			path: "native_sse",
+			run: func(svc *OpenAIGatewayService, c *gin.Context, resp *http.Response, account *Account) error {
+				_, err := svc.handleStreamingResponse(c.Request.Context(), resp, c, account, time.Now(), "model", "model")
+				return err
+			},
+		},
+		{
+			name: "passthrough",
+			path: "passthrough_sse",
+			run: func(svc *OpenAIGatewayService, c *gin.Context, resp *http.Response, account *Account) error {
+				_, err := svc.handleStreamingResponsePassthrough(c.Request.Context(), resp, c, account, time.Now(), "model", "model")
+				return err
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(stream)),
+				Header:     http.Header{"X-Request-Id": []string{"rid-shed-after-reasoning"}},
+			}
+			account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Name: "acc"}
+
+			err := tt.run(svc, c, resp, account)
+			require.Error(t, err)
+			var failoverErr *UpstreamFailoverError
+			require.ErrorAs(t, err, &failoverErr)
+			require.True(t, failoverErr.SafeToFailoverAfterWrite, "reasoning-only output must not pin the attempt")
+			require.True(t, failoverErr.RequestScopedTransient)
+			require.Contains(t, failoverErr.ClientMessage, "servers are currently overloaded")
+
+			body := rec.Body.String()
+			require.Contains(t, body, "thinking about it", "reasoning already delivered stays delivered")
+			require.NotContains(t, body, "event: error")
+			require.NotContains(t, body, "response.failed")
+			require.NotContains(t, body, "server_is_overloaded")
+			require.True(t, logSink.ContainsMessage("gateway.failover_after_reasoning_output"))
+			require.True(t, logSink.ContainsFieldValue("path", tt.path))
+			require.False(t, logSink.ContainsMessage("gateway.failover_suppressed_after_semantic_output"))
+		})
+	}
+}
+
+// 正文已开始（output_text.delta 已下发）后才降载：仍然不可重试，行为与之前一致。
+func TestOpenAIStreamCapacityShedAfterAnswerOutputStillSuppressed(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logSink, restore := captureStructuredLog(t)
+	defer restore()
+	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(strings.NewReader(strings.Join([]string{
+			"event: response.created",
+			`data: {"type":"response.created","response":{"id":"resp_1"}}`,
+			"",
+			"event: response.reasoning_summary_text.delta",
+			`data: {"type":"response.reasoning_summary_text.delta","output_index":0,"summary_index":0,"delta":"plan"}`,
+			"",
+			"event: response.output_text.delta",
+			`data: {"type":"response.output_text.delta","output_index":1,"content_index":0,"delta":"answer"}`,
+			"",
+			"event: response.failed",
+			`data: {"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}`,
+			"",
+		}, "\n"))),
+		Header: http.Header{"X-Request-Id": []string{"rid-shed-after-answer"}},
+	}
+	_, err := svc.handleStreamingResponse(c.Request.Context(), resp, c, &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Name: "acc"}, time.Now(), "model", "model")
+	require.Error(t, err)
+	var failoverErr *UpstreamFailoverError
+	require.False(t, errors.As(err, &failoverErr))
+	require.Contains(t, rec.Body.String(), "answer")
+	require.Equal(t, 1, strings.Count(rec.Body.String(), "event: response.failed"))
+	require.True(t, logSink.ContainsMessage("gateway.failover_suppressed_after_semantic_output"))
+}
+
+func TestOpenAIStreamDataStartsAnswerOutputExcludesReasoning(t *testing.T) {
+	cases := []struct {
+		name, event, data string
+		want              bool
+	}{
+		{"reasoning summary delta", "response.reasoning_summary_text.delta", `{"type":"response.reasoning_summary_text.delta","delta":"x"}`, false},
+		{"reasoning text delta", "response.reasoning_text.delta", `{"type":"response.reasoning_text.delta","delta":"x"}`, false},
+		{"reasoning item added", "response.output_item.added", `{"type":"response.output_item.added","item":{"type":"reasoning","summary":[{"type":"summary_text","text":"x"}]}}`, false},
+		{"message text delta", "response.output_text.delta", `{"type":"response.output_text.delta","delta":"x"}`, true},
+		{"empty text delta", "response.output_text.delta", `{"type":"response.output_text.delta","delta":""}`, false},
+		{"function call args done", "response.function_call_arguments.done", `{"type":"response.function_call_arguments.done","arguments":"{}"}`, true},
+		{"message item done", "response.output_item.done", `{"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"hi"}]}}`, true},
+		{"completed reasoning only", "response.completed", `{"type":"response.completed","response":{"output":[{"type":"reasoning","summary":[{"type":"summary_text","text":"x"}]}]}}`, false},
+		{"completed with message", "response.completed", `{"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"hi"}]}]}}`, true},
+		{"created", "response.created", `{"type":"response.created","response":{"id":"r"}}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, openAIStreamDataStartsAnswerOutput(tc.data, tc.event))
+		})
+	}
+}
+
+func TestOpenAIStreamErrorEventShouldFailoverOnRelayUnavailableMessages(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+		message string
+		want    bool
+	}{
+		{"relay temporarily unavailable (message only)", `{"type":"error","error":{"type":"upstream_error","message":"Upstream service temporarily unavailable"}}`, "Upstream service temporarily unavailable", true},
+		{"relay unavailable via status_code 503", `{"type":"error","error":{"status_code":503,"message":"x"}}`, "x", true},
+		{"overloaded server_error", `{"type":"error","error":{"type":"server_error","message":"Our servers are currently overloaded. Please try again later."}}`, "Our servers are currently overloaded. Please try again later.", true},
+		{"invalid request stays terminal", `{"type":"error","error":{"type":"invalid_request_error","message":"Missing required parameter: input[3].encrypted_content"}}`, "Missing required parameter", false},
+		{"content policy stays terminal", `{"type":"error","error":{"type":"invalid_request_error","code":"content_policy_violation","message":"This request violates our usage policy"}}`, "violates", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, openAIStreamErrorEventShouldFailover([]byte(tc.payload), tc.message))
+		})
+	}
+}
