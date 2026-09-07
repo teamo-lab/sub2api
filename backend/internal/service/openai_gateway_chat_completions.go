@@ -533,8 +533,10 @@ func (s *OpenAIGatewayService) handleChatBufferedStreamingResponse(
 			return nil, fmt.Errorf("openai cyber_policy: %s", msg)
 		}
 		message := openAICompatFailedResponseMessage(finalResponse)
-		if openAIStreamFailedEventShouldFailover(payload, message) {
-			return nil, s.newOpenAIStreamFailoverErrorWithModel(c, account, false, requestID, payload, message, upstreamModel, resp.Header)
+		if failoverErr := s.nonStreamingTerminalFailureFailover(
+			c, resp, account, false, "response.failed", payload, message, originalModel,
+		); failoverErr != nil {
+			return nil, failoverErr
 		}
 		message = s.recordOpenAIStreamUpstreamError(c, account, false, requestID, "http_error", payload, message)
 		// response.failed 到达在 HTTP 200 SSE 流上，无真实 HTTP 错误码；统一走语义
@@ -794,9 +796,10 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 			if strings.TrimSpace(event.Type) == "error" {
 				shouldFailover = openAIStreamErrorEventShouldFailover(payloadBytes, message)
 			}
+			shouldRecover := matchesOpenAIStreamFailureRecovery(c, account, originalModel, payloadBytes, message)
 			failoverAfterReasoning := clientOutputStarted && !answerOutputStarted && !pendingAnswerOutput && !clientDisconnected &&
 				account != nil && account.Platform == PlatformOpenAI
-			if shouldFailover && (!clientOutputStarted || failoverAfterReasoning) {
+			if (shouldFailover || shouldRecover) && (!clientOutputStarted || failoverAfterReasoning) {
 				streamFailoverErr = s.newOpenAIStreamFailoverErrorWithModel(c, account, false, requestID, payloadBytes, message, upstreamModel, resp.Header)
 				if failoverAfterReasoning {
 					// Only reasoning reached the client: replaying on another account

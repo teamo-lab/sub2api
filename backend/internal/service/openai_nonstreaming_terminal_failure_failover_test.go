@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/model"
 )
 
 // issue #5281：stream=false 时上游仍可能回 SSE（其他 sub2api 实例、部分 OpenAI 兼容
@@ -255,4 +256,47 @@ func TestNonStreamingTerminalFailureFailover_NilAccountProposesNothing(t *testin
 	require.Nil(t, svc.nonStreamingTerminalFailureFailover(
 		c, newNonStreamingSSEResponse(), nil, false, "response.failed", payload,
 		"Selected model is at capacity. Please try a different model."))
+}
+
+func TestNonStreamingTerminalFailureFailover_RecoveryRulePrecedesPassthrough(t *testing.T) {
+	c, rec := newNonStreamingFailoverContext(t)
+	account := newNonStreamingFailoverAccount()
+	rule := &model.ErrorPassthroughRule{
+		ID:              9,
+		Name:            "transient upstream error",
+		Enabled:         true,
+		MatchMode:       model.MatchModeAll,
+		Platforms:       []string{PlatformOpenAI},
+		ErrorCodes:      []int{http.StatusBadGateway},
+		PassthroughCode: true,
+		PassthroughBody: true,
+		RecoveryPolicy: &model.ErrorRecoveryPolicy{
+			Mode:               "limited",
+			AccountTypes:       []string{AccountTypeAPIKey},
+			Models:             []string{"gpt-6-astra"},
+			UpstreamCodes:      []string{"upstream_error"},
+			SameAccountRetries: 1,
+			AccountSwitches:    3,
+			BudgetSeconds:      30,
+		},
+	}
+	ruleSvc := &ErrorPassthroughService{}
+	ruleSvc.setLocalCache([]*model.ErrorPassthroughRule{rule})
+	BindErrorPassthroughService(c, ruleSvc)
+
+	payload := []byte(`{"type":"response.failed","response":{"status":"failed","error":{"code":"upstream_error","message":"invalid_request"}}}`)
+	require.False(t, openAIStreamFailedEventShouldFailover(payload, "invalid_request"),
+		"fixture must exercise recovery-policy promotion rather than default classification")
+
+	failoverErr := newNonStreamingFailoverService().nonStreamingTerminalFailureFailover(
+		c, newNonStreamingSSEResponse(), account, false, "response.failed", payload,
+		"invalid_request", "gpt-6-astra",
+	)
+
+	require.NotNil(t, failoverErr)
+	require.Equal(t, http.StatusBadGateway, failoverErr.StatusCode)
+	require.Equal(t, ErrorRecoveryRetry, ApplyErrorRecovery(c, account, "gpt-6-astra", failoverErr))
+	require.False(t, c.Writer.Written(), "recovery must run before passthrough commits the 502")
+	require.Empty(t, rec.Body.String())
+	CloseErrorRecovery(c)
 }

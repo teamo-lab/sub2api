@@ -118,6 +118,30 @@ func (s *ErrorPassthroughService) matchRecoveryRule(account *Account, requestedM
 	return nil
 }
 
+// matchesOpenAIStreamFailureRecovery reports whether a terminal OpenAI SSE
+// failure is owned by a configured recovery policy. Terminal failures travel
+// over HTTP 200, so use the same normalized body and inferred semantic status
+// as the passthrough matcher. This check must happen before a passthrough rule
+// commits the downstream response; once committed, replay is no longer safe.
+func matchesOpenAIStreamFailureRecovery(
+	c *gin.Context,
+	account *Account,
+	requestedModel string,
+	payload []byte,
+	failedMessage string,
+) bool {
+	if c == nil || account == nil {
+		return false
+	}
+	svc := getBoundErrorPassthroughService(c)
+	if svc == nil {
+		return false
+	}
+	body := openAIStreamFailedEventPassthroughBody(payload, failedMessage)
+	status := openAIStreamFailedEventSemanticStatus(payload, failedMessage)
+	return svc.matchRecoveryRule(account, requestedModel, status, body) != nil
+}
+
 // ApplyErrorRecovery is called only where replay is still safe, before default
 // retry/switch handling. The first matching rule owns one immutable request budget.
 func ApplyErrorRecovery(c *gin.Context, account *Account, requestedModel string, failure *UpstreamFailoverError) ErrorRecoveryAction {

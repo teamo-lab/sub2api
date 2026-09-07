@@ -342,7 +342,15 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						)
 						return
 					}
-					if c.Writer.Size() != writerSizeBeforeForward && !failoverErr.SafeToFailoverAfterWrite {
+					mayFailover := c.Writer.Size() == writerSizeBeforeForward || failoverErr.SafeToFailoverAfterWrite
+					reqLog.Info("openai_chat_completions.error_recovery_candidate",
+						zap.Int64("account_id", account.ID),
+						zap.Int("upstream_status", failoverErr.StatusCode),
+						zap.Bool("may_failover", mayFailover),
+						zap.Int("writer_size_before", writerSizeBeforeForward),
+						zap.Int("writer_size_after", c.Writer.Size()),
+					)
+					if !mayFailover {
 						h.gatewayService.ObserveOpenAIAccountHealthFailure(c.Request.Context(), account, err)
 						h.handleFailoverExhausted(c, failoverErr, true)
 						return
@@ -352,7 +360,13 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						// must still be reported inside the committed SSE stream.
 						streamStarted = true
 					}
-					if action := service.ApplyErrorRecovery(c, account, reqModel, failoverErr); action != service.ErrorRecoveryDefault {
+					action := service.ApplyErrorRecovery(c, account, reqModel, failoverErr)
+					reqLog.Info("openai_chat_completions.error_recovery_action",
+						zap.Int64("account_id", account.ID),
+						zap.Int("upstream_status", failoverErr.StatusCode),
+						zap.Int("action", int(action)),
+					)
+					if action != service.ErrorRecoveryDefault {
 						switch action {
 						case service.ErrorRecoveryRetry:
 							continue

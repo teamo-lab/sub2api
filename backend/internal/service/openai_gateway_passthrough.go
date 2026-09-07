@@ -1908,6 +1908,15 @@ func (s *OpenAIGatewayService) newOpenAIStreamFailoverErrorWithModel(
 	if failoverErr.IsCredentialFailure() || failoverErr.RequestScopedTransient {
 		return failoverErr
 	}
+	// Recovery matching happens once before this error is created and again in
+	// ApplyErrorRecovery. Keep the normalized terminal payload when a recovery
+	// rule owns the failure; replacing it with the generic envelope would discard
+	// response.error.code and make the second match silently fall back to the
+	// default retry path.
+	if matchesOpenAIStreamFailureRecovery(c, account, canonicalModel, payload, message) {
+		failoverErr.ResponseBody = openAIStreamFailedEventPassthroughBody(payload, message)
+		return failoverErr
+	}
 	// Preserve the existing generic envelope for unclassified stream failures;
 	// only typed access/capacity failures need the original payload downstream.
 	failoverErr.ResponseBody = body
@@ -1962,7 +1971,8 @@ func (s *OpenAIGatewayService) nonStreamingTerminalFailureFailover(
 	if terminalType == "error" {
 		shouldFailover = openAIStreamErrorEventShouldFailover(payload, message)
 	}
-	if !shouldFailover {
+	requestedModel := firstNonEmpty(canonicalModel...)
+	if !shouldFailover && !matchesOpenAIStreamFailureRecovery(c, account, requestedModel, payload, message) {
 		return nil
 	}
 	var headers http.Header
@@ -1971,7 +1981,7 @@ func (s *OpenAIGatewayService) nonStreamingTerminalFailureFailover(
 		headers = resp.Header
 		upstreamRequestID = strings.TrimSpace(resp.Header.Get("x-request-id"))
 	}
-	return s.newOpenAIStreamFailoverErrorWithModel(c, account, passthrough, upstreamRequestID, payload, message, firstNonEmpty(canonicalModel...), headers)
+	return s.newOpenAIStreamFailoverErrorWithModel(c, account, passthrough, upstreamRequestID, payload, message, requestedModel, headers)
 }
 
 func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
