@@ -35,10 +35,29 @@ func TestSyntheticHeartbeatOutputBoundary(t *testing.T) {
 		} {
 			require.False(t, classify(payload, "response.output_text.delta"), payload)
 		}
-		require.True(t, classify(strings.Replace(syntheticHeartbeat, `"delta":"\u200b"`, `"delta":"\u200banswer"`, 1), "response.output_text.delta"))
+		// SSE-Keep-Alive is the authoritative transport-heartbeat marker. Upstream
+		// never puts model output in these frames, so even a malformed payload with
+		// extra delta text must not commit the attempt.
+		require.False(t, classify(strings.Replace(syntheticHeartbeat, `"delta":"\u200b"`, `"delta":"\u200banswer"`, 1), "response.output_text.delta"))
 	}
 	require.False(t, openAIStreamTextDeltaIsOnlyFiller(syntheticHeartbeat, "response.function_call_arguments.delta"))
 	require.False(t, openAIStreamTextDeltaIsOnlyFiller(syntheticHeartbeat+":", "response.output_text.delta"))
+}
+
+func TestSyntheticHeartbeatMarkerIsAuthoritativeAcrossEventShapes(t *testing.T) {
+	payloads := []struct {
+		eventType string
+		payload   string
+	}{
+		{"response.output_item.done", `{"type":"response.output_item.done","SSE-Keep-Alive":true,"item":{"type":"message","content":[{"type":"output_text","text":"ignored"}]}}`},
+		{"response.output_item.done", `{"type":"response.output_item.done","sse_keep_alive":true,"item":{"type":"function_call","arguments":"{}"}}`},
+		{"response.completed", `{"type":"response.completed","SSE-Keep-Alive":true,"response":{"output":[{"type":"message","content":[{"type":"output_text","text":"ignored"}]}]}}`},
+	}
+	for _, tc := range payloads {
+		require.False(t, openAIStreamDataStartsClientOutput(tc.payload, tc.eventType))
+		require.False(t, openAIStreamDataStartsVisibleOutput(tc.payload, tc.eventType))
+		require.False(t, openAIStreamDataStartsSemanticTTFT(tc.payload, tc.eventType))
+	}
 }
 
 func TestSyntheticHeartbeatPreservesStreamRecovery(t *testing.T) {

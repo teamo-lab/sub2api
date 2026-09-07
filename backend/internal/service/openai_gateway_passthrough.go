@@ -1100,9 +1100,9 @@ func openAIStreamEventIsPreamble(eventType string) bool {
 }
 
 // openAIStreamDataIsKeepalive recognizes upstream keepalives that arrive as a
-// data frame instead of an SSE comment. They prove the TCP stream is live, not
-// that the model has produced an answer, so they must stay attempt-local until
-// a semantic commit point is reached.
+// data frame instead of an SSE comment. SSE-Keep-Alive is an authoritative
+// heartbeat marker: the frame is transport liveness, never model output, and
+// must stay attempt-local until a semantic commit point is reached.
 func openAIStreamDataIsKeepalive(data, eventType string) bool {
 	if openAIStreamEventIsPreamble(eventType) {
 		return true
@@ -1114,17 +1114,8 @@ func openAIStreamDataIsKeepalive(data, eventType string) bool {
 	if !gjson.Valid(trimmed) {
 		return false
 	}
-	if !gjson.Get(trimmed, "SSE-Keep-Alive").Bool() && !gjson.Get(trimmed, "sse_keep_alive").Bool() {
-		return false
-	}
-	if eventType == "" {
-		eventType = gjson.Get(trimmed, "type").String()
-	}
-	if strings.TrimSpace(eventType) != "response.output_text.delta" {
-		return true
-	}
-	delta := gjson.Get(trimmed, "delta")
-	return !delta.Exists() || delta.Type != gjson.String || openAIStreamTextDeltaIsOnlyFiller(trimmed, eventType)
+	return gjson.Get(trimmed, "SSE-Keep-Alive").Bool() ||
+		gjson.Get(trimmed, "sse_keep_alive").Bool()
 }
 
 // openAIStreamKnownDeltaIsEmpty identifies protocol lifecycle deltas that
