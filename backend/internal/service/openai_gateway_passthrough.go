@@ -1076,6 +1076,10 @@ func openAIStreamClientOutputStarted(c *gin.Context, localStarted bool) bool {
 	return OpenAICompactKeepaliveAdjustedWrittenSize(c) >= 0
 }
 
+// openAIPassthroughPendingMaxBytes 是 pendingLines 暂存的字节上限。超长工具参数
+// （如整文件写入）超过上限后放弃暂存保护、按原顺序放行。
+const openAIPassthroughPendingMaxBytes = 4 << 20
+
 func openAIStreamEventIsPreamble(eventType string) bool {
 	switch strings.TrimSpace(eventType) {
 	case "response.created", "response.in_progress":
@@ -1182,6 +1186,15 @@ func openAIStreamDataStartsClientOutput(data, eventType string) bool {
 		return !openAIStreamFailedEventShouldFailover(payload, extractOpenAISSEErrorMessage(payload))
 	case "response.output_item.added", "response.content_part.added", "response.reasoning_summary_part.added":
 		return openAIStreamAddedEventStartsClientOutput([]byte(trimmed), eventType)
+	case "response.function_call_arguments.delta",
+		"response.function_call_arguments.done",
+		"response.custom_tool_call_input.delta",
+		"response.custom_tool_call_input.done":
+		// 没吐完的工具参数对客户端不可执行。这些帧留在 pendingLines 里，
+		// 直到携带完整参数的 response.output_item.done 一起放行；上游在
+		// 参数中途失败时缓冲整体丢弃、按 pre-output 规则换号，下游永远
+		// 只会看到完整的工具调用。
+		return false
 	}
 	return !openAIStreamEventIsPreamble(eventType)
 }
@@ -1296,6 +1309,14 @@ func openAIStreamDataStartsAnswerOutput(data, eventType string) bool {
 		return false
 	}
 	switch eventType {
+	case "response.function_call_arguments.delta",
+		"response.function_call_arguments.done",
+		"response.custom_tool_call_input.delta",
+		"response.custom_tool_call_input.done":
+		// 这些帧被扣在 pendingLines 里、还没写给客户端；答案输出以携带完整
+		// 参数的 output_item.done（放行点）为准。中途失败时客户端并未收到
+		// 任何答案，保持可换号。
+		return false
 	case "response.output_item.added", "response.output_item.done":
 		item := gjson.Get(trimmed, "item")
 		if strings.TrimSpace(item.Get("type").String()) == "reasoning" {
@@ -1975,7 +1996,10 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	bareErrorAccountSideEffectsPending := false
 	upstreamRequestID := strings.TrimSpace(resp.Header.Get("x-request-id"))
 	// pendingLines 在首个可见输出前保留前导事件，确保无输出失败仍可安全 failover。
+	// 工具调用参数帧也扣在这里直到 item 完成；pendingBytes 超出上限即放弃保护
+	// 立刻放行（fail-open），迟到的保护不能变成饿死下游。
 	pendingLines := make([]string, 0, 8)
+	pendingBytes := 0
 
 	// ── 首个可见输出之前的下游 keepalive ──────────────────────────────────
 	//
@@ -2277,8 +2301,13 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		}
 
 		if !clientDisconnected && !failureDelivered && !suppressCurrentEvent {
+			if !clientOutputStarted && !lineStartsClientOutput &&
+				pendingBytes+len(line) > openAIPassthroughPendingMaxBytes {
+				lineStartsClientOutput = true
+			}
 			if !clientOutputStarted && !lineStartsClientOutput {
 				pendingLines = append(pendingLines, line)
+				pendingBytes += len(line)
 				continue
 			}
 			// 真实输出开始，心跳的使命结束。停拍是幂等的，且会与心跳 goroutine
