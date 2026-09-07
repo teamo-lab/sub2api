@@ -98,6 +98,23 @@ describe('BulkEditAccountModal', () => {
     } as any)
   })
 
+  it('批量修改 OpenAI OAuth sticky burst 时写入 extra', async () => {
+    const wrapper = mountModal({
+      selectedPlatforms: ['openai'],
+      selectedTypes: ['oauth']
+    })
+
+    expect(wrapper.find('#bulk-edit-sticky-burst').exists()).toBe(true)
+    await wrapper.get('#bulk-edit-sticky-burst-enabled').setValue(true)
+    await wrapper.get('#bulk-edit-sticky-burst').setValue(3)
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], {
+      extra: { openai_sticky_burst: 3 }
+    })
+  })
+
   it('批量修改倍率时提示自动同步账号需要先关闭同步', async () => {
     const wrapper = mountModal()
 

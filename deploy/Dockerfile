@@ -18,7 +18,10 @@ ARG GOSUMDB=sum.golang.google.cn
 FROM ${NODE_IMAGE} AS frontend-builder
 
 WORKDIR /app/frontend
-ENV NODE_OPTIONS=--max-old-space-size=1536
+# The production frontend currently exceeds V8's 1.5 GiB heap during
+# vue-tsc + Vite bundling on clean builders. This affects the build stage only;
+# the final runtime image does not inherit NODE_OPTIONS.
+ENV NODE_OPTIONS=--max-old-space-size=3072
 
 # Install pnpm. Keep this pinned to the lockfile-compatible major version so
 # Docker builds remain reproducible when pnpm changes config validation rules.

@@ -90,9 +90,14 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		c.Header("x-request-id", v)
 	}
 	applyAttemptResponseHeaders := func() {
-		if !stageFirstOutput || len(attemptResponseHeaders) == 0 || c.Writer.Written() {
+		if !stageFirstOutput || c.Writer.Written() {
 			return
 		}
+		// The first business output is the cross-service commit point. When an
+		// internal Router Gateway has opted into the contract, expose the
+		// decision before releasing the held prefix so Gateway can safely stop
+		// considering fallback for this attempt.
+		SetRouterOutcome(c, RouterOutcomeBusinessCommit)
 		for key, values := range attemptResponseHeaders {
 			for _, value := range values {
 				c.Writer.Header().Add(key, value)

@@ -2243,6 +2243,13 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	if strings.TrimSpace(previousResponseID) == "" {
 		guardianParentAccountID = s.resolveOpenAIGuardianParentAccountID(ctx, groupID)
 	}
+	ctx = withOpenAIStickyPriorityReclaim(
+		ctx,
+		groupID,
+		strings.TrimSpace(previousResponseID),
+		guardianParentAccountID,
+		requiredImageCapability != "",
+	)
 	scheduler := s.getOpenAIAccountScheduler(ctx)
 	if scheduler == nil {
 		decision.Layer = openAIAccountScheduleLayerLoadBalance
@@ -2445,6 +2452,10 @@ func (s *OpenAIGatewayService) ReportOpenAIAccountScheduleResult(account *Accoun
 // scheduler-result path, for example after semantic response bytes were sent.
 func (s *OpenAIGatewayService) ObserveOpenAIAccountHealthFailure(ctx context.Context, account *Account, observedErr error) bool {
 	if s == nil || s.rateLimitService == nil || account == nil || observedErr == nil {
+		return false
+	}
+	var terminal *UpstreamFailoverError
+	if errors.As(observedErr, &terminal) && terminal.Reason == OpenAIContentAuditRejectedReason {
 		return false
 	}
 	return s.rateLimitService.ObserveOpenAIAPIKeyHealthFailure(ctx, account, observedErr)

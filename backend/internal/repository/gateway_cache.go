@@ -18,9 +18,16 @@ const stickySessionPrefix = "sticky_session:"
 const openAIResponsesSessionWindowPrefix = "openai_responses_session_window:"
 const liveCallPrefix = "live:call:"
 
+const (
+	openAIStickyBurstRecentPrefix  = "openai_sticky_burst:recent:"
+	openAIStickyBurstMetricsPrefix = "openai_sticky_burst:metrics:"
+)
+
 type gatewayCache struct {
 	rdb *redis.Client
 }
+
+var _ service.OpenAIStickyBurstStore = (*gatewayCache)(nil)
 
 func NewGatewayCache(rdb *redis.Client) service.GatewayCache {
 	return &gatewayCache{rdb: rdb}
@@ -68,6 +75,46 @@ func (c *gatewayCache) RefreshSessionTTL(ctx context.Context, groupID int64, ses
 func (c *gatewayCache) DeleteSessionAccountID(ctx context.Context, groupID int64, sessionHash string) error {
 	key := buildSessionKey(groupID, sessionHash)
 	return c.rdb.Del(ctx, key).Err()
+}
+
+func buildOpenAIStickyBurstRecentKey(groupID int64, sessionKey string) string {
+	return fmt.Sprintf("%s%d:%s", openAIStickyBurstRecentPrefix, groupID, sessionKey)
+}
+
+func (c *gatewayCache) GetOpenAIStickyBurstRecent(ctx context.Context, groupID int64, sessionKey string) (int64, error) {
+	accountID, err := c.rdb.Get(ctx, buildOpenAIStickyBurstRecentKey(groupID, sessionKey)).Int64()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return 0, service.ErrOpenAIStickyBurstRecentNotFound
+		}
+		return 0, err
+	}
+	return accountID, nil
+}
+
+func (c *gatewayCache) SetOpenAIStickyBurstRecent(ctx context.Context, groupID int64, sessionKey string, accountID int64, ttl time.Duration) error {
+	if ttl <= 0 {
+		ttl = 10 * time.Minute
+	}
+	return c.rdb.Set(ctx, buildOpenAIStickyBurstRecentKey(groupID, sessionKey), accountID, ttl).Err()
+}
+
+func openAIStickyBurstMetricKey(now time.Time) string {
+	cst := time.FixedZone("CST", 8*60*60)
+	return openAIStickyBurstMetricsPrefix + now.In(cst).Format("2006-01-02")
+}
+
+func (c *gatewayCache) IncrementOpenAIStickyBurstMetric(ctx context.Context, accountID int64, event string, ttl time.Duration) error {
+	if ttl <= 0 {
+		ttl = 72 * time.Hour
+	}
+	key := openAIStickyBurstMetricKey(time.Now())
+	field := fmt.Sprintf("%d:%s", accountID, strings.TrimSpace(event))
+	pipe := c.rdb.TxPipeline()
+	pipe.HIncrBy(ctx, key, field, 1)
+	pipe.Expire(ctx, key, ttl)
+	_, err := pipe.Exec(ctx)
+	return err
 }
 
 var claimOpenAIResponsesSessionWindowScript = redis.NewScript(`

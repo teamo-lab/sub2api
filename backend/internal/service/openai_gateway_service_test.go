@@ -253,6 +253,7 @@ type stubConcurrencyCache struct {
 	loadBatchErr    error
 	loadMap         map[int64]*AccountLoadInfo
 	acquireResults  map[int64]bool
+	acquireByLimit  map[int64]map[int]bool
 	waitCounts      map[int64]int
 	skipDefaultLoad bool
 }
@@ -298,6 +299,11 @@ func (w *failingGinWriter) Write(p []byte) (int, error) {
 }
 
 func (c stubConcurrencyCache) AcquireAccountSlot(ctx context.Context, accountID int64, maxConcurrency int, requestID string) (bool, error) {
+	if byLimit, ok := c.acquireByLimit[accountID]; ok {
+		if result, exists := byLimit[maxConcurrency]; exists {
+			return result, nil
+		}
+	}
 	if c.acquireResults != nil {
 		if result, ok := c.acquireResults[accountID]; ok {
 			return result, nil
@@ -708,6 +714,8 @@ func (c stubConcurrencyCache) GetAccountWaitingCount(ctx context.Context, accoun
 type stubGatewayCache struct {
 	sessionBindings map[string]int64
 	deletedSessions map[string]int
+	burstRecent     map[string]int64
+	burstMetrics    map[string]int64
 }
 
 func (c *stubGatewayCache) GetSessionAccountID(ctx context.Context, groupID int64, sessionHash string) (int64, error) {
@@ -738,6 +746,29 @@ func (c *stubGatewayCache) DeleteSessionAccountID(ctx context.Context, groupID i
 	}
 	c.deletedSessions[sessionHash]++
 	delete(c.sessionBindings, sessionHash)
+	return nil
+}
+
+func (c *stubGatewayCache) GetOpenAIStickyBurstRecent(_ context.Context, groupID int64, sessionKey string) (int64, error) {
+	if id, ok := c.burstRecent[fmt.Sprintf("%d:%s", groupID, sessionKey)]; ok {
+		return id, nil
+	}
+	return 0, ErrOpenAIStickyBurstRecentNotFound
+}
+
+func (c *stubGatewayCache) SetOpenAIStickyBurstRecent(_ context.Context, groupID int64, sessionKey string, accountID int64, _ time.Duration) error {
+	if c.burstRecent == nil {
+		c.burstRecent = make(map[string]int64)
+	}
+	c.burstRecent[fmt.Sprintf("%d:%s", groupID, sessionKey)] = accountID
+	return nil
+}
+
+func (c *stubGatewayCache) IncrementOpenAIStickyBurstMetric(_ context.Context, accountID int64, event string, _ time.Duration) error {
+	if c.burstMetrics == nil {
+		c.burstMetrics = make(map[string]int64)
+	}
+	c.burstMetrics[fmt.Sprintf("%d:%s", accountID, event)]++
 	return nil
 }
 
@@ -1248,6 +1279,128 @@ func TestOpenAISelectAccountWithLoadAwareness_StickyCapacitySpilloverKeepsBindin
 	if selection.ReleaseFunc != nil {
 		selection.ReleaseFunc()
 	}
+}
+
+func TestOpenAISelectAccountWithLoadAwareness_ReclaimsP2StickyWhenP1HasSlot(t *testing.T) {
+	sessionHash := "p2-sticky-reclaim"
+	groupID := openAIStickyPriorityReclaimGroupID
+	repo := groupAwareStubOpenAIAccountRepo{stubOpenAIAccountRepo{accounts: []Account{
+		{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, Concurrency: 3, Priority: 1, GroupIDs: []int64{groupID}},
+		{ID: 69, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true, Concurrency: 400, Priority: 2, GroupIDs: []int64{groupID}},
+	}}}
+	cache := &stubGatewayCache{sessionBindings: map[string]int64{"openai:" + sessionHash: 69}}
+	concurrencyCache := stubConcurrencyCache{
+		acquireResults: map[int64]bool{1: true, 69: true},
+		loadMap: map[int64]*AccountLoadInfo{
+			1:  {AccountID: 1, LoadRate: 0},
+			69: {AccountID: 69, LoadRate: 0},
+		},
+	}
+	cfg := &config.Config{RunMode: config.RunModeStandard}
+	cfg.Gateway.Scheduling.LoadBatchEnabled = true
+	svc := &OpenAIGatewayService{
+		accountRepo:        repo,
+		cache:              cache,
+		cfg:                cfg,
+		concurrencyService: NewConcurrencyService(concurrencyCache),
+	}
+	ctx := withOpenAIStickyPriorityReclaim(context.Background(), &groupID, "", 0, false)
+
+	selection, err := svc.selectAccountWithLoadAwareness(ctx, &groupID, PlatformOpenAI, sessionHash, "gpt-5.6-sol", nil, false, "", true)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.NotNil(t, selection.Account)
+	require.Equal(t, int64(1), selection.Account.ID)
+	require.Equal(t, int64(1), cache.sessionBindings["openai:"+sessionHash])
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+}
+
+func TestOpenAISelectAccountWithLoadAwareness_KeepsP2StickyWhenP1IsBusy(t *testing.T) {
+	sessionHash := "p2-sticky-p1-busy"
+	groupID := openAIStickyPriorityReclaimGroupID
+	repo := groupAwareStubOpenAIAccountRepo{stubOpenAIAccountRepo{accounts: []Account{
+		{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, Concurrency: 3, Priority: 1, GroupIDs: []int64{groupID}},
+		{ID: 69, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true, Concurrency: 400, Priority: 2, GroupIDs: []int64{groupID}},
+	}}}
+	cache := &stubGatewayCache{sessionBindings: map[string]int64{"openai:" + sessionHash: 69}}
+	concurrencyCache := stubConcurrencyCache{
+		acquireResults: map[int64]bool{1: false, 69: true},
+		loadMap: map[int64]*AccountLoadInfo{
+			1:  {AccountID: 1, CurrentConcurrency: 3, LoadRate: 100},
+			69: {AccountID: 69, CurrentConcurrency: 0, LoadRate: 0},
+		},
+	}
+	cfg := &config.Config{RunMode: config.RunModeStandard}
+	cfg.Gateway.Scheduling.LoadBatchEnabled = true
+	svc := &OpenAIGatewayService{
+		accountRepo:        repo,
+		cache:              cache,
+		cfg:                cfg,
+		concurrencyService: NewConcurrencyService(concurrencyCache),
+	}
+	ctx := withOpenAIStickyPriorityReclaim(context.Background(), &groupID, "", 0, false)
+
+	selection, err := svc.selectAccountWithLoadAwareness(ctx, &groupID, PlatformOpenAI, sessionHash, "gpt-5.6-sol", nil, false, "", true)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.NotNil(t, selection.Account)
+	require.Equal(t, int64(69), selection.Account.ID)
+	require.Equal(t, int64(69), cache.sessionBindings["openai:"+sessionHash])
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+}
+
+func TestOpenAISelectAccountWithLoadAwareness_DoesNotReclaimWithoutRequestGate(t *testing.T) {
+	sessionHash := "p2-sticky-no-reclaim"
+	groupID := openAIStickyPriorityReclaimGroupID
+	repo := groupAwareStubOpenAIAccountRepo{stubOpenAIAccountRepo{accounts: []Account{
+		{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, Concurrency: 3, Priority: 1, GroupIDs: []int64{groupID}},
+		{ID: 69, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true, Concurrency: 400, Priority: 2, GroupIDs: []int64{groupID}},
+	}}}
+	cache := &stubGatewayCache{sessionBindings: map[string]int64{"openai:" + sessionHash: 69}}
+	concurrencyCache := stubConcurrencyCache{acquireResults: map[int64]bool{1: true, 69: true}}
+	cfg := &config.Config{RunMode: config.RunModeStandard}
+	cfg.Gateway.Scheduling.LoadBatchEnabled = true
+	svc := &OpenAIGatewayService{
+		accountRepo:        repo,
+		cache:              cache,
+		cfg:                cfg,
+		concurrencyService: NewConcurrencyService(concurrencyCache),
+	}
+
+	selection, err := svc.selectAccountWithLoadAwareness(context.Background(), &groupID, PlatformOpenAI, sessionHash, "gpt-5.6-sol", nil, false, "", true)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.NotNil(t, selection.Account)
+	require.Equal(t, int64(69), selection.Account.ID)
+	require.Equal(t, int64(69), cache.sessionBindings["openai:"+sessionHash])
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+}
+
+func TestWithOpenAIStickyPriorityReclaim_GatesUnsafeRequestShapes(t *testing.T) {
+	groupID := openAIStickyPriorityReclaimGroupID
+	otherGroupID := groupID + 1
+
+	require.True(t, openAIStickyPriorityReclaimEnabled(
+		withOpenAIStickyPriorityReclaim(context.Background(), &groupID, "", 0, false),
+	))
+	require.False(t, openAIStickyPriorityReclaimEnabled(
+		withOpenAIStickyPriorityReclaim(context.Background(), &groupID, "resp_owner", 0, false),
+	), "previous_response_id must stay on its upstream owner")
+	require.False(t, openAIStickyPriorityReclaimEnabled(
+		withOpenAIStickyPriorityReclaim(context.Background(), &groupID, "", 69, false),
+	), "guardian-parent routes must preserve their binding")
+	require.False(t, openAIStickyPriorityReclaimEnabled(
+		withOpenAIStickyPriorityReclaim(context.Background(), &groupID, "", 0, true),
+	), "image requests are outside the text canary")
+	require.False(t, openAIStickyPriorityReclaimEnabled(
+		withOpenAIStickyPriorityReclaim(context.Background(), &otherGroupID, "", 0, false),
+	), "the canary must remain scoped to group 80")
 }
 
 func TestOpenAISelectAccountWithLoadAwareness_PrefersLowerLoad(t *testing.T) {

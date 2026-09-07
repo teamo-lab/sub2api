@@ -693,7 +693,7 @@
       </div>
 
       <!-- Concurrency & Priority -->
-      <div class="grid grid-cols-2 gap-4 border-t border-gray-200 pt-4 dark:border-dark-600 lg:grid-cols-4">
+      <div class="grid grid-cols-2 gap-4 border-t border-gray-200 pt-4 dark:border-dark-600 lg:grid-cols-5">
         <div>
           <div class="mb-3 flex items-center justify-between">
             <label
@@ -722,6 +722,37 @@
             aria-labelledby="bulk-edit-concurrency-label"
             @input="concurrency = Math.max(1, concurrency || 1)"
           />
+        </div>
+        <div v-if="allOpenAIOAuthOnly">
+          <div class="mb-3 flex items-center justify-between">
+            <label
+              id="bulk-edit-sticky-burst-label"
+              class="input-label mb-0"
+              for="bulk-edit-sticky-burst-enabled"
+            >
+              {{ t('admin.accounts.stickyBurst') }}
+            </label>
+            <input
+              v-model="enableStickyBurst"
+              id="bulk-edit-sticky-burst-enabled"
+              type="checkbox"
+              aria-controls="bulk-edit-sticky-burst"
+              class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+            />
+          </div>
+          <input
+            v-model.number="stickyBurst"
+            id="bulk-edit-sticky-burst"
+            type="number"
+            min="0"
+            max="10"
+            :disabled="!enableStickyBurst"
+            class="input"
+            :class="!enableStickyBurst && 'cursor-not-allowed opacity-50'"
+            aria-labelledby="bulk-edit-sticky-burst-label"
+            @input="stickyBurst = Math.min(10, Math.max(0, stickyBurst ?? 1))"
+          />
+          <p class="input-hint">{{ t('admin.accounts.stickyBurstHint') }}</p>
         </div>
         <div>
           <div class="mb-3 flex items-center justify-between">
@@ -1652,6 +1683,7 @@ const enableInterceptWarmup = ref(false)
 const enableHeaderOverride = ref(false)
 const enableProxy = ref(false)
 const enableConcurrency = ref(false)
+const enableStickyBurst = ref(false)
 const enableLoadFactor = ref(false)
 const enablePriority = ref(false)
 const enableRateMultiplier = ref(false)
@@ -1687,6 +1719,7 @@ const headerOverrideEnabled = ref(false)
 const headerOverrideRows = ref<HeaderOverrideRow[]>([])
 const proxyId = ref<number | null>(null)
 const concurrency = ref(1)
+const stickyBurst = ref(1)
 const loadFactor = ref<number | null>(null)
 const priority = ref(1)
 const rateMultiplier = ref(1)
@@ -1943,6 +1976,11 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
 
   if (enableConcurrency.value) {
     updates.concurrency = concurrency.value
+  }
+
+  if (enableStickyBurst.value && allOpenAIOAuthOnly.value) {
+    const extra = ensureExtra()
+    extra.openai_sticky_burst = Math.min(10, Math.max(0, stickyBurst.value ?? 1))
   }
 
   if (enableLoadFactor.value) {
@@ -2212,6 +2250,7 @@ const handleSubmit = async () => {
     enableHeaderOverride.value ||
     enableProxy.value ||
     enableConcurrency.value ||
+    (enableStickyBurst.value && allOpenAIOAuthOnly.value) ||
     enableLoadFactor.value ||
     enablePriority.value ||
     enableRateMultiplier.value ||
@@ -2358,6 +2397,7 @@ watch(
       enableHeaderOverride.value = false
       enableProxy.value = false
       enableConcurrency.value = false
+      enableStickyBurst.value = false
       enableLoadFactor.value = false
       enablePriority.value = false
       enableRateMultiplier.value = false
@@ -2396,6 +2436,7 @@ watch(
       headerOverrideRows.value = []
       proxyId.value = null
       concurrency.value = 1
+      stickyBurst.value = 1
       loadFactor.value = null
       priority.value = 1
       rateMultiplier.value = 1

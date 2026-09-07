@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+release_id="${1:-}"
+candidate_version="${2:-}"
+candidate_image="${3:-}"
+action_prefix="${4:-stage-$(date -u +%Y%m%dT%H%M%SZ)}"
+root="${SUB2API_DEPLOY_ROOT:-/opt/sub2api/deploy}"
+if [[ -f "$root/rollout/site.env" ]]; then set -a; source "$root/rollout/site.env"; set +a; fi
+controller="$root/bin/sub2api-rollout"
+compose=(docker compose -p sub2api-rollout -f "$root/docker-compose.bluegreen.yml")
+
+fail() {
+  printf '{"ok":false,"error_code":"%s","message":"%s"}\n' "$1" "$2"
+  exit "${3:-4}"
+}
+
+[[ "$release_id" =~ ^[A-Za-z0-9._:+@/-]{1,128}$ ]] || fail invalid_release_id 'release ID is required' 2
+[[ "$candidate_version" =~ ^[A-Za-z0-9._:+@/-]{1,128}$ ]] || fail invalid_version 'candidate version is required' 2
+[[ "$candidate_image" =~ ^sha256:[0-9a-f]{64}$ ]] || fail invalid_candidate_digest 'candidate image must be an immutable sha256 image ID' 2
+[[ "$action_prefix" =~ ^[A-Za-z0-9._:+@/-]{1,96}$ ]] || fail invalid_action_prefix 'action prefix is invalid' 2
+[[ -x "$controller" ]] || fail controller_missing 'rollout controller is unavailable'
+docker image inspect "$candidate_image" >/dev/null 2>&1 || fail candidate_image_missing 'candidate image is not present on this host' 6
+
+status="$($controller status --json)"
+stable="$(jq -r .stable_slot <<<"$status")"
+candidate="$(jq -r .candidate_slot <<<"$status")"
+[[ "$stable" =~ ^(blue|green)$ && "$candidate" =~ ^(blue|green)$ && "$stable" != "$candidate" ]] \
+  || fail invalid_slots 'stable/candidate slots are invalid'
+[[ "$(jq -r --arg stable "$stable" '.[$stable].health' <<<"$status")" == healthy ]] \
+  || fail stable_unhealthy 'stable slot is unhealthy'
+[[ "$(jq -r --arg stable "$stable" '.[$stable].weight' <<<"$status")" == 100 ]] \
+  || fail stable_weight_invalid 'stable slot must own 100 percent traffic'
+[[ "$(jq -r --arg candidate "$candidate" '.[$candidate].health' <<<"$status")" == healthy ]] \
+  || fail candidate_unhealthy 'idle candidate is unhealthy before replacement'
+[[ "$(jq -r --arg candidate "$candidate" '.[$candidate].weight' <<<"$status")" == 0 ]] \
+  || fail candidate_weight_invalid 'candidate must be at zero weight'
+[[ "$(jq -r --arg candidate "$candidate" '.[$candidate].active_streams' <<<"$status")" == 0 ]] \
+  || fail candidate_has_streams 'candidate still has active streams'
+
+env_value() {
+  local container="$1" key="$2"
+  docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container" \
+    | awk -F= -v wanted="$key" '$1 == wanted {sub(/^[^=]*=/, ""); print; exit}'
+}
+
+stable_container="sub2api-$stable"
+candidate_container="sub2api-$candidate"
+stable_image="$(docker inspect --format '{{.Image}}' "$stable_container")"
+[[ "$stable_image" =~ ^sha256:[0-9a-f]{64}$ ]] || fail stable_digest_invalid 'stable image ID is not immutable'
+[[ "$candidate_image" != "$stable_image" ]] || fail candidate_matches_stable 'use stage-identical-release for an identical image' 2
+
+blue_image="$(docker inspect --format '{{.Image}}' sub2api-blue)"
+green_image="$(docker inspect --format '{{.Image}}' sub2api-green)"
+blue_release="$(env_value sub2api-blue SUB2API_RELEASE_ID)"
+green_release="$(env_value sub2api-green SUB2API_RELEASE_ID)"
+blue_version="$(env_value sub2api-blue SUB2API_DEPLOYMENT_VERSION)"
+green_version="$(env_value sub2api-green SUB2API_DEPLOYMENT_VERSION)"
+
+"$controller" prepare-stage --release-id "$release_id" --candidate-slot "$candidate" \
+  --schema-compatible --actor codex --action-id "$action_prefix-prepare" --json >/dev/null
+
+if [[ "$candidate" == blue ]]; then
+  blue_image="$candidate_image"
+  blue_release="$release_id"
+  blue_version="$candidate_version"
+else
+  green_image="$candidate_image"
+  green_release="$release_id"
+  green_version="$candidate_version"
+fi
+
+common_env=(
+  SUB2API_BLUE_IMAGE="$blue_image" SUB2API_BLUE_RELEASE_ID="$blue_release" SUB2API_BLUE_VERSION="$blue_version" SUB2API_BLUE_DIGEST="$blue_image"
+  SUB2API_GREEN_IMAGE="$green_image" SUB2API_GREEN_RELEASE_ID="$green_release" SUB2API_GREEN_VERSION="$green_version" SUB2API_GREEN_DIGEST="$green_image"
+  SUB2API_WORKER_IMAGE="$stable_image" SUB2API_WORKER_RELEASE_ID="$release_id" SUB2API_WORKER_VERSION="$candidate_version" SUB2API_WORKER_DIGEST="$stable_image"
+)
+
+profile_args=()
+[[ "$candidate" == green ]] && profile_args=(--profile candidate)
+env "${common_env[@]}" "${compose[@]}" "${profile_args[@]}" up -d --no-deps --no-build --force-recreate "$candidate_container" >/dev/null
+
+candidate_health=""
+for attempt in $(seq 1 90); do
+  candidate_health="$(docker inspect --format '{{.State.Health.Status}}' "$candidate_container" 2>/dev/null || true)"
+  [[ "$candidate_health" == healthy ]] && break
+  sleep 2
+done
+[[ "$candidate_health" == healthy ]] || fail candidate_start_failed 'candidate did not become healthy' 6
+[[ "$(docker inspect --format '{{.Image}}' "$candidate_container")" == "$candidate_image" ]] \
+  || fail candidate_digest_mismatch 'candidate does not use the requested immutable image'
+[[ "$(docker inspect --format '{{.RestartCount}}' "$candidate_container")" == 0 ]] \
+  || fail candidate_restarted 'candidate restarted during staging'
+
+candidate_ip="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$candidate_container")"
+observed_slot="$(curl -fsS -D - -o /dev/null --max-time 5 "http://$candidate_ip:8080/health" \
+  | awk -F': ' 'tolower($1)=="x-sub2api-deployment-slot" {gsub("\\r", "", $2); print $2}')"
+[[ "$observed_slot" == "$candidate" ]] || fail candidate_identity_mismatch 'candidate health response has the wrong slot identity'
+
+"$controller" stage --release-id "$release_id" --candidate-slot "$candidate" \
+  --candidate-version "$candidate_version" --candidate-digest "$candidate_image" --schema-compatible \
+  --actor codex --action-id "$action_prefix-stage" --json \
+  | jq -c '{action,result,release_id,phase,stable_slot,candidate_slot,rollback_target_slot,
+            blue:{health:.blue.health,weight:.blue.weight,version:.blue.version,digest:.blue.digest},
+            green:{health:.green.health,weight:.green.weight,version:.green.version,digest:.green.digest},rollback}'

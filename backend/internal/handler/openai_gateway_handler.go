@@ -772,6 +772,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			}()
 			return h.gatewayService.Forward(c.Request.Context(), c, account, attemptBody)
 		}()
+		h.gatewayService.ObserveOpenAIStickyBurstResult(
+			c.Request.Context(), apiKey.GroupID, sessionHash, account.ID, reqModel,
+			selection.StickyBurstBypass, err == nil && openAIForwardSucceededForScheduling(result), err,
+		)
 		var cyberBlockBodyHTTP []byte
 		if service.GetOpsCyberPolicy(c) != nil {
 			cyberBlockBodyHTTP = sessionHashBody
@@ -1337,6 +1341,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			}()
 			return h.gatewayService.ForwardAsAnthropic(c.Request.Context(), c, account, forwardBody, promptCacheKey, defaultMappedModel)
 		}()
+		h.gatewayService.ObserveOpenAIStickyBurstResult(
+			c.Request.Context(), apiKey.GroupID, sessionHash, account.ID, currentRoutingModel,
+			selection.StickyBurstBypass, err == nil && openAIForwardSucceededForScheduling(result), err,
+		)
 		var cyberBlockBodyMsg []byte
 		if service.GetOpsCyberPolicy(c) != nil {
 			cyberBlockBodyMsg = body
@@ -1563,6 +1571,10 @@ func (h *OpenAIGatewayHandler) anthropicStreamingAwareError(c *gin.Context, stat
 func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, failoverErr *service.UpstreamFailoverError, streamStarted bool) {
 	if failoverErr != nil {
 		copyFailoverRetryAfter(c, failoverErr.ResponseHeaders)
+	}
+	if failoverErr != nil && failoverErr.Reason == service.OpenAIContentAuditRejectedReason {
+		h.anthropicStreamingAwareError(c, http.StatusForbidden, "permission_error", failoverErr.ClientMessage, streamStarted)
+		return
 	}
 	if failoverErr != nil && failoverErr.IsCredentialFailure() {
 		status, message := credentialFailoverClientResponse(failoverErr)
@@ -3273,10 +3285,27 @@ func (h *OpenAIGatewayHandler) handleConcurrencyError(c *gin.Context, err error,
 
 func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverErr *service.UpstreamFailoverError, streamStarted bool) {
 	if failoverErr == nil {
+		if streamStarted || (c != nil && c.Writer.Written()) {
+			service.SetRouterOutcome(c, service.RouterOutcomeBusinessCommit)
+		} else {
+			service.SetRouterOutcome(c, service.RouterOutcomeRetryableAbort)
+		}
 		h.handleFailoverExhaustedSimple(c, http.StatusBadGateway, streamStarted)
 		return
 	}
+	if failoverErr.Reason == service.OpenAIContentAuditRejectedReason {
+		service.SetRouterOutcome(c, service.RouterOutcomeTerminalError)
+		service.SetOpsUpstreamError(c, http.StatusForbidden, failoverErr.ClientMessage, "")
+		if !streamStarted && !c.Writer.Written() && gjson.GetBytes(failoverErr.ResponseBody, "error").IsObject() {
+			service.MarkResponseCommitted(c)
+			c.Data(http.StatusForbidden, "application/json", failoverErr.ResponseBody)
+		} else {
+			h.handleStreamingAwareError(c, http.StatusForbidden, "permission_error", failoverErr.ClientMessage, streamStarted)
+		}
+		return
+	}
 	if failoverErr.IsOpenAIRequestBodyTooLarge() {
+		service.SetRouterOutcome(c, service.RouterOutcomeTerminalError)
 		service.SetOpsUpstreamError(c, http.StatusRequestEntityTooLarge, service.OpenAIRequestBodyTooLargeClientMessage, "")
 		h.handleStreamingAwareError(
 			c,
@@ -3288,6 +3317,7 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 		return
 	}
 	if failoverErr.Reason == service.OpenAIHTTPContinuationUnsupportedReason {
+		service.SetRouterOutcome(c, service.RouterOutcomeTerminalError)
 		message := strings.TrimSpace(failoverErr.ClientMessage)
 		if message == "" {
 			message = "previous_response_id requires an OpenAI API-key account for HTTP requests"
@@ -3296,6 +3326,11 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 		return
 	}
 	copyFailoverRetryAfter(c, failoverErr.ResponseHeaders)
+	if streamStarted || (c != nil && c.Writer.Written()) {
+		service.SetRouterOutcome(c, service.RouterOutcomeBusinessCommit)
+	} else {
+		service.SetRouterOutcome(c, service.RouterOutcomeRetryableAbort)
+	}
 	if failoverErr.IsCredentialFailure() {
 		status, message := credentialFailoverClientResponse(failoverErr)
 		h.handleStreamingAwareError(c, status, "upstream_error", message, streamStarted)
@@ -3396,6 +3431,11 @@ func isSafeRetryAfter(value string) bool {
 
 // handleFailoverExhaustedSimple 简化版本，用于没有响应体的情况
 func (h *OpenAIGatewayHandler) handleFailoverExhaustedSimple(c *gin.Context, statusCode int, streamStarted bool) {
+	if streamStarted || (c != nil && c.Writer.Written()) {
+		service.SetRouterOutcome(c, service.RouterOutcomeBusinessCommit)
+	} else {
+		service.SetRouterOutcome(c, service.RouterOutcomeRetryableAbort)
+	}
 	status, errType, errMsg := h.mapUpstreamError(statusCode)
 	service.SetOpsUpstreamError(c, statusCode, errMsg, "")
 	h.handleStreamingAwareError(c, status, errType, errMsg, streamStarted)
@@ -3728,6 +3768,12 @@ func closeOpenAIWSFailoverExhausted(c *gin.Context, conn *coderws.Conn, failover
 		}
 	}
 
+	if failoverErr != nil && failoverErr.Reason == service.OpenAIContentAuditRejectedReason {
+		intendedStatus = http.StatusForbidden
+		errorType = "permission_error"
+		message = failoverErr.ClientMessage
+		closeStatus = coderws.StatusPolicyViolation
+	}
 	service.MarkOpsStreamFailure(c, errorType, errorCode, message, intendedStatus)
 	closeOpenAIClientWS(conn, closeStatus, message)
 }

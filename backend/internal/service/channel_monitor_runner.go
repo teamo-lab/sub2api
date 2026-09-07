@@ -11,6 +11,8 @@ import (
 	"github.com/alitto/pond/v2"
 )
 
+const monitorConfigSyncInterval = 30 * time.Second
+
 // MonitorScheduler 调度器接口，供 ChannelMonitorService 在 CRUD 时回调，
 // 用 setter 注入避免 service ↔ runner 的 wire 依赖环。
 type MonitorScheduler interface {
@@ -127,16 +129,15 @@ func (r *ChannelMonitorRunner) Start() {
 	r.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), monitorStartupLoadTimeout)
-	defer cancel()
-	enabled, err := r.svc.ListEnabledMonitors(ctx)
+	count, err := r.syncEnabledMonitors(ctx)
+	cancel()
 	if err != nil {
 		slog.Error("channel_monitor: load enabled monitors failed at startup", "error", err)
-		return
 	}
-	for _, m := range enabled {
-		r.Schedule(m)
-	}
-	slog.Info("channel_monitor: runner started", "scheduled_tasks", len(enabled))
+
+	r.wg.Add(1)
+	go r.runConfigSync()
+	slog.Info("channel_monitor: runner started", "scheduled_tasks", count)
 }
 
 // Schedule 为指定监控创建（或重置）独立定时任务。
@@ -195,6 +196,70 @@ func (r *ChannelMonitorRunner) Schedule(m *ChannelMonitor) {
 	r.mu.Unlock()
 
 	go r.runScheduled(ctx, task)
+}
+
+func (r *ChannelMonitorRunner) runConfigSync() {
+	defer r.wg.Done()
+	ticker := time.NewTicker(monitorConfigSyncInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.parentCtx.Done():
+			return
+		case <-ticker.C:
+			ctx, cancel := context.WithTimeout(r.parentCtx, monitorStartupLoadTimeout)
+			_, err := r.syncEnabledMonitors(ctx)
+			cancel()
+			if err != nil && r.parentCtx.Err() == nil {
+				slog.Error("channel_monitor: sync enabled monitors failed", "error", err)
+			}
+		}
+	}
+}
+
+func (r *ChannelMonitorRunner) syncEnabledMonitors(ctx context.Context) (int, error) {
+	enabled, err := r.svc.ListEnabledMonitors(ctx)
+	if err != nil {
+		return 0, err
+	}
+	seen := make(map[int64]struct{}, len(enabled))
+	for _, monitor := range enabled {
+		if monitor == nil {
+			continue
+		}
+		seen[monitor.ID] = struct{}{}
+		if !r.monitorMatches(monitor) {
+			r.Schedule(monitor)
+		}
+	}
+
+	r.mu.Lock()
+	stale := make([]int64, 0)
+	for id := range r.tasks {
+		if _, ok := seen[id]; !ok {
+			stale = append(stale, id)
+		}
+	}
+	r.mu.Unlock()
+	for _, id := range stale {
+		r.Unschedule(id)
+	}
+	return len(seen), nil
+}
+
+func (r *ChannelMonitorRunner) monitorMatches(monitor *ChannelMonitor) bool {
+	if r == nil || monitor == nil || !monitor.Enabled || monitor.APIKeyDecryptFailed {
+		return false
+	}
+	interval := time.Duration(monitor.IntervalSeconds) * time.Second
+	jitter := time.Duration(monitor.JitterSeconds) * time.Second
+	if jitter < 0 {
+		jitter = 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	existing, ok := r.tasks[monitor.ID]
+	return ok && existing.name == monitor.Name && existing.interval == interval && existing.jitter == jitter
 }
 
 // Unschedule 取消指定监控的定时任务（若存在）。
