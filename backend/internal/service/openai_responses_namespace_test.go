@@ -271,3 +271,34 @@ func TestStripOpenAIResponsesInternalMetadata(t *testing.T) {
 	require.False(t, shouldStripOpenAIResponsesInternalMetadata(&Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}))
 	require.False(t, shouldStripOpenAIResponsesInternalMetadata(nil))
 }
+
+func TestRepairOpenAIResponsesToolCallNamespaces(t *testing.T) {
+	body := []byte(`{"model":"gpt-6-astra","tools":[` +
+		`{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent"},{"type":"function","name":"send_message"}]},` +
+		`{"type":"namespace","name":"other","tools":[{"type":"function","name":"send_message"}]},` +
+		`{"type":"function","name":"exec"}],` +
+		`"input":[` +
+		`{"type":"function_call","name":"spawn_agent","call_id":"c1","arguments":"{}"},` +
+		`{"type":"function_call","name":"send_message","call_id":"c2","arguments":"{}"},` +
+		`{"type":"function_call","name":"exec","call_id":"c3","arguments":"{}"},` +
+		`{"type":"function_call","namespace":"collaboration","name":"spawn_agent","call_id":"c4","arguments":"{}"},` +
+		`{"type":"message","role":"user","content":"spawn_agent"}]}`)
+
+	repaired, err := repairOpenAIResponsesToolCallNamespaces(body)
+	require.NoError(t, err)
+	// 唯一归属于一个 namespace 的调用项补回 namespace
+	require.Equal(t, "collaboration", gjson.GetBytes(repaired, "input.0.namespace").String())
+	// 两个 namespace 都有 send_message：歧义，不动
+	require.False(t, gjson.GetBytes(repaired, "input.1.namespace").Exists())
+	// 顶层工具不动
+	require.False(t, gjson.GetBytes(repaired, "input.2.namespace").Exists())
+	// 已有 namespace 的保持
+	require.Equal(t, "collaboration", gjson.GetBytes(repaired, "input.3.namespace").String())
+	// 非调用项不动
+	require.False(t, gjson.GetBytes(repaired, "input.4.namespace").Exists())
+
+	plain := []byte(`{"model":"gpt-6-astra","tools":[{"type":"function","name":"exec"}],"input":[{"type":"function_call","name":"exec","call_id":"c1","arguments":"{}"}]}`)
+	same, err := repairOpenAIResponsesToolCallNamespaces(plain)
+	require.NoError(t, err)
+	require.Equal(t, plain, same)
+}

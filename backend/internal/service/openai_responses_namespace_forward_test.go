@@ -240,3 +240,55 @@ func TestOpenAIGatewayService_APIKeyDefaultKeepsNamespacesButStripsInternalMetad
 	require.Equal(t, "collaboration", gjson.GetBytes(forwarded, "input.1.namespace").String())
 	require.NotContains(t, string(forwarded), "internal_chat_message_metadata_passthrough")
 }
+
+// 客户端回传的 function_call 丢了 namespace（线上账号 56 开摊平后仍 400 的样本）：
+// 转发前先按工具声明补回 namespace，再摊平成平名，这样上游不会再报
+// "Missing namespace for function_call"。
+func TestOpenAIGatewayService_APIKeyFlattenRepairsMissingCallNamespace(t *testing.T) {
+	body := []byte(`{
+	"model":"gpt-6-astra",
+	"stream":false,
+	"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"send_message","parameters":{"type":"object"}}]}],
+	"input":[
+		{"type":"function_call","name":"send_message","call_id":"call_1","arguments":"{}"},
+		{"type":"function_call_output","call_id":"call_1","output":"ok"}
+	]
+}`)
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		newOpenAIRejectedFieldTestResponse(http.StatusOK, namespaceForwardOKResponse),
+	}}
+	c := newOpenAIRejectedFieldTestContext(body)
+	account := newOpenAIRejectedFieldTestAccount()
+	account.Extra["openai_responses_flatten_namespaces"] = true
+
+	result, err := newOpenAIRejectedFieldTestService(upstream).Forward(context.Background(), c, account, body)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, upstream.bodies, 1)
+	forwarded := upstream.bodies[0]
+	require.Equal(t, "collaboration__send_message", gjson.GetBytes(forwarded, "input.0.name").String())
+	require.False(t, gjson.GetBytes(forwarded, "input.0.namespace").Exists())
+	require.Equal(t, "collaboration__send_message", gjson.GetBytes(forwarded, "tools.0.name").String())
+}
+
+// 不摊平的 API Key 出口同样补回 namespace（保留 namespace 声明时，上游要求调用项带 namespace）。
+func TestOpenAIGatewayService_APIKeyDefaultRepairsMissingCallNamespace(t *testing.T) {
+	body := []byte(`{
+	"model":"gpt-6-astra",
+	"stream":false,
+	"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"send_message","parameters":{"type":"object"}}]}],
+	"input":[{"type":"function_call","name":"send_message","call_id":"call_1","arguments":"{}"}]
+}`)
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		newOpenAIRejectedFieldTestResponse(http.StatusOK, namespaceForwardOKResponse),
+	}}
+	c := newOpenAIRejectedFieldTestContext(body)
+
+	result, err := newOpenAIRejectedFieldTestService(upstream).Forward(context.Background(), c, newOpenAIRejectedFieldTestAccount(), body)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, upstream.bodies, 1)
+	require.Equal(t, "collaboration", gjson.GetBytes(upstream.bodies[0], "input.0.namespace").String())
+}
