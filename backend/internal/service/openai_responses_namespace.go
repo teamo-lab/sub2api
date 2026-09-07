@@ -42,7 +42,20 @@ func shouldFlattenOpenAIResponsesNamespaces(
 	passthroughEnabled bool,
 	compactPath bool,
 ) bool {
-	if account == nil || !account.IsOpenAIOAuthLike() {
+	if account == nil || !account.IsOpenAI() {
+		return false
+	}
+	if account.IsOpenAIApiKey() {
+		// API Key 出口（尤其是 NewAPI 类中转）不一定认识 namespace 扩展：中转会把
+		// 调用项上的 namespace 丢掉，再转发给 OpenAI 时就变成 400 "Missing namespace
+		// for function_call"。账号开关打开时按标准 Responses 语义摊平工具名并在回程
+		// 还原，让这类上游也能跑 Codex 多智能体会话；compact 端点不参与（沿用原判定）。
+		if compactPath || !account.IsOpenAIResponsesFlattenNamespacesEnabled() {
+			return false
+		}
+		return transport != OpenAIUpstreamTransportResponsesWebsocketV2 || passthroughEnabled
+	}
+	if !account.IsOpenAIOAuthLike() {
 		return false
 	}
 	if !compactPath && !account.IsOpenAIResponsesFlattenNamespacesEnabled() {
@@ -52,6 +65,63 @@ func shouldFlattenOpenAIResponsesNamespaces(
 		return false
 	}
 	return true
+}
+
+// openAIResponsesInternalMetadataField 是 Codex 桌面端在 input 消息项上附带的
+// ChatGPT 内部元数据；chatgpt.com/backend-api 接受它，但标准 Responses API 与
+// Azure / 中转一律返回 400 `Unknown parameter: input[N].internal_chat_message_metadata_passthrough.*`。
+const openAIResponsesInternalMetadataField = "internal_chat_message_metadata_passthrough"
+
+// shouldStripOpenAIResponsesInternalMetadata 判定是否在转发前清掉该字段：只有
+// API Key 出口需要，OAuth 出口是该字段的定义方，原样保留。
+func shouldStripOpenAIResponsesInternalMetadata(account *Account) bool {
+	return account != nil && account.IsOpenAIApiKey()
+}
+
+// stripOpenAIResponsesInternalMetadata 删除 input 数组各项上的
+// internal_chat_message_metadata_passthrough；不含该字段的请求按字节原样返回。
+func stripOpenAIResponsesInternalMetadata(body []byte) ([]byte, error) {
+	if !bytes.Contains(body, []byte(`"`+openAIResponsesInternalMetadataField+`"`)) {
+		return body, nil
+	}
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return body, nil
+	}
+	var rebuilt bytes.Buffer
+	rebuilt.Grow(len(input.Raw))
+	_ = rebuilt.WriteByte('[')
+	changed := false
+	first := true
+	var stripErr error
+	input.ForEach(func(_, item gjson.Result) bool {
+		if !first {
+			_ = rebuilt.WriteByte(',')
+		}
+		first = false
+		itemBody := []byte(item.Raw)
+		if item.IsObject() && item.Get(openAIResponsesInternalMetadataField).Exists() {
+			itemBody, stripErr = sjson.DeleteBytes(itemBody, openAIResponsesInternalMetadataField)
+			if stripErr != nil {
+				return false
+			}
+			changed = true
+		}
+		_, _ = rebuilt.Write(itemBody)
+		return true
+	})
+	_ = rebuilt.WriteByte(']')
+	if stripErr != nil {
+		return body, fmt.Errorf("delete OpenAI input internal metadata: %w", stripErr)
+	}
+	if !changed {
+		return body, nil
+	}
+	stripped, err := sjson.SetRawBytes(body, "input", rebuilt.Bytes())
+	if err != nil {
+		return body, fmt.Errorf("replace OpenAI input after internal metadata deletion: %w", err)
+	}
+	return stripped, nil
 }
 
 // shouldStripOpenAIResponsesInputNamespaces removes residual input item
