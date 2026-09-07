@@ -3,9 +3,12 @@ package service
 import (
 	"errors"
 	"io"
+	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/model"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -88,4 +91,45 @@ func TestOpenAIStreamingPassthroughPendingCapFailsOpen(t *testing.T) {
 	// 超上限后放弃保护，内容仍完整送达
 	require.Equal(t, upstream, recorder.Body.String())
 	require.False(t, errors.As(err, new(*UpstreamFailoverError)))
+}
+
+// 裸 error 帧（上游只发 {"type":"error",...} 后关流，不补 response.failed）此前
+// 从不经过透传规则判定：读取分支先置位 sawBareError，规则检查被 `!sawBareError`
+// 短路。命中 skip_monitoring 的规则因此抑制不了这类失败的落库。线上回放样本：
+// {"type":"error","code":"context_too_large","message":"Your input exceeds the
+// context window of this model. ..."}
+func TestOpenAIStreamingPassthroughBareErrorConsultsPassthroughRule(t *testing.T) {
+	upstream := "event: response.created\n" +
+		`data: {"type":"response.created","response":{"id":"resp_ctx"}}` + "\n\n" +
+		"event: error\n" +
+		`data: {"type":"error","code":"context_too_large","message":"Your input exceeds the context window of this model. Please adjust your input and try again.","sequence_number":0}` + "\n\n"
+
+	var requestContext *gin.Context
+	ruleSvc := &ErrorPassthroughService{}
+	ruleSvc.setLocalCache([]*model.ErrorPassthroughRule{{
+		ID:              1,
+		Name:            "skip context-window monitoring",
+		Enabled:         true,
+		Priority:        1,
+		ErrorCodes:      []int{http.StatusBadRequest},
+		MatchMode:       model.MatchModeAny,
+		Platforms:       []string{PlatformOpenAI},
+		PassthroughCode: true,
+		PassthroughBody: true,
+		SkipMonitoring:  true,
+	}})
+	_, recorder, _, err := runPassthroughFlushTest(t, io.NopCloser(strings.NewReader(upstream)), -1, func(c *gin.Context) {
+		requestContext = c
+		BindErrorPassthroughService(c, ruleSvc)
+	})
+
+	// 上下文超限不换号（isOpenAIContextWindowError），所以这里不是 failover 错误。
+	require.Error(t, err)
+	var failoverErr *UpstreamFailoverError
+	require.False(t, errors.As(err, &failoverErr), "上下文超限不得触发换号")
+	// 客户端仍收到合成的终态，行为不变。
+	require.Contains(t, recorder.Body.String(), "response.failed")
+	value, exists := requestContext.Get(OpsSkipPassthroughKey)
+	require.True(t, exists, "裸 error 终态化必须咨询 skip_monitoring 规则")
+	require.Equal(t, true, value)
 }
