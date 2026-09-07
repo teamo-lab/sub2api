@@ -194,6 +194,16 @@ func UpdatedAtLTE(v time.Time) predicate.ErrorPassthroughRule {
 	return predicate.ErrorPassthroughRule(sql.FieldLTE(FieldUpdatedAt, v))
 }
 
+// RecoveryPolicyIsNil applies the IsNil predicate on the "recovery_policy" field.
+func RecoveryPolicyIsNil() predicate.ErrorPassthroughRule {
+	return predicate.ErrorPassthroughRule(sql.FieldIsNull(FieldRecoveryPolicy))
+}
+
+// RecoveryPolicyNotNil applies the NotNil predicate on the "recovery_policy" field.
+func RecoveryPolicyNotNil() predicate.ErrorPassthroughRule {
+	return predicate.ErrorPassthroughRule(sql.FieldNotNull(FieldRecoveryPolicy))
+}
+
 // NameEQ applies the EQ predicate on the "name" field.
 func NameEQ(v string) predicate.ErrorPassthroughRule {
 	return predicate.ErrorPassthroughRule(sql.FieldEQ(FieldName, v))

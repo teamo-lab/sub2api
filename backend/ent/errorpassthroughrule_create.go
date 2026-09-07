@@ -12,6 +12,7 @@ import (
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/Wei-Shaw/sub2api/ent/errorpassthroughrule"
+	"github.com/Wei-Shaw/sub2api/internal/model"
 )
 
 // ErrorPassthroughRuleCreate is the builder for creating a ErrorPassthroughRule entity.
@@ -47,6 +48,12 @@ func (_c *ErrorPassthroughRuleCreate) SetNillableUpdatedAt(v *time.Time) *ErrorP
 	if v != nil {
 		_c.SetUpdatedAt(*v)
 	}
+	return _c
+}
+
+// SetRecoveryPolicy sets the "recovery_policy" field.
+func (_c *ErrorPassthroughRuleCreate) SetRecoveryPolicy(v *model.ErrorRecoveryPolicy) *ErrorPassthroughRuleCreate {
+	_c.mutation.SetRecoveryPolicy(v)
 	return _c
 }
 
@@ -277,6 +284,11 @@ func (_c *ErrorPassthroughRuleCreate) check() error {
 	if _, ok := _c.mutation.UpdatedAt(); !ok {
 		return &ValidationError{Name: "updated_at", err: errors.New(`ent: missing required field "ErrorPassthroughRule.updated_at"`)}
 	}
+	if v, ok := _c.mutation.RecoveryPolicy(); ok {
+		if err := v.Validate(); err != nil {
+			return &ValidationError{Name: "recovery_policy", err: fmt.Errorf(`ent: validator failed for field "ErrorPassthroughRule.recovery_policy": %w`, err)}
+		}
+	}
 	if _, ok := _c.mutation.Name(); !ok {
 		return &ValidationError{Name: "name", err: errors.New(`ent: missing required field "ErrorPassthroughRule.name"`)}
 	}
@@ -342,6 +354,10 @@ func (_c *ErrorPassthroughRuleCreate) createSpec() (*ErrorPassthroughRule, *sqlg
 	if value, ok := _c.mutation.UpdatedAt(); ok {
 		_spec.SetField(errorpassthroughrule.FieldUpdatedAt, field.TypeTime, value)
 		_node.UpdatedAt = value
+	}
+	if value, ok := _c.mutation.RecoveryPolicy(); ok {
+		_spec.SetField(errorpassthroughrule.FieldRecoveryPolicy, field.TypeJSON, value)
+		_node.RecoveryPolicy = value
 	}
 	if value, ok := _c.mutation.Name(); ok {
 		_spec.SetField(errorpassthroughrule.FieldName, field.TypeString, value)
@@ -456,6 +472,24 @@ func (u *ErrorPassthroughRuleUpsert) SetUpdatedAt(v time.Time) *ErrorPassthrough
 // UpdateUpdatedAt sets the "updated_at" field to the value that was provided on create.
 func (u *ErrorPassthroughRuleUpsert) UpdateUpdatedAt() *ErrorPassthroughRuleUpsert {
 	u.SetExcluded(errorpassthroughrule.FieldUpdatedAt)
+	return u
+}
+
+// SetRecoveryPolicy sets the "recovery_policy" field.
+func (u *ErrorPassthroughRuleUpsert) SetRecoveryPolicy(v *model.ErrorRecoveryPolicy) *ErrorPassthroughRuleUpsert {
+	u.Set(errorpassthroughrule.FieldRecoveryPolicy, v)
+	return u
+}
+
+// UpdateRecoveryPolicy sets the "recovery_policy" field to the value that was provided on create.
+func (u *ErrorPassthroughRuleUpsert) UpdateRecoveryPolicy() *ErrorPassthroughRuleUpsert {
+	u.SetExcluded(errorpassthroughrule.FieldRecoveryPolicy)
+	return u
+}
+
+// ClearRecoveryPolicy clears the value of the "recovery_policy" field.
+func (u *ErrorPassthroughRuleUpsert) ClearRecoveryPolicy() *ErrorPassthroughRuleUpsert {
+	u.SetNull(errorpassthroughrule.FieldRecoveryPolicy)
 	return u
 }
 
@@ -719,6 +753,27 @@ func (u *ErrorPassthroughRuleUpsertOne) SetUpdatedAt(v time.Time) *ErrorPassthro
 func (u *ErrorPassthroughRuleUpsertOne) UpdateUpdatedAt() *ErrorPassthroughRuleUpsertOne {
 	return u.Update(func(s *ErrorPassthroughRuleUpsert) {
 		s.UpdateUpdatedAt()
+	})
+}
+
+// SetRecoveryPolicy sets the "recovery_policy" field.
+func (u *ErrorPassthroughRuleUpsertOne) SetRecoveryPolicy(v *model.ErrorRecoveryPolicy) *ErrorPassthroughRuleUpsertOne {
+	return u.Update(func(s *ErrorPassthroughRuleUpsert) {
+		s.SetRecoveryPolicy(v)
+	})
+}
+
+// UpdateRecoveryPolicy sets the "recovery_policy" field to the value that was provided on create.
+func (u *ErrorPassthroughRuleUpsertOne) UpdateRecoveryPolicy() *ErrorPassthroughRuleUpsertOne {
+	return u.Update(func(s *ErrorPassthroughRuleUpsert) {
+		s.UpdateRecoveryPolicy()
+	})
+}
+
+// ClearRecoveryPolicy clears the value of the "recovery_policy" field.
+func (u *ErrorPassthroughRuleUpsertOne) ClearRecoveryPolicy() *ErrorPassthroughRuleUpsertOne {
+	return u.Update(func(s *ErrorPassthroughRuleUpsert) {
+		s.ClearRecoveryPolicy()
 	})
 }
 
@@ -1182,6 +1237,27 @@ func (u *ErrorPassthroughRuleUpsertBulk) SetUpdatedAt(v time.Time) *ErrorPassthr
 func (u *ErrorPassthroughRuleUpsertBulk) UpdateUpdatedAt() *ErrorPassthroughRuleUpsertBulk {
 	return u.Update(func(s *ErrorPassthroughRuleUpsert) {
 		s.UpdateUpdatedAt()
+	})
+}
+
+// SetRecoveryPolicy sets the "recovery_policy" field.
+func (u *ErrorPassthroughRuleUpsertBulk) SetRecoveryPolicy(v *model.ErrorRecoveryPolicy) *ErrorPassthroughRuleUpsertBulk {
+	return u.Update(func(s *ErrorPassthroughRuleUpsert) {
+		s.SetRecoveryPolicy(v)
+	})
+}
+
+// UpdateRecoveryPolicy sets the "recovery_policy" field to the value that was provided on create.
+func (u *ErrorPassthroughRuleUpsertBulk) UpdateRecoveryPolicy() *ErrorPassthroughRuleUpsertBulk {
+	return u.Update(func(s *ErrorPassthroughRuleUpsert) {
+		s.UpdateRecoveryPolicy()
+	})
+}
+
+// ClearRecoveryPolicy clears the value of the "recovery_policy" field.
+func (u *ErrorPassthroughRuleUpsertBulk) ClearRecoveryPolicy() *ErrorPassthroughRuleUpsertBulk {
+	return u.Update(func(s *ErrorPassthroughRuleUpsert) {
+		s.ClearRecoveryPolicy()
 	})
 }
 

@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -16,6 +18,8 @@ import (
 	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
 )
+
+const openAIUpstreamErrorBodyReadTimeout = 5 * time.Second
 
 func logOpenAIInstructionsRequiredDebug(
 	ctx context.Context,
@@ -457,6 +461,25 @@ func openAIUpstreamErrorBodyReadLimitForConfig(cfg *config.Config) int64 {
 	return limit
 }
 
+func readOpenAIUpstreamErrorBodyWithTimeout(body io.ReadCloser, limit int64, timeout time.Duration) ([]byte, bool, error) {
+	if body == nil {
+		return nil, false, nil
+	}
+	if timeout <= 0 {
+		payload, err := io.ReadAll(io.LimitReader(body, limit))
+		return payload, false, err
+	}
+
+	var timedOut atomic.Bool
+	timer := time.AfterFunc(timeout, func() {
+		timedOut.Store(true)
+		_ = body.Close()
+	})
+	payload, err := io.ReadAll(io.LimitReader(body, limit))
+	timer.Stop()
+	return payload, timedOut.Load(), err
+}
+
 func (s *OpenAIGatewayService) readUpstreamErrorBody(resp *http.Response) []byte {
 	if resp == nil || resp.Body == nil {
 		return nil
@@ -465,7 +488,29 @@ func (s *OpenAIGatewayService) readUpstreamErrorBody(resp *http.Response) []byte
 	if s != nil {
 		cfg = s.cfg
 	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, openAIUpstreamErrorBodyReadLimitForConfig(cfg)))
+	startedAt := time.Now()
+	body, timedOut, err := readOpenAIUpstreamErrorBodyWithTimeout(
+		resp.Body,
+		openAIUpstreamErrorBodyReadLimitForConfig(cfg),
+		openAIUpstreamErrorBodyReadTimeout,
+	)
+	if timedOut {
+		logger.L().Warn(
+			"openai_upstream_error_body_read_timeout",
+			zap.Int("status_code", resp.StatusCode),
+			zap.Int("body_bytes", len(body)),
+			zap.Int64("elapsed_ms", time.Since(startedAt).Milliseconds()),
+			zap.String("upstream_request_id", strings.TrimSpace(resp.Header.Get("x-request-id"))),
+		)
+	} else if err != nil {
+		logger.L().Warn(
+			"openai_upstream_error_body_read_failed",
+			zap.Int("status_code", resp.StatusCode),
+			zap.Int("body_bytes", len(body)),
+			zap.String("error", err.Error()),
+			zap.String("upstream_request_id", strings.TrimSpace(resp.Header.Get("x-request-id"))),
+		)
+	}
 	return body
 }
 
