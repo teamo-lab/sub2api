@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -1164,7 +1165,34 @@ func openAIStreamAddedEventStartsClientOutput(payload []byte, eventType string) 
 	}
 }
 
+// Text filler is staged, not discarded. It cannot start output or TTFT, and
+// after real output the caller's committed state remains sticky.
+func openAIStreamTextDeltaIsOnlyFiller(data, eventType string) bool {
+	const kind = "response.output_text.delta"
+	if (eventType != "" && eventType != kind) || !gjson.Valid(data) {
+		return false
+	}
+	v := gjson.Parse(data)
+	payloadType := v.Get("type").String()
+	if payloadType != kind && !(payloadType == "" && eventType == kind) {
+		return false
+	}
+	delta := v.Get("delta")
+	if delta.Type != gjson.String {
+		return false
+	}
+	for _, ch := range delta.String() {
+		if !unicode.IsSpace(ch) && ch != '\u200b' && ch != '\u200c' && ch != '\u200d' && ch != '\u2060' && ch != '\ufeff' {
+			return false
+		}
+	}
+	return true
+}
+
 func openAIStreamDataStartsClientOutput(data, eventType string) bool {
+	if openAIStreamTextDeltaIsOnlyFiller(data, eventType) {
+		return false
+	}
 	trimmed := strings.TrimSpace(data)
 	if trimmed == "" {
 		return false
@@ -1203,6 +1231,9 @@ func openAIStreamItemHasVisibleOutput(item gjson.Result) bool {
 // Structural progress can commit an attempt and disarm first-output failover,
 // but TTFT should start only when the stream carries content a client can use.
 func openAIStreamDataStartsVisibleOutput(data, eventType string) bool {
+	if openAIStreamTextDeltaIsOnlyFiller(data, eventType) {
+		return false
+	}
 	trimmed := strings.TrimSpace(data)
 	if trimmed == "" || trimmed == "[DONE]" || !gjson.Valid(trimmed) {
 		return false
@@ -1246,6 +1277,9 @@ func openAIStreamDataStartsVisibleOutput(data, eventType string) bool {
 // openAIStreamDataStartsSemanticTTFT 保留 900194fab 之前的 first_token_ms
 // 口径：跳过 Responses preamble 后，首个语义 SSE 事件即视为首 token。
 func openAIStreamDataStartsSemanticTTFT(data, eventType string) bool {
+	if openAIStreamTextDeltaIsOnlyFiller(data, eventType) {
+		return false
+	}
 	trimmed := strings.TrimSpace(data)
 	if trimmed == "" || trimmed == "[DONE]" {
 		return false
