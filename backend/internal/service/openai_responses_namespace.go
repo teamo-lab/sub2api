@@ -42,7 +42,20 @@ func shouldFlattenOpenAIResponsesNamespaces(
 	passthroughEnabled bool,
 	compactPath bool,
 ) bool {
-	if account == nil || !account.IsOpenAIOAuthLike() {
+	if account == nil || !account.IsOpenAI() {
+		return false
+	}
+	if account.IsOpenAIApiKey() {
+		// API Key 出口（尤其是 NewAPI 类中转）不一定认识 namespace 扩展：中转会把
+		// 调用项上的 namespace 丢掉，再转发给 OpenAI 时就变成 400 "Missing namespace
+		// for function_call"。账号开关打开时按标准 Responses 语义摊平工具名并在回程
+		// 还原，让这类上游也能跑 Codex 多智能体会话；compact 端点不参与（沿用原判定）。
+		if compactPath || !account.IsOpenAIResponsesFlattenNamespacesEnabled() {
+			return false
+		}
+		return transport != OpenAIUpstreamTransportResponsesWebsocketV2 || passthroughEnabled
+	}
+	if !account.IsOpenAIOAuthLike() {
 		return false
 	}
 	if !compactPath && !account.IsOpenAIResponsesFlattenNamespacesEnabled() {
@@ -52,6 +65,63 @@ func shouldFlattenOpenAIResponsesNamespaces(
 		return false
 	}
 	return true
+}
+
+// openAIResponsesInternalMetadataField 是 Codex 桌面端在 input 消息项上附带的
+// ChatGPT 内部元数据；chatgpt.com/backend-api 接受它，但标准 Responses API 与
+// Azure / 中转一律返回 400 `Unknown parameter: input[N].internal_chat_message_metadata_passthrough.*`。
+const openAIResponsesInternalMetadataField = "internal_chat_message_metadata_passthrough"
+
+// shouldStripOpenAIResponsesInternalMetadata 判定是否在转发前清掉该字段：只有
+// API Key 出口需要，OAuth 出口是该字段的定义方，原样保留。
+func shouldStripOpenAIResponsesInternalMetadata(account *Account) bool {
+	return account != nil && account.IsOpenAIApiKey()
+}
+
+// stripOpenAIResponsesInternalMetadata 删除 input 数组各项上的
+// internal_chat_message_metadata_passthrough；不含该字段的请求按字节原样返回。
+func stripOpenAIResponsesInternalMetadata(body []byte) ([]byte, error) {
+	if !bytes.Contains(body, []byte(`"`+openAIResponsesInternalMetadataField+`"`)) {
+		return body, nil
+	}
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return body, nil
+	}
+	var rebuilt bytes.Buffer
+	rebuilt.Grow(len(input.Raw))
+	_ = rebuilt.WriteByte('[')
+	changed := false
+	first := true
+	var stripErr error
+	input.ForEach(func(_, item gjson.Result) bool {
+		if !first {
+			_ = rebuilt.WriteByte(',')
+		}
+		first = false
+		itemBody := []byte(item.Raw)
+		if item.IsObject() && item.Get(openAIResponsesInternalMetadataField).Exists() {
+			itemBody, stripErr = sjson.DeleteBytes(itemBody, openAIResponsesInternalMetadataField)
+			if stripErr != nil {
+				return false
+			}
+			changed = true
+		}
+		_, _ = rebuilt.Write(itemBody)
+		return true
+	})
+	_ = rebuilt.WriteByte(']')
+	if stripErr != nil {
+		return body, fmt.Errorf("delete OpenAI input internal metadata: %w", stripErr)
+	}
+	if !changed {
+		return body, nil
+	}
+	stripped, err := sjson.SetRawBytes(body, "input", rebuilt.Bytes())
+	if err != nil {
+		return body, fmt.Errorf("replace OpenAI input after internal metadata deletion: %w", err)
+	}
+	return stripped, nil
 }
 
 // shouldStripOpenAIResponsesInputNamespaces removes residual input item
@@ -256,4 +326,84 @@ func restoreOpenAIResponsesNamespacePayload(c *gin.Context, payload []byte) ([]b
 		return restored, nil
 	}
 	return payload, nil
+}
+
+// repairOpenAIResponsesToolCallNamespaces 给丢了 namespace 的历史工具调用项补回
+// namespace。线上样本（Codex 桌面端经 NewAPI 类中转回程后）function_call 项没有
+// namespace，而 tools 里该工具只在某个 namespace 声明之下，上游随即 400
+// "Missing namespace for function_call 'X'. It does not exist in the default
+// namespace"。只补"名字唯一属于某一个 namespace 且没有同名顶层工具"的调用项，
+// 其余原样不动；之后的摊平 / 清理逻辑按补回后的项正常处理。
+func repairOpenAIResponsesToolCallNamespaces(body []byte) ([]byte, error) {
+	if !bytes.Contains(body, []byte(`"namespace"`)) {
+		return body, nil
+	}
+	tools := gjson.GetBytes(body, "tools")
+	input := gjson.GetBytes(body, "input")
+	if !tools.IsArray() || !input.IsArray() {
+		return body, nil
+	}
+	topLevel := map[string]bool{}
+	owner := map[string]string{}
+	ambiguous := map[string]bool{}
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		typ := strings.TrimSpace(tool.Get("type").String())
+		name := strings.TrimSpace(tool.Get("name").String())
+		switch typ {
+		case "function", "custom":
+			if name != "" {
+				topLevel[name] = true
+			}
+		case "namespace":
+			if name == "" {
+				return true
+			}
+			tool.Get("tools").ForEach(func(_, child gjson.Result) bool {
+				childName := strings.TrimSpace(child.Get("name").String())
+				if childName == "" {
+					return true
+				}
+				if prev, ok := owner[childName]; ok && prev != name {
+					ambiguous[childName] = true
+				}
+				owner[childName] = name
+				return true
+			})
+		}
+		return true
+	})
+	if len(owner) == 0 {
+		return body, nil
+	}
+	out := body
+	changed := false
+	var repairErr error
+	index := -1
+	input.ForEach(func(_, item gjson.Result) bool {
+		index++
+		if !item.IsObject() || !isOpenAIResponsesToolCallItemType(item.Get("type").String()) {
+			return true
+		}
+		if item.Get("namespace").Exists() {
+			return true
+		}
+		name := strings.TrimSpace(item.Get("name").String())
+		namespace, ok := owner[name]
+		if !ok || topLevel[name] || ambiguous[name] {
+			return true
+		}
+		out, repairErr = sjson.SetBytes(out, fmt.Sprintf("input.%d.namespace", index), namespace)
+		if repairErr != nil {
+			return false
+		}
+		changed = true
+		return true
+	})
+	if repairErr != nil {
+		return body, fmt.Errorf("repair OpenAI input namespace: %w", repairErr)
+	}
+	if !changed {
+		return body, nil
+	}
+	return out, nil
 }

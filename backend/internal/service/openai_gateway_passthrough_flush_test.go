@@ -199,8 +199,12 @@ func TestOpenAIStreamingPassthroughCompleteFunctionArgumentsFlushAtDoneBoundary(
 		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"exec","arguments":""}}` + "\n\n" +
 		"event: response.function_call_arguments.delta\n" +
 		`data: {"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_1","delta":"{\"cmd\":\"pwd\"}"}` + "\n\n"
+	// 暂存的工具参数在携带完整 arguments 的 response.output_item.done 边界整体放行
+	//（而非 function_call_arguments.done），下游永远只看到完整的工具调用。
 	done := "event: response.function_call_arguments.done\n" +
-		`data: {"type":"response.function_call_arguments.done","output_index":0,"item_id":"fc_1","arguments":"{\"cmd\":\"pwd\"}"}` + "\n\n"
+		`data: {"type":"response.function_call_arguments.done","output_index":0,"item_id":"fc_1","arguments":"{\"cmd\":\"pwd\"}"}` + "\n\n" +
+		"event: response.output_item.done\n" +
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"exec","arguments":"{\"cmd\":\"pwd\"}","status":"completed"}}` + "\n\n"
 	terminal := "event: response.completed\n" +
 		`data: {"type":"response.completed","response":{"id":"resp_tool_ok","usage":{"input_tokens":3,"output_tokens":2}}}` + "\n\n"
 
