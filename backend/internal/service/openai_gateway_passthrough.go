@@ -2107,6 +2107,17 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		if !sawBareError || sawResponseFailed || failureDelivered {
 			return
 		}
+		// 裸 error 帧在读取分支里先置位 sawBareError，随后的透传规则判定被
+		// `!sawBareError` 短路掉；若上游没有再补一个权威 response.failed，规则就
+		// 一次都没被问过。命中 skip_monitoring 的规则（如"上下文超限"）因此无法
+		// 抑制这类失败的落库，运维面板仍会把它计入。
+		//
+		// 这里只补评估、不改响应：响应体已由下面的合成逻辑决定，规则的
+		// passthrough_code / passthrough_body 对已提交的流没有意义，需要的只是
+		// 让 skip_monitoring 的裁决能落到 ops 记录上。
+		if len(bareErrorPayload) > 0 {
+			applyOpenAIStreamFailedErrorPassthroughRule(c, account.Platform, bareErrorPayload, failedMessage)
+		}
 		if bareErrorAccountSideEffectsPending {
 			s.handleOpenAIStreamTerminalAccountSideEffects(c, account, bareErrorPayload, failedMessage, resp.Header, mappedModel)
 			bareErrorAccountSideEffectsPending = false
