@@ -1,0 +1,4 @@
+interface:
+  display_name: "Deploy Prod"
+  short_description: "Deploy Sub2API production from main safely"
+  default_prompt: "Use $deploy-prod to deploy the latest approved main commit to Sub2API production."
