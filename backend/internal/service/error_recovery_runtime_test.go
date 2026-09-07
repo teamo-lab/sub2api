@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"github.com/Wei-Shaw/sub2api/internal/model"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -110,4 +111,40 @@ func TestRecoveryErrorCodeParsesSSEFramedBodies(t *testing.T) {
 	require.Equal(t, "server_error", recoveryErrorCode([]byte(`{"error":{"code":"server_error"}}`)))
 	require.Equal(t, "", recoveryErrorCode([]byte("event: ping\ndata: {\"type\":\"ping\"}\n\n")))
 	require.Equal(t, "", recoveryErrorCode([]byte("plain text failure")))
+}
+
+// 流内容量错误（HTTP 200 + SSE error/response.failed）合成的 failover 信封必须
+// 保留上游错误码。matchRecoveryRule 的第一步是 recoveryErrorCode(ResponseBody)，
+// 取不到 code 就直接放弃匹配——信封只带 type/message 时，线上主力失败类
+// （429 rate_limit_exceeded、503 server_error、502 upstream_error）永远进不了
+// 换号恢复，表现为规则配了却零命中。
+func TestStreamFailoverEnvelopeKeepsUpstreamErrorCodeForRecovery(t *testing.T) {
+	cases := []struct {
+		name, payload, wantCode string
+	}{
+		{"rate limit", `{"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded","message":"Upstream rate limit exceeded, please retry later","type":"rate_limit_error"},"status":"failed"}}`, "rate_limit_exceeded"},
+		{"overloaded", `{"error":{"code":"server_error","message":"Our servers are currently overloaded. Please try again later.","type":"service_unavailable_error"},"type":"error"}`, "server_error"},
+		{"upstream error", `{"error":{"code":"upstream_error","message":"Upstream service temporarily unavailable","type":"upstream_error"},"type":"response.failed"}`, "upstream_error"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.wantCode, openAIStreamFailedEventErrorCode([]byte(tc.payload)),
+				"上游码提取必须先于信封合成成立")
+
+			envelope := gin.H{"type": "upstream_error", "message": "x"}
+			if code := openAIStreamFailedEventErrorCode([]byte(tc.payload)); code != "" {
+				envelope["code"] = code
+			}
+			body, err := json.Marshal(gin.H{"error": envelope})
+			require.NoError(t, err)
+
+			// 恢复引擎看到的就是这个 body：必须能取回上游码，否则规则零命中。
+			require.Equal(t, tc.wantCode, recoveryErrorCode(body))
+		})
+	}
+
+	// 回归：没有 code 的信封会让恢复引擎放弃匹配。
+	legacy, err := json.Marshal(gin.H{"error": gin.H{"type": "upstream_error", "message": "x"}})
+	require.NoError(t, err)
+	require.Equal(t, "", recoveryErrorCode(legacy))
 }
