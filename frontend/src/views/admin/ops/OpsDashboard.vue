@@ -15,6 +15,8 @@
         :overview="overview"
         :platform="platform"
         :group-id="groupId"
+        :model="model"
+        :models="models"
         :time-range="timeRange"
         :query-mode="queryMode"
         :loading="loading"
@@ -28,6 +30,7 @@
         @update:time-range="onTimeRangeChange"
         @update:platform="onPlatformChange"
         @update:group="onGroupChange"
+        @update:model="onModelChange"
         @update:query-mode="onQueryModeChange"
         @update:custom-time-range="onCustomTimeRangeChange"
         @refresh="fetchData"
@@ -118,6 +121,7 @@
           :custom-end-time="customEndTime"
           :platform="platform"
           :group-id="groupId"
+          :model="model"
           :error-type="errorDetailsType"
           :resume-state="resumeListState"
           @update:show="showErrorDetails = $event"
@@ -132,6 +136,7 @@
           :preset="requestDetailsPreset"
           :platform="platform"
           :group-id="groupId"
+          :model="model"
           :resume-state="resumeListState"
           @openErrorDetail="openError"
         />
@@ -196,6 +201,8 @@ const lastUpdated = ref<Date | null>(new Date())
 const timeRange = ref<TimeRange>('1h')
 const platform = ref<string>('')
 const groupId = ref<number | null>(null)
+const model = ref('')
+const models = ref<string[]>([])
 const queryMode = ref<QueryMode>('auto')
 const customStartTime = ref<string | null>(null)
 const customEndTime = ref<string | null>(null)
@@ -207,6 +214,7 @@ const QUERY_KEYS = {
   timeRange: 'tr',
   platform: 'platform',
   groupId: 'group_id',
+  model: 'model',
   queryMode: 'mode',
   fullscreen: 'fullscreen',
 
@@ -286,6 +294,7 @@ const applyRouteQueryToState = () => {
 
   const groupIdRaw = readQueryNumber(QUERY_KEYS.groupId)
   groupId.value = typeof groupIdRaw === 'number' && groupIdRaw > 0 ? groupIdRaw : null
+  model.value = readQueryString(QUERY_KEYS.model)
 
   const nextMode = readQueryString(QUERY_KEYS.queryMode)
   if (nextMode && allowedQueryModes.has(nextMode as QueryMode)) {
@@ -324,6 +333,7 @@ const buildQueryFromState = () => {
   if (timeRange.value !== '1h') next[QUERY_KEYS.timeRange] = timeRange.value
   if (platform.value) next[QUERY_KEYS.platform] = platform.value
   if (typeof groupId.value === 'number' && groupId.value > 0) next[QUERY_KEYS.groupId] = String(groupId.value)
+  if (model.value) next[QUERY_KEYS.model] = model.value
   if (queryMode.value !== 'auto') next[QUERY_KEYS.queryMode] = queryMode.value
 
   return next
@@ -509,6 +519,10 @@ function onGroupChange(v: string | number | boolean | null) {
   }
 }
 
+function onModelChange(v: string | number | boolean | null) {
+  model.value = typeof v === 'string' ? v : ''
+}
+
 function onQueryModeChange(v: string | number | boolean | null) {
   if (typeof v !== 'string') return
   if (!allowedQueryModes.has(v as QueryMode)) return
@@ -549,6 +563,7 @@ function buildApiParams() {
   const params: any = {
     platform: platform.value || undefined,
     group_id: groupId.value ?? undefined,
+    model: model.value || undefined,
     mode: queryMode.value
   }
 
@@ -567,10 +582,22 @@ function buildApiParams() {
   return params
 }
 
+async function refreshModelOptions(signal: AbortSignal) {
+  const params = { ...buildApiParams(), model: undefined }
+  try {
+    models.value = await opsAPI.getDashboardModels(params, { signal })
+  } catch (err) {
+    if (!isCanceledRequest(err)) {
+      console.warn('[OpsDashboard] Failed to load model options', err)
+    }
+  }
+}
+
 function buildSwitchTrendParams() {
   const params: any = {
     platform: platform.value || undefined,
     group_id: groupId.value ?? undefined,
+    model: model.value || undefined,
     mode: queryMode.value
   }
   const endTime = new Date()
@@ -741,6 +768,7 @@ async function fetchData() {
     await Promise.all([
       refreshCoreSnapshotWithCancel(fetchSeq, dashboardFetchController.signal),
       refreshSwitchTrendWithCancel(fetchSeq, dashboardFetchController.signal),
+      refreshModelOptions(dashboardFetchController.signal),
     ])
     if (fetchSeq !== dashboardFetchSeq) return
 
@@ -770,7 +798,7 @@ async function fetchData() {
 }
 
 watch(
-  () => [timeRange.value, platform.value, groupId.value, queryMode.value] as const,
+  () => [timeRange.value, platform.value, groupId.value, model.value, queryMode.value] as const,
   () => {
     if (isApplyingRouteQuery.value) return
     if (opsEnabled.value) {
@@ -788,13 +816,15 @@ watch(
     const prevTimeRange = timeRange.value
     const prevPlatform = platform.value
     const prevGroupId = groupId.value
+    const prevModel = model.value
 
     isApplyingRouteQuery.value = true
     applyRouteQueryToState()
     isApplyingRouteQuery.value = false
 
     const changed =
-      prevTimeRange !== timeRange.value || prevPlatform !== platform.value || prevGroupId !== groupId.value
+      prevTimeRange !== timeRange.value || prevPlatform !== platform.value ||
+      prevGroupId !== groupId.value || prevModel !== model.value
     if (changed) {
       if (opsEnabled.value) {
         fetchData()

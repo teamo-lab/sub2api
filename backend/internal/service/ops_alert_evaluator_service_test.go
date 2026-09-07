@@ -28,6 +28,24 @@ func (s *stubOpsRepo) GetDashboardOverview(ctx context.Context, filter *OpsDashb
 	return &OpsDashboardOverview{}, nil
 }
 
+func (s *stubOpsRepo) ListDashboardModels(context.Context, *OpsDashboardFilter) ([]string, error) {
+	return []string{}, nil
+}
+
+func (s *stubOpsRepo) UpsertModelMetrics5m(context.Context, time.Time, time.Time) error { return nil }
+func (s *stubOpsRepo) UpsertModelMetricsHourly(context.Context, time.Time, time.Time) error {
+	return nil
+}
+func (s *stubOpsRepo) GetLatestModelMetricsBucketStart(context.Context, int) (time.Time, bool, error) {
+	return time.Time{}, false, nil
+}
+func (s *stubOpsRepo) GetOldestModelMetricsBucketStart(context.Context, int) (time.Time, bool, error) {
+	return time.Time{}, false, nil
+}
+func (s *stubOpsRepo) GetMissingModelMetricsBucketStart(context.Context, int, time.Time, time.Time) (time.Time, bool, error) {
+	return time.Time{}, false, nil
+}
+
 func TestComputeGroupAvailableRatio(t *testing.T) {
 	t.Parallel()
 

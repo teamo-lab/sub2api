@@ -19,6 +19,8 @@ interface Props {
   overview?: OpsDashboardOverview | null
   platform: string
   groupId: number | null
+  model: string
+  models?: string[]
   timeRange: string
   queryMode: string
   loading: boolean
@@ -34,6 +36,7 @@ interface Props {
 interface Emits {
   (e: 'update:platform', value: string): void
   (e: 'update:group', value: number | null): void
+  (e: 'update:model', value: string): void
   (e: 'update:timeRange', value: string): void
   (e: 'update:queryMode', value: string): void
   (e: 'update:customTimeRange', startTime: string, endTime: string): void
@@ -138,6 +141,12 @@ const groupOptions = computed(() => {
   return [{ value: null, label: t('common.all') }, ...filtered.map((g) => ({ value: g.id, label: g.name }))]
 })
 
+const modelOptions = computed(() => [
+  { value: '', label: t('admin.ops.allModels') },
+  ...Array.from(new Set([...(props.model ? [props.model] : []), ...(props.models ?? [])]))
+    .map((model) => ({ value: model, label: model }))
+])
+
 watch(
   () => props.platform,
   (newPlatform) => {
@@ -170,6 +179,10 @@ function handleGroupChange(val: string | number | boolean | null) {
   }
   const id = typeof val === 'number' ? val : Number.parseInt(String(val), 10)
   emit('update:group', Number.isFinite(id) && id > 0 ? id : null)
+}
+
+function handleModelChange(val: string | number | boolean | null) {
+  emit('update:model', String(val || ''))
 }
 
 function handleTimeRangeChange(val: string | number | boolean | null) {
@@ -907,6 +920,13 @@ function handleToolbarRefresh() {
             :options="groupOptions"
             class="w-full sm:w-[160px]"
             @update:model-value="handleGroupChange"
+          />
+
+          <Select
+            :model-value="model"
+            :options="modelOptions"
+            class="w-full sm:w-[180px]"
+            @update:model-value="handleModelChange"
           />
 
           <div class="mx-1 hidden h-4 w-[1px] bg-gray-200 dark:bg-dark-700 sm:block"></div>

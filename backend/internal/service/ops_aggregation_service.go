@@ -16,8 +16,10 @@ import (
 )
 
 const (
-	opsAggHourlyJobName = "ops_preaggregation_hourly"
-	opsAggDailyJobName  = "ops_preaggregation_daily"
+	opsAggHourlyJobName      = "ops_preaggregation_hourly"
+	opsAggDailyJobName       = "ops_preaggregation_daily"
+	opsAggModel5mJobName     = "ops_model_preaggregation_5m"
+	opsAggModelHourlyJobName = "ops_model_preaggregation_hourly"
 
 	opsAggHourlyInterval = 10 * time.Minute
 	opsAggDailyInterval  = 1 * time.Hour
@@ -40,11 +42,16 @@ const (
 	opsAggHourlyTimeout   = 5 * time.Minute
 	opsAggDailyTimeout    = 2 * time.Minute
 
-	opsAggHourlyLeaderLockKey = "ops:aggregation:hourly:leader"
-	opsAggDailyLeaderLockKey  = "ops:aggregation:daily:leader"
+	opsAggHourlyLeaderLockKey      = "ops:aggregation:hourly:leader"
+	opsAggDailyLeaderLockKey       = "ops:aggregation:daily:leader"
+	opsAggModel5mLeaderLockKey     = "ops:aggregation:model:5m:leader"
+	opsAggModelHourlyLeaderLockKey = "ops:aggregation:model:hourly:leader"
 
 	opsAggHourlyLeaderLockTTL = 15 * time.Minute
 	opsAggDailyLeaderLockTTL  = 10 * time.Minute
+
+	opsModel5mRetention     = 14 * 24 * time.Hour
+	opsModelHourlyRetention = 90 * 24 * time.Hour
 )
 
 // OpsAggregationService periodically backfills ops_metrics_hourly / ops_metrics_daily
@@ -64,8 +71,10 @@ type OpsAggregationService struct {
 	startOnce sync.Once
 	stopOnce  sync.Once
 
-	hourlyMu sync.Mutex
-	dailyMu  sync.Mutex
+	hourlyMu      sync.Mutex
+	dailyMu       sync.Mutex
+	model5mMu     sync.Mutex
+	modelHourlyMu sync.Mutex
 
 	skipLogMu sync.Mutex
 	skipLogAt time.Time
@@ -98,6 +107,8 @@ func (s *OpsAggregationService) Start() {
 		}
 		go s.hourlyLoop()
 		go s.dailyLoop()
+		go s.modelAggregationLoop(300, 5*time.Minute)
+		go s.modelAggregationLoop(3600, 10*time.Minute)
 	})
 }
 
@@ -144,6 +155,102 @@ func (s *OpsAggregationService) dailyLoop() {
 			return
 		}
 	}
+}
+
+// modelAggregationLoop refreshes recent buckets on every run and walks one
+// historical chunk backwards. This bounds each run while eventually filling
+// the complete retention window after a fresh deployment.
+func (s *OpsAggregationService) modelAggregationLoop(resolutionSeconds int, interval time.Duration) {
+	s.aggregateModelMetrics(resolutionSeconds)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			s.aggregateModelMetrics(resolutionSeconds)
+		case <-s.stopCh:
+			return
+		}
+	}
+}
+
+func (s *OpsAggregationService) aggregateModelMetrics(resolutionSeconds int) {
+	if s == nil || s.opsRepo == nil || (s.cfg != nil && (!s.cfg.Ops.Enabled || !s.cfg.Ops.Aggregation.Enabled)) {
+		return
+	}
+	var mu *sync.Mutex
+	var retention, step, chunk time.Duration
+	var lockKey, jobName string
+	var upsert func(context.Context, time.Time, time.Time) error
+	switch resolutionSeconds {
+	case 300:
+		mu, retention, step, chunk = &s.model5mMu, opsModel5mRetention, 5*time.Minute, 6*time.Hour
+		lockKey, jobName, upsert = opsAggModel5mLeaderLockKey, opsAggModel5mJobName, s.opsRepo.UpsertModelMetrics5m
+	case 3600:
+		mu, retention, step, chunk = &s.modelHourlyMu, opsModelHourlyRetention, time.Hour, 24*time.Hour
+		lockKey, jobName, upsert = opsAggModelHourlyLeaderLockKey, opsAggModelHourlyJobName, s.opsRepo.UpsertModelMetricsHourly
+	default:
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), opsAggHourlyTimeout)
+	defer cancel()
+	if !s.isMonitoringEnabled(ctx) {
+		return
+	}
+	release, ok := s.tryAcquireLeaderLock(ctx, lockKey, opsAggHourlyLeaderLockTTL, "[OpsAggregation][model]")
+	if !ok {
+		return
+	}
+	if release != nil {
+		defer release()
+	}
+	mu.Lock()
+	defer mu.Unlock()
+
+	startedAt, runAt := time.Now().UTC(), time.Now().UTC()
+	end := floorToDuration(time.Now().UTC().Add(-opsAggSafeDelay), step)
+	cutoff := floorToDuration(end.Add(-retention), step)
+	recentStart := end.Add(-2 * step)
+	var aggErr error
+	if recentStart.Before(end) {
+		aggErr = upsert(ctx, recentStart, end)
+	}
+	if aggErr == nil {
+		missing, found, err := s.opsRepo.GetMissingModelMetricsBucketStart(ctx, resolutionSeconds, cutoff, recentStart)
+		if err != nil {
+			aggErr = err
+		} else if found {
+			// Fill the newest hole first. This repairs isolated gaps and also
+			// walks a fresh installation backwards in bounded chunks.
+			historyEnd := missing.Add(step)
+			historyStart := historyEnd.Add(-chunk)
+			if historyStart.Before(cutoff) {
+				historyStart = cutoff
+			}
+			if historyStart.Before(historyEnd) {
+				aggErr = upsert(ctx, historyStart, historyEnd)
+			}
+		}
+	}
+
+	finishedAt := time.Now().UTC()
+	dur := finishedAt.Sub(startedAt).Milliseconds()
+	hbCtx, hbCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer hbCancel()
+	input := &OpsUpsertJobHeartbeatInput{JobName: jobName, LastRunAt: &runAt, LastDurationMs: &dur}
+	if aggErr != nil {
+		msg, at := truncateString(aggErr.Error(), 2048), finishedAt
+		input.LastError, input.LastErrorAt = &msg, &at
+	} else {
+		result, at := fmt.Sprintf("resolution=%ds retention=%s", resolutionSeconds, retention), finishedAt
+		input.LastResult, input.LastSuccessAt = &result, &at
+	}
+	_ = s.opsRepo.UpsertJobHeartbeat(hbCtx, input)
+}
+
+func floorToDuration(t time.Time, step time.Duration) time.Time {
+	return t.UTC().Truncate(step)
 }
 
 func (s *OpsAggregationService) aggregateHourly() {

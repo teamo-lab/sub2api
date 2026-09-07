@@ -105,6 +105,10 @@ func (m *opsRepoMock) GetErrorDistribution(ctx context.Context, filter *OpsDashb
 	return &OpsErrorDistributionResponse{}, nil
 }
 
+func (m *opsRepoMock) ListDashboardModels(ctx context.Context, filter *OpsDashboardFilter) ([]string, error) {
+	return []string{}, nil
+}
+
 func (m *opsRepoMock) GetOpenAITokenStats(ctx context.Context, filter *OpsOpenAITokenStatsFilter) (*OpsOpenAITokenStatsResponse, error) {
 	return &OpsOpenAITokenStatsResponse{}, nil
 }
@@ -190,6 +194,24 @@ func (m *opsRepoMock) GetLatestHourlyBucketStart(ctx context.Context) (time.Time
 }
 
 func (m *opsRepoMock) GetLatestDailyBucketDate(ctx context.Context) (time.Time, bool, error) {
+	return time.Time{}, false, nil
+}
+
+func (m *opsRepoMock) UpsertModelMetrics5m(ctx context.Context, startTime, endTime time.Time) error {
+	return nil
+}
+
+func (m *opsRepoMock) UpsertModelMetricsHourly(ctx context.Context, startTime, endTime time.Time) error {
+	return nil
+}
+
+func (m *opsRepoMock) GetLatestModelMetricsBucketStart(ctx context.Context, resolutionSeconds int) (time.Time, bool, error) {
+	return time.Time{}, false, nil
+}
+func (m *opsRepoMock) GetOldestModelMetricsBucketStart(ctx context.Context, resolutionSeconds int) (time.Time, bool, error) {
+	return time.Time{}, false, nil
+}
+func (m *opsRepoMock) GetMissingModelMetricsBucketStart(ctx context.Context, resolutionSeconds int, start, end time.Time) (time.Time, bool, error) {
 	return time.Time{}, false, nil
 }
 
