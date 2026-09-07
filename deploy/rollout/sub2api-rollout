@@ -1,0 +1,1223 @@
+#!/usr/bin/env python3
+"""Single-writer Sub2API blue-green rollout controller.
+
+The controller deliberately has no database restore or HAProxy session-kill
+operation. Traffic mutations are limited to runtime server state/weights.
+"""
+
+import argparse
+import contextlib
+import datetime as dt
+import fcntl
+import hashlib
+import json
+import math
+import os
+import pathlib
+import re
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+
+
+ROOT = pathlib.Path(os.environ.get("SUB2API_ROLLOUT_ROOT", "/opt/sub2api/deploy"))
+# Site-specific values contain paths/ports only; never dependency credentials.
+site_path = ROOT / "rollout/site.env"
+if site_path.exists():
+    for line in site_path.read_text(encoding="utf-8").splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key.startswith(("SUB2API_", "ROLLOUT_")):
+            os.environ.setdefault(key, value)
+ROLLOUT_DIR = ROOT / "rollout"
+STATE_PATH = pathlib.Path(os.environ.get("SUB2API_ROLLOUT_STATE", str(ROLLOUT_DIR / "state.json")))
+HISTORY_PATH = ROLLOUT_DIR / "history.jsonl"
+LOCK_PATH = ROLLOUT_DIR / "controller.lock"
+CONFIGURED_SOCKET_PATH = os.environ.get("SUB2API_HAPROXY_SOCKET", "").strip()
+METRICS_SQL_PATH = pathlib.Path(os.environ.get("SUB2API_ROLLOUT_METRICS_SQL", str(ROLLOUT_DIR / "gate_metrics.sql")))
+SERVER_STATE_PATH = pathlib.Path(os.environ.get("SUB2API_HAPROXY_SERVER_STATE", str(ROLLOUT_DIR / "runtime/server-state")))
+REPORTS_ROOT = pathlib.Path(os.environ.get("SUB2API_ROLLOUT_REPORTS_ROOT", str(ROOT / "reports")))
+EVIDENCE_OWNER_UID = int(os.environ.get("SUB2API_ROLLOUT_EVIDENCE_UID", "0"))
+PROBE_URL = os.environ.get("SUB2API_ROLLOUT_PROBE_URL", "http://127.0.0.1:18080/health")
+POSTGRES_CONTAINER = os.environ.get("SUB2API_POSTGRES_CONTAINER", "sub2api-postgres")
+POSTGRES_USER = os.environ.get("SUB2API_POSTGRES_USER", "sub2api")
+POSTGRES_DB = os.environ.get("SUB2API_POSTGRES_DB", "sub2api")
+DOCKER = os.environ.get("SUB2API_DOCKER_BIN", "docker")
+
+EXIT_ARGUMENT = 2
+EXIT_UNSUPPORTED = 3
+EXIT_PRECONDITION = 4
+EXIT_LOCKED = 5
+EXIT_TARGET_UNHEALTHY = 6
+EXIT_HAPROXY = 7
+EXIT_VERIFY = 8
+
+SLOTS = ("blue", "green")
+BACKENDS = ("api_pool", "console_pool")
+SAFE_AUDIT_VALUE = re.compile(r"^[A-Za-z0-9._:+@/-]{1,128}$")
+
+
+class ControllerError(Exception):
+    def __init__(self, code, error_code, message):
+        super().__init__(message)
+        self.code = code
+        self.error_code = error_code
+        self.message = message
+
+
+def now_utc():
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def emit(payload, code=0):
+    print(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
+    return code
+
+
+def load_state():
+    if not STATE_PATH.exists():
+        raise ControllerError(EXIT_UNSUPPORTED, "unsupported_legacy_topology", "Blue-green rollout state is not installed.")
+    try:
+        state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ControllerError(EXIT_PRECONDITION, "invalid_rollout_state", "Rollout state cannot be loaded.") from exc
+    if state.get("topology_mode") != "blue_green":
+        raise ControllerError(EXIT_UNSUPPORTED, "unsupported_legacy_topology", "Production is not in blue-green topology.")
+    return state
+
+
+def atomic_write_json(path, value):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    payload = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n"
+    fd, temporary = tempfile.mkstemp(prefix=".state.", dir=str(path.parent), text=True)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary)
+
+
+def atomic_write_text(path, payload, mode=0o600):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".runtime-state.", dir=str(path.parent), text=True)
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary)
+
+
+def append_history(event):
+    HISTORY_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(HISTORY_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        data = (json.dumps(event, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n").encode()
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def controller_lock():
+    LOCK_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with open(LOCK_PATH, "a+", encoding="utf-8") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ControllerError(EXIT_LOCKED, "controller_locked", "Another rollout action holds the controller lock.") from exc
+        yield
+
+
+def runtime_command(command):
+    socket_path = resolve_haproxy_socket_path()
+    if not socket_path.exists():
+        raise ControllerError(EXIT_HAPROXY, "haproxy_socket_unavailable", "HAProxy runtime socket is unavailable.")
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(5)
+            client.connect(str(socket_path))
+            client.sendall((command.rstrip("\n") + "\n").encode())
+            client.shutdown(socket.SHUT_WR)
+            chunks = []
+            while True:
+                chunk = client.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+    except OSError as exc:
+        raise ControllerError(EXIT_HAPROXY, "haproxy_runtime_failed", "HAProxy runtime command failed.") from exc
+    response = b"".join(chunks).decode("utf-8", errors="replace").strip()
+    # HAProxy mutating runtime commands are silent on success and return text
+    # on rejection. Read commands legitimately contain CSV fields such as
+    # h3_internal_error, so substring matching would reject every status call.
+    if response and not command.lstrip().startswith("show "):
+        raise ControllerError(EXIT_HAPROXY, "haproxy_runtime_rejected", "HAProxy rejected a runtime command.")
+    return response
+
+
+def resolve_haproxy_socket_path():
+    """Resolve the runtime socket for the proxy that owns the public entrypoint.
+
+    finalize-entry historically replaced admin.sock with a symlink to
+    admin-final.sock. On a host reboot the bootstrap HAProxy recreates
+    admin.sock as a Unix socket and overwrites that symlink, so a controller
+    that blindly opens admin.sock mutates the non-public proxy. The persisted
+    entry identity is authoritative and survives restarts.
+    """
+    if CONFIGURED_SOCKET_PATH:
+        return pathlib.Path(CONFIGURED_SOCKET_PATH)
+    try:
+        state = load_state()
+    except ControllerError:
+        state = {}
+    if state.get("entry_proxy_container") == "sub2api-haproxy-final" or state.get("entry_mode") == "direct":
+        return ROLLOUT_DIR / "runtime/admin-final.sock"
+    return ROLLOUT_DIR / "runtime/admin.sock"
+
+
+def haproxy_stats():
+    response = runtime_command("show stat")
+    rows = {}
+    lines = [line for line in response.splitlines() if line]
+    if not lines:
+        raise ControllerError(EXIT_HAPROXY, "haproxy_stats_empty", "HAProxy returned no stats.")
+    header = [item.lstrip("# ") for item in lines[0].split(",")]
+    for line in lines[1:]:
+        values = line.split(",")
+        row = dict(zip(header, values))
+        backend, server = row.get("pxname"), row.get("svname")
+        if backend in BACKENDS and server in SLOTS:
+            rows[(backend, server)] = row
+    for backend in BACKENDS:
+        for slot in SLOTS:
+            if (backend, slot) not in rows:
+                raise ControllerError(EXIT_HAPROXY, "haproxy_server_missing", "Expected HAProxy server is missing.")
+    return rows
+
+
+def container_state(slot):
+    name = "sub2api-" + slot
+    result = subprocess.run(
+        [DOCKER, "inspect", "--format", "{{json .State.Health.Status}} {{.Image}} {{.RestartCount}}", name],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        timeout=10,
+        check=False,
+    )
+    if result.returncode != 0:
+        return {"health": "missing", "image_id": None, "restart_count": None}
+    parts = result.stdout.strip().split()
+    health = parts[0].strip('"') if parts else "unknown"
+    image_id = parts[1] if len(parts) > 1 else None
+    try:
+        restart_count = int(parts[2]) if len(parts) > 2 else None
+    except ValueError:
+        restart_count = None
+    return {"health": health, "image_id": image_id, "restart_count": restart_count}
+
+
+def actual_status(state):
+    stats = haproxy_stats()
+    result = dict(state)
+    for slot in SLOTS:
+        runtime = stats[("api_pool", slot)]
+        container = container_state(slot)
+        desired = state.get(slot, {})
+        result[slot] = {
+            "state": runtime.get("status", "unknown").lower(),
+            "health": container["health"],
+            "weight": int(runtime.get("weight") or 0),
+            "console_weight": int(stats[("console_pool", slot)].get("weight") or 0),
+            "active_streams": int(runtime.get("scur") or 0),
+            "restart_count": container["restart_count"],
+            "version": desired.get("version"),
+            "digest": desired.get("digest"),
+            "image_id": container["image_id"],
+        }
+    target = state.get("rollback_target_slot")
+    compatible = bool(state.get("rollback_schema_compatible", False))
+    target_healthy = target in SLOTS and result[target]["health"] == "healthy"
+    result["supported"] = True
+    result["rollback"] = {
+        "allowed": compatible and target_healthy,
+        "target": target,
+        "block_reason": None if compatible and target_healthy else ("schema_incompatible" if not compatible else "target_unhealthy"),
+        "already_applied": state.get("phase") == "rolled_back" and state.get("active_slot") == target,
+    }
+    return result
+
+
+def wait_healthy(slot, timeout_seconds):
+    consecutive = 0
+    deadline = time.monotonic() + timeout_seconds
+    expected_digest = load_state().get(slot, {}).get("digest")
+    while time.monotonic() < deadline:
+        observed = container_state(slot)
+        digest_ok = not expected_digest or observed.get("image_id") == expected_digest
+        if observed.get("health") == "healthy" and digest_ok:
+            consecutive += 1
+            if consecutive >= 3:
+                return observed
+        else:
+            consecutive = 0
+        time.sleep(1)
+    raise ControllerError(EXIT_TARGET_UNHEALTHY, "rollback_target_unhealthy", "Rollback target did not pass three readiness checks.")
+
+
+def set_server(slot, state, weight, backends=BACKENDS):
+    for backend in backends:
+        runtime_command("set server {}/{} state {}".format(backend, slot, state))
+        runtime_command("set server {}/{} weight {}".format(backend, slot, weight))
+
+
+def verify_weights(target, source):
+    stats = haproxy_stats()
+    for backend in BACKENDS:
+        if int(stats[(backend, target)].get("weight") or 0) != 100:
+            return False
+        if int(stats[(backend, source)].get("weight") or 0) != 0:
+            return False
+    return True
+
+
+def persist_server_state():
+    payload = runtime_command("show servers state")
+    if not payload or "srv_name" not in payload:
+        raise ControllerError(EXIT_HAPROXY, "haproxy_server_state_invalid", "HAProxy server state export is invalid.")
+    atomic_write_text(SERVER_STATE_PATH, payload.rstrip("\n") + "\n")
+    return SERVER_STATE_PATH
+
+
+def runtime_matches_weights(expected):
+    stats = haproxy_stats()
+    for backend, key in (("api_pool", "weight"), ("console_pool", "console_weight")):
+        for slot in SLOTS:
+            if int(stats[(backend, slot)].get("weight") or 0) != int(expected[slot][key]):
+                return False
+    return True
+
+
+def restore_weight_snapshot(status):
+    """Restore pre-mutation API/console weights without creating an empty pool."""
+    errors = []
+    for backend, key in (("api_pool", "weight"), ("console_pool", "console_weight")):
+        weights = {slot: int(status[slot].get(key) or 0) for slot in SLOTS}
+        for slot in SLOTS:
+            if weights[slot] <= 0:
+                continue
+            try:
+                set_server(slot, "ready", weights[slot], backends=(backend,))
+            except ControllerError as exc:
+                errors.append(exc.error_code)
+        for slot in SLOTS:
+            if weights[slot] != 0:
+                continue
+            try:
+                set_server(slot, "drain", 0, backends=(backend,))
+            except ControllerError as exc:
+                errors.append(exc.error_code)
+    if errors:
+        return False, errors
+    try:
+        observed = haproxy_stats()
+    except ControllerError as exc:
+        return False, [exc.error_code]
+    for backend, key in (("api_pool", "weight"), ("console_pool", "console_weight")):
+        for slot in SLOTS:
+            if int(observed[(backend, slot)].get("weight") or 0) != int(status[slot].get(key) or 0):
+                return False, ["weight_snapshot_mismatch"]
+    return True, []
+
+
+def stable_probe(expected_slot):
+    state = load_state()
+    entry_port = state.get("entry_port", 18080)
+    if not isinstance(entry_port, int) or entry_port < 1 or entry_port > 65535:
+        raise ControllerError(EXIT_PRECONDITION, "invalid_entry_port", "Rollout entry port is invalid.")
+    probe_url = "http://127.0.0.1:{}/health".format(entry_port)
+    for _ in range(3):
+        try:
+            request = urllib.request.Request(probe_url, headers={"X-Sub2API-Controller-Probe": "1"})
+            with urllib.request.urlopen(request, timeout=5) as response:
+                slot = response.headers.get("X-Sub2API-Deployment-Slot")
+                if response.status == 200 and slot == expected_slot:
+                    return True
+        except Exception:
+            pass
+        time.sleep(1)
+    return False
+
+
+def validate_audit_value(name, value, required=True):
+    if not value and not required:
+        return
+    if not value or not SAFE_AUDIT_VALUE.fullmatch(value):
+        raise ControllerError(EXIT_ARGUMENT, "invalid_" + name, "Invalid audit metadata.")
+
+
+def other_slot(slot):
+    if slot not in SLOTS:
+        raise ControllerError(EXIT_PRECONDITION, "invalid_slot", "Rollout slot is not valid.")
+    return "green" if slot == "blue" else "blue"
+
+
+def container_deployment_metadata(slot):
+    name = "sub2api-" + slot
+    result = subprocess.run(
+        [DOCKER, "inspect", "--format", "{{json .Config.Env}}", name],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        timeout=10,
+        check=False,
+    )
+    if result.returncode != 0:
+        return {}
+    try:
+        entries = json.loads(result.stdout.strip())
+    except json.JSONDecodeError:
+        return {}
+    metadata = {}
+    for entry in entries if isinstance(entries, list) else []:
+        key, separator, value = entry.partition("=")
+        if separator and key in {
+            "SUB2API_DEPLOYMENT_SLOT",
+            "SUB2API_RELEASE_ID",
+            "SUB2API_DEPLOYMENT_VERSION",
+            "SUB2API_DEPLOYMENT_DIGEST",
+        }:
+            metadata[key] = value
+    return metadata
+
+
+def rollback(args):
+    validate_audit_value("actor", args.actor)
+    validate_audit_value("reason", args.reason)
+    validate_audit_value("action_id", args.action_id, required=not args.dry_run)
+    with controller_lock():
+        state = load_state()
+        target = state.get("rollback_target_slot")
+        source = other_slot(target) if target in SLOTS else None
+        if target not in SLOTS or source not in SLOTS or target == source:
+            raise ControllerError(EXIT_PRECONDITION, "invalid_rollback_target", "Rollback target is not valid.")
+        if not state.get("rollback_schema_compatible", False):
+            raise ControllerError(EXIT_PRECONDITION, "schema_incompatible", "Automatic rollback is blocked by schema compatibility.")
+
+        status = actual_status(state)
+        if state.get("phase") == "rolled_back" and state.get("active_slot") == target:
+            return emit({**status, "action": "rollback", "result": "already_rolled_back", "action_id": args.action_id,
+                         "target_slot": target, "source_slot": source, "drain_pending": status[source]["active_streams"] > 0})
+        if state.get("last_action_id") == args.action_id and args.action_id:
+            return emit({**status, "action": "rollback", "result": state.get("last_action_result", "already_applied"),
+                         "action_id": args.action_id, "target_slot": target, "source_slot": source})
+        if status[target]["health"] != "healthy":
+            raise ControllerError(EXIT_TARGET_UNHEALTHY, "rollback_target_unhealthy", "Rollback target is not healthy.")
+        expected_digest = state.get(target, {}).get("digest")
+        if not expected_digest or status[target].get("image_id") != expected_digest:
+            raise ControllerError(EXIT_PRECONDITION, "rollback_digest_mismatch", "Rollback target image digest does not match state.")
+        if args.dry_run:
+            status["action"] = "rollback_dry_run"
+            status["result"] = "ready"
+            status["target_slot"] = target
+            status["source_slot"] = source
+            return emit(status)
+
+        before = {"generation": state.get("generation"), "phase": state.get("phase"), "active_slot": state.get("active_slot")}
+        applying = dict(state)
+        applying["phase"] = "rollback_applying"
+        applying["generation"] = int(state.get("generation", 0)) + 1
+        applying["last_action_id"] = args.action_id
+        applying["last_actor"] = args.actor
+        applying["last_reason"] = args.reason
+        applying["updated_at"] = now_utc()
+        applying[target] = {**applying.get(target, {}), "desired_state": "ready", "desired_weight": 100,
+                            "desired_api_weight": 100, "desired_console_weight": 100}
+        applying[source] = {**applying.get(source, {}), "desired_state": "drain", "desired_weight": 0,
+                            "desired_api_weight": 0, "desired_console_weight": 0}
+        atomic_write_json(STATE_PATH, applying)
+
+        try:
+            wait_healthy(target, 15)
+            set_server(target, "ready", 100)
+            set_server(source, "drain", 0)
+            if not verify_weights(target, source) or not stable_probe(target):
+                raise ControllerError(
+                    EXIT_VERIFY,
+                    "rollback_verification_failed",
+                    "Traffic changed but stable-path verification failed.",
+                )
+            persist_server_state()
+        except ControllerError as original_error:
+            # HAProxy runtime commands are not transactional. Restore the
+            # previously serving side in availability-first order so a partial
+            # rollback can never leave both slots drained. Draining target does
+            # not terminate requests that already reached it.
+            reverted, restoration_errors = restore_weight_snapshot(status)
+            if reverted:
+                try:
+                    persist_server_state()
+                except ControllerError as restore_error:
+                    reverted = False
+                    restoration_errors.append(restore_error.error_code)
+            failed = dict(applying)
+            failed["phase"] = "rollback_reverted_safe" if reverted else "rollback_failed_safe"
+            failed["active_slot"] = state.get("active_slot")
+            for slot in SLOTS:
+                api_weight = int(status[slot].get("weight") or 0)
+                console_weight = int(status[slot].get("console_weight") or 0)
+                failed[slot] = {
+                    **failed.get(slot, {}),
+                    "desired_state": "ready" if max(api_weight, console_weight) > 0 else "drain",
+                    "desired_weight": api_weight,
+                    "desired_api_weight": api_weight,
+                    "desired_console_weight": console_weight,
+                }
+            failed["last_action_result"] = failed["phase"]
+            failed["updated_at"] = now_utc()
+            atomic_write_json(STATE_PATH, failed)
+            append_history({
+                "at": now_utc(),
+                "action": "rollback",
+                "action_id": args.action_id,
+                "actor": args.actor,
+                "reason": args.reason,
+                "before": before,
+                "after": {
+                    "generation": failed["generation"],
+                    "phase": failed["phase"],
+                    "active_slot": state.get("active_slot"),
+                },
+                "result": failed["phase"],
+                "trigger_error": original_error.error_code,
+                "restoration_errors": restoration_errors,
+            })
+            if reverted:
+                raise ControllerError(
+                    EXIT_HAPROXY,
+                    "rollback_reverted_safe",
+                    "Rollback could not be verified; previous traffic state was restored safely.",
+                ) from original_error
+            raise ControllerError(
+                EXIT_HAPROXY,
+                "rollback_failed_safe",
+                "Rollback and automatic traffic restoration were not fully verified; inspect controller state without retrying the mutation.",
+            ) from original_error
+
+        final = dict(applying)
+        final["phase"] = "rolled_back"
+        final["active_slot"] = target
+        final["stable_slot"] = target
+        final["candidate_slot"] = source
+        final[target] = {**final.get(target, {}), "desired_state": "ready", "desired_weight": 100,
+                         "desired_api_weight": 100, "desired_console_weight": 100}
+        final[source] = {**final.get(source, {}), "desired_state": "drain", "desired_weight": 0,
+                         "desired_api_weight": 0, "desired_console_weight": 0}
+        final["last_action_result"] = "traffic_restored"
+        final["updated_at"] = now_utc()
+        atomic_write_json(STATE_PATH, final)
+        post = actual_status(final)
+        event = {"at": now_utc(), "action": "rollback", "action_id": args.action_id, "actor": args.actor,
+                 "reason": args.reason, "before": before,
+                 "after": {"generation": final["generation"], "phase": final["phase"], "active_slot": target},
+                 "result": "traffic_restored"}
+        append_history(event)
+        return emit({**post, "action": "rollback", "result": "traffic_restored", "action_id": args.action_id,
+                     "target_slot": target, "source_slot": source, "drain_pending": post[source]["active_streams"] > 0})
+
+
+def prepare_stage(args):
+    for name, value in (
+        ("release_id", args.release_id),
+        ("actor", args.actor),
+        ("action_id", args.action_id),
+    ):
+        validate_audit_value(name, value)
+    with controller_lock():
+        state = load_state()
+        if state.get("last_action_id") == args.action_id:
+            return emit({**actual_status(state), "action": "prepare-stage",
+                         "result": state.get("last_action_result", "already_prepared"),
+                         "action_id": args.action_id})
+        if state.get("phase") not in ("ready", "complete", "rolled_back"):
+            raise ControllerError(EXIT_PRECONDITION, "release_in_progress", "Another rollout is still in progress.")
+        stable = state.get("stable_slot")
+        candidate = state.get("candidate_slot")
+        if stable not in SLOTS or candidate != other_slot(stable) or args.candidate_slot != candidate:
+            raise ControllerError(EXIT_PRECONDITION, "invalid_stage_slot", "Candidate must be the current idle slot.")
+        status = actual_status(state)
+        if status[stable]["health"] != "healthy" or status[stable]["weight"] != 100:
+            raise ControllerError(EXIT_PRECONDITION, "stable_not_ready", "Stable slot is not healthy at 100% API weight.")
+        if status[candidate]["health"] != "healthy" or status[candidate]["weight"] != 0:
+            raise ControllerError(EXIT_PRECONDITION, "candidate_not_idle", "Candidate slot must be healthy at 0% API weight.")
+        if status[candidate]["active_streams"] != 0:
+            raise ControllerError(EXIT_PRECONDITION, "candidate_still_draining", "Candidate slot still has active streams.")
+
+        updated = dict(state)
+        updated["release_id"] = args.release_id
+        updated["phase"] = "preparing"
+        updated["active_slot"] = stable
+        # Move the rollback target to the serving stable slot before the idle
+        # container is replaced. This closes the unsafe staging window.
+        updated["rollback_target_slot"] = stable
+        updated["rollback_schema_compatible"] = args.schema_compatible
+        updated["gate_consecutive_passes"] = 0
+        updated["last_gate_passed"] = False
+        updated.pop("last_gate_window_end", None)
+        updated.pop("promotion_started_at", None)
+        updated.pop("promotion_gate_bypass", None)
+        updated["generation"] = int(state.get("generation", 0)) + 1
+        updated["last_action_id"] = args.action_id
+        updated["last_action_result"] = "stage_prepared"
+        updated["last_actor"] = args.actor
+        updated["updated_at"] = now_utc()
+        atomic_write_json(STATE_PATH, updated)
+        append_history({"at": now_utc(), "action": "prepare-stage", "action_id": args.action_id,
+                        "actor": args.actor, "release_id": args.release_id, "stable_slot": stable,
+                        "candidate_slot": candidate, "rollback_target_slot": stable,
+                        "generation": updated["generation"]})
+        return emit({**actual_status(updated), "action": "prepare-stage", "result": "stage_prepared",
+                     "action_id": args.action_id})
+
+
+def attest_identical_image(args):
+    validate_audit_value("actor", args.actor)
+    validate_audit_value("action_id", args.action_id)
+    evidence_dir = pathlib.Path(args.evidence_dir).resolve()
+    reports_root = REPORTS_ROOT.resolve()
+    if reports_root not in evidence_dir.parents or not evidence_dir.name.startswith("paired-"):
+        raise ControllerError(EXIT_ARGUMENT, "invalid_evidence_path", "Evidence must be a paired report directory.")
+
+    with controller_lock():
+        state = load_state()
+        if state.get("last_action_id") == args.action_id:
+            return emit({**actual_status(state), "action": "attest-identical",
+                         "result": state.get("last_action_result", "already_attested"),
+                         "action_id": args.action_id})
+        if state.get("phase") != "staged":
+            raise ControllerError(EXIT_PRECONDITION, "release_not_staged", "Identical-image attestation requires a staged release.")
+        stable = state.get("stable_slot")
+        candidate = state.get("candidate_slot")
+        if stable not in SLOTS or candidate != other_slot(stable):
+            raise ControllerError(EXIT_PRECONDITION, "invalid_rollout_slots", "Rollout slots are invalid.")
+        stable_digest = state.get(stable, {}).get("digest")
+        candidate_digest = state.get(candidate, {}).get("digest")
+        if not stable_digest or stable_digest != candidate_digest:
+            raise ControllerError(EXIT_PRECONDITION, "images_not_identical", "Stable and candidate immutable digests differ.")
+        status = actual_status(state)
+        if status[stable]["health"] != "healthy" or status[candidate]["health"] != "healthy":
+            raise ControllerError(EXIT_PRECONDITION, "slot_unhealthy", "Both identical-image slots must be healthy.")
+        if status[stable]["weight"] != 100 or status[candidate]["weight"] != 0:
+            raise ControllerError(EXIT_PRECONDITION, "slot_weights_invalid", "Attestation requires stable=100 and candidate=0.")
+
+        payloads = {}
+        digest = hashlib.sha256()
+        for filename in ("window.json", stable + ".json", candidate + ".json"):
+            path = evidence_dir / filename
+            try:
+                raw = path.read_bytes()
+                stat = path.stat()
+                payloads[filename] = json.loads(raw)
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ControllerError(EXIT_PRECONDITION, "evidence_invalid", "Paired evidence is missing or invalid.") from exc
+            if stat.st_uid != EVIDENCE_OWNER_UID or stat.st_mode & 0o077:
+                raise ControllerError(EXIT_PRECONDITION, "evidence_permissions_invalid", "Paired evidence must be root-owned and private.")
+            digest.update(filename.encode() + b"\0" + raw)
+
+        window = payloads["window.json"]
+        if int(window.get("duration_seconds") or 0) < 300:
+            raise ControllerError(EXIT_PRECONDITION, "evidence_window_too_short", "Identical-image evidence must span at least five minutes.")
+
+        def client_metrics(slot):
+            report = payloads[slot + ".json"]
+            requests = int(report.get("requests") or 0)
+            completed = int((report.get("terminals") or {}).get("response.completed") or 0)
+            statuses = report.get("statuses") or {}
+            cache = (report.get("tokens") or {}).get("cache_rate")
+            ttft = (report.get("ttft_seconds") or {}).get("p50")
+            if requests < 10 or completed != requests or statuses != {"200": requests}:
+                raise ControllerError(EXIT_PRECONDITION, "evidence_terminal_failure", "Paired evidence must be at least 10/10 complete on each slot.")
+            if not finite(cache) or not finite(ttft):
+                raise ControllerError(EXIT_PRECONDITION, "evidence_metrics_missing", "Paired evidence lacks TTFT or cache metrics.")
+            input_total = int((report.get("tokens") or {}).get("input") or 0)
+            cached = int((report.get("tokens") or {}).get("cached") or 0)
+            return {"slot": slot, "terminal_outcomes": requests, "successes": completed, "failures": 0,
+                    "ttft_samples": completed, "ttft_p50_ms": float(ttft) * 1000,
+                    "input_tokens": max(0, input_total - cached), "cache_read_tokens": cached,
+                    "cache_creation_tokens": 0, "upstream_429": 0, "upstream_529": 0, "upstream_5xx": 0}
+
+        baseline = client_metrics(stable)
+        candidate_metrics = client_metrics(candidate)
+        passed, reason, checks = evaluate_gate(baseline, candidate_metrics, 10)
+        auxiliary_passed, auxiliary_checks = evaluate_auxiliary_guards(candidate_metrics, 0.995)
+        if not passed or not auxiliary_passed:
+            raise ControllerError(EXIT_PRECONDITION, reason or "auxiliary_guard_failed", "Identical-image evidence did not pass rollout gates.")
+
+        updated = dict(state)
+        updated["last_gate_passed"] = True
+        updated["gate_consecutive_passes"] = 3
+        updated["gate_mode"] = "identical_image_attestation"
+        updated["noop_attested"] = True
+        updated["attestation_evidence"] = str(evidence_dir.relative_to(reports_root))
+        updated["attestation_sha256"] = digest.hexdigest()
+        updated["last_action_id"] = args.action_id
+        updated["last_action_result"] = "identical_image_attested"
+        updated["last_actor"] = args.actor
+        updated["updated_at"] = now_utc()
+        atomic_write_json(STATE_PATH, updated)
+        append_history({"at": now_utc(), "action": "attest-identical", "action_id": args.action_id,
+                        "actor": args.actor, "release_id": state.get("release_id"),
+                        "digest": stable_digest, "evidence": updated["attestation_evidence"],
+                        "evidence_sha256": updated["attestation_sha256"], "checks": checks,
+                        "auxiliary_checks": auxiliary_checks})
+        return emit({**actual_status(updated), "action": "attest-identical",
+                     "result": "identical_image_attested", "action_id": args.action_id,
+                     "checks": checks, "auxiliary_checks": auxiliary_checks,
+                     "evidence": updated["attestation_evidence"],
+                     "evidence_sha256": updated["attestation_sha256"]})
+
+
+def stage_release(args):
+    for name, value in (
+        ("release_id", args.release_id),
+        ("candidate_version", args.candidate_version),
+        ("actor", args.actor),
+        ("action_id", args.action_id),
+    ):
+        validate_audit_value(name, value)
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", args.candidate_digest):
+        raise ControllerError(EXIT_ARGUMENT, "invalid_digest", "Image digest must be an immutable sha256 ID.")
+
+    with controller_lock():
+        state = load_state()
+        if state.get("last_action_id") == args.action_id:
+            return emit({**actual_status(state), "action": "stage",
+                         "result": state.get("last_action_result", "already_staged"),
+                         "action_id": args.action_id})
+        stable = state.get("stable_slot")
+        candidate = state.get("candidate_slot")
+        if stable not in SLOTS or candidate != other_slot(stable) or args.candidate_slot != candidate:
+            raise ControllerError(EXIT_PRECONDITION, "invalid_stage_slot", "Candidate must be the current idle slot.")
+        phase = state.get("phase")
+        if phase == "preparing" and state.get("release_id") != args.release_id:
+            raise ControllerError(EXIT_PRECONDITION, "prepared_release_mismatch", "Staged release does not match the prepared release.")
+        if phase not in ("ready", "preparing"):
+            raise ControllerError(EXIT_PRECONDITION, "stage_not_prepared", "Run prepare-stage before replacing the idle slot.")
+
+        status = actual_status(state)
+        if status[stable]["health"] != "healthy" or status[stable]["weight"] != 100:
+            raise ControllerError(EXIT_PRECONDITION, "stable_not_ready", "Stable slot is not healthy at 100% API weight.")
+        if status[candidate]["health"] != "healthy" or status[candidate]["weight"] != 0:
+            raise ControllerError(EXIT_PRECONDITION, "candidate_not_idle", "Candidate slot must be healthy at 0% API weight.")
+        if status[candidate]["active_streams"] != 0:
+            raise ControllerError(EXIT_PRECONDITION, "candidate_still_draining", "Candidate slot still has active streams.")
+        if status[candidate]["image_id"] != args.candidate_digest:
+            raise ControllerError(EXIT_PRECONDITION, "candidate_digest_mismatch", "Candidate image digest does not match the staged release.")
+
+        metadata = container_deployment_metadata(candidate)
+        expected_metadata = {
+            "SUB2API_DEPLOYMENT_SLOT": candidate,
+            "SUB2API_RELEASE_ID": args.release_id,
+            "SUB2API_DEPLOYMENT_VERSION": args.candidate_version,
+            "SUB2API_DEPLOYMENT_DIGEST": args.candidate_digest,
+        }
+        if metadata != expected_metadata:
+            raise ControllerError(EXIT_PRECONDITION, "candidate_metadata_mismatch", "Candidate deployment metadata does not match the staged release.")
+
+        updated = dict(state)
+        updated["release_id"] = args.release_id
+        updated["phase"] = "staged"
+        updated["active_slot"] = stable
+        updated["rollback_target_slot"] = stable
+        updated["rollback_schema_compatible"] = args.schema_compatible
+        updated["gate_consecutive_passes"] = 0
+        updated["last_gate_passed"] = False
+        updated.pop("last_gate_window_end", None)
+        updated.pop("promotion_started_at", None)
+        updated["generation"] = int(state.get("generation", 0)) + 1
+        updated[candidate] = {
+            **updated.get(candidate, {}),
+            "version": args.candidate_version,
+            "digest": args.candidate_digest,
+            "desired_state": "drain",
+            "desired_weight": 0,
+            "desired_api_weight": 0,
+            "desired_console_weight": 0,
+        }
+        updated["last_action_id"] = args.action_id
+        updated["last_action_result"] = "release_staged"
+        updated["last_actor"] = args.actor
+        updated["updated_at"] = now_utc()
+        atomic_write_json(STATE_PATH, updated)
+        append_history({"at": now_utc(), "action": "stage", "action_id": args.action_id,
+                        "actor": args.actor, "release_id": args.release_id, "stable_slot": stable,
+                        "candidate_slot": candidate, "candidate_version": args.candidate_version,
+                        "candidate_digest": args.candidate_digest, "generation": updated["generation"]})
+        return emit({**actual_status(updated), "action": "stage", "result": "release_staged",
+                     "action_id": args.action_id})
+
+
+def complete_release(args):
+    validate_audit_value("actor", args.actor)
+    validate_audit_value("action_id", args.action_id)
+    if args.min_soak_seconds < 0:
+        raise ControllerError(EXIT_ARGUMENT, "invalid_soak", "Minimum soak duration cannot be negative.")
+
+    with controller_lock():
+        state = load_state()
+        if state.get("phase") == "complete":
+            status = actual_status(state)
+            return emit({**status, "action": "complete", "result": "already_completed",
+                         "action_id": args.action_id})
+        stable = state.get("stable_slot")
+        promoted = state.get("candidate_slot")
+        if stable not in SLOTS or promoted != other_slot(stable):
+            raise ControllerError(EXIT_PRECONDITION, "invalid_rollout_slots", "Rollout slots are not valid.")
+        if state.get("phase") != "soak_100" or state.get("active_slot") != promoted:
+            raise ControllerError(EXIT_PRECONDITION, "promotion_not_soaking", "Candidate is not in the 100% soak phase.")
+        gate_satisfied = state.get("last_gate_passed") and int(state.get("gate_consecutive_passes", 0)) >= 3
+        gate_bypass = state.get("promotion_gate_bypass")
+        if not gate_satisfied and not isinstance(gate_bypass, dict):
+            raise ControllerError(EXIT_PRECONDITION, "gate_not_satisfied", "Three consecutive passing gate cycles are required.")
+
+        started = state.get("promotion_started_at")
+        try:
+            elapsed = (dt.datetime.now(dt.timezone.utc) - parse_utc(started)).total_seconds()
+        except (TypeError, ControllerError) as exc:
+            raise ControllerError(EXIT_PRECONDITION, "promotion_timestamp_missing", "Promotion soak start is unavailable.") from exc
+        if elapsed < args.min_soak_seconds:
+            raise ControllerError(EXIT_PRECONDITION, "soak_incomplete", "Promotion soak duration has not completed.")
+
+        status = actual_status(state)
+        if status[promoted]["health"] != "healthy" or status[promoted]["weight"] != 100:
+            raise ControllerError(EXIT_PRECONDITION, "promoted_not_ready", "Promoted slot is not healthy at 100% API weight.")
+        if status[stable]["health"] != "healthy" or status[stable]["weight"] != 0:
+            raise ControllerError(EXIT_PRECONDITION, "rollback_target_not_warm", "Previous stable slot is not a healthy warm rollback target.")
+        if status[promoted]["image_id"] != state.get(promoted, {}).get("digest"):
+            raise ControllerError(EXIT_PRECONDITION, "promoted_digest_mismatch", "Promoted image digest does not match state.")
+        if status[stable]["image_id"] != state.get(stable, {}).get("digest"):
+            raise ControllerError(EXIT_PRECONDITION, "rollback_digest_mismatch", "Rollback target image digest does not match state.")
+
+        updated = dict(state)
+        updated["phase"] = "complete"
+        updated["active_slot"] = promoted
+        updated["stable_slot"] = promoted
+        updated["candidate_slot"] = stable
+        updated["rollback_target_slot"] = stable
+        updated["completed_at"] = now_utc()
+        updated["generation"] = int(state.get("generation", 0)) + 1
+        updated["last_action_id"] = args.action_id
+        updated["last_action_result"] = "release_completed"
+        updated["last_actor"] = args.actor
+        updated["updated_at"] = now_utc()
+        atomic_write_json(STATE_PATH, updated)
+        append_history({"at": now_utc(), "action": "complete", "action_id": args.action_id,
+                        "actor": args.actor, "release_id": state.get("release_id"),
+                        "previous_stable_slot": stable, "stable_slot": promoted,
+                        "rollback_target_slot": stable, "generation": updated["generation"],
+                        "gate_bypassed": isinstance(gate_bypass, dict),
+                        "gate_bypass_reason": gate_bypass.get("reason") if isinstance(gate_bypass, dict) else None})
+        return emit({**actual_status(updated), "action": "complete", "result": "release_completed",
+                     "action_id": args.action_id, "drain_pending": status[stable]["active_streams"] > 0})
+
+
+def parse_utc(value):
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ControllerError(EXIT_ARGUMENT, "invalid_window", "Window timestamps must be ISO-8601.") from exc
+    if parsed.tzinfo is None:
+        raise ControllerError(EXIT_ARGUMENT, "invalid_window", "Window timestamps require a timezone.")
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def query_metrics(slot, window_start, window_end, api_key_id=None):
+    try:
+        sql = METRICS_SQL_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ControllerError(EXIT_PRECONDITION, "metrics_query_missing", "Rollout metrics query is unavailable.") from exc
+    command = [DOCKER, "exec", "-i", POSTGRES_CONTAINER, "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1",
+               "-U", POSTGRES_USER, "-d", POSTGRES_DB,
+               "--set=slot=" + slot, "--set=window_start=" + window_start, "--set=window_end=" + window_end,
+               "--set=api_key_id=" + (str(api_key_id) if api_key_id is not None else "")]
+    if os.environ.get("SUB2API_DEPENDENCY_MODE") == "external":
+        command = [str(ROLLOUT_DIR / "dependency-client"), "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1",
+                   "--set=slot=" + slot, "--set=window_start=" + window_start, "--set=window_end=" + window_end,
+                   "--set=api_key_id=" + (str(api_key_id) if api_key_id is not None else "")]
+    result = subprocess.run(command, input=sql, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            timeout=30, check=False)
+    if result.returncode != 0:
+        raise ControllerError(EXIT_PRECONDITION, "metrics_query_failed", "Deployment metrics query failed.")
+    try:
+        return json.loads(result.stdout.strip())
+    except json.JSONDecodeError as exc:
+        raise ControllerError(EXIT_PRECONDITION, "metrics_query_invalid", "Deployment metrics query returned invalid JSON.") from exc
+
+
+def metric_rate(metrics, kind):
+    if kind == "sla":
+        denominator = metrics.get("terminal_outcomes") or 0
+        return (metrics.get("successes") or 0) / denominator if denominator > 0 else None
+    denominator = sum((metrics.get(key) or 0) for key in ("input_tokens", "cache_read_tokens", "cache_creation_tokens"))
+    return (metrics.get("cache_read_tokens") or 0) / denominator if denominator > 0 else None
+
+
+def finite(value):
+    return isinstance(value, (int, float)) and math.isfinite(value)
+
+
+def evaluate_gate(baseline, candidate, min_samples):
+    if (candidate.get("terminal_outcomes") or 0) < min_samples:
+        return False, "insufficient_candidate_samples", []
+    blue_sla, green_sla = metric_rate(baseline, "sla"), metric_rate(candidate, "sla")
+    if not all(finite(value) for value in (blue_sla, green_sla)):
+        return False, "missing_gate_metrics", []
+    checks = [
+        {"name": "sla", "baseline": blue_sla, "candidate": green_sla,
+         "limit": blue_sla - 0.03, "passed": green_sla + 1e-12 >= blue_sla - 0.03},
+    ]
+    passed = all(item["passed"] for item in checks)
+    return passed, None if passed else "gate_threshold_failed", checks
+
+
+def evaluate_auxiliary_guards(candidate, min_absolute_sla):
+    candidate_sla = metric_rate(candidate, "sla")
+    checks = [
+        {"name": "absolute_sla", "value": candidate_sla, "limit": min_absolute_sla,
+         "passed": finite(candidate_sla) and candidate_sla + 1e-12 >= min_absolute_sla},
+        {"name": "upstream_429", "value": int(candidate.get("upstream_429") or 0), "limit": 0,
+         "passed": int(candidate.get("upstream_429") or 0) == 0},
+        {"name": "upstream_529", "value": int(candidate.get("upstream_529") or 0), "limit": 0,
+         "passed": int(candidate.get("upstream_529") or 0) == 0},
+        {"name": "upstream_5xx", "value": int(candidate.get("upstream_5xx") or 0), "limit": 0,
+         "passed": int(candidate.get("upstream_5xx") or 0) == 0},
+    ]
+    return all(item["passed"] for item in checks), checks
+
+
+def gate(args):
+    if args.api_key_id is not None and args.api_key_id <= 0:
+        raise ControllerError(EXIT_ARGUMENT, "invalid_api_key_scope", "API key scope must be a positive integer.")
+    if not finite(args.min_absolute_sla) or args.min_absolute_sla < 0 or args.min_absolute_sla > 1:
+        raise ControllerError(EXIT_ARGUMENT, "invalid_absolute_sla", "Minimum absolute SLA must be between 0 and 1.")
+    start = parse_utc(args.window_start)
+    end = parse_utc(args.window_end)
+    if end <= start or (end - start).total_seconds() < args.min_window_seconds:
+        raise ControllerError(EXIT_PRECONDITION, "window_too_short", "Gate window is shorter than the required observation period.")
+    with controller_lock():
+        state = load_state()
+        baseline_slot = state.get("stable_slot")
+        candidate_slot = state.get("candidate_slot")
+        if baseline_slot not in SLOTS or candidate_slot not in SLOTS or baseline_slot == candidate_slot:
+            raise ControllerError(EXIT_PRECONDITION, "invalid_gate_slots", "Gate slots are not valid.")
+        baseline = query_metrics(baseline_slot, args.window_start, args.window_end, args.api_key_id)
+        candidate = query_metrics(candidate_slot, args.window_start, args.window_end, args.api_key_id)
+        passed, reason, checks = evaluate_gate(baseline, candidate, args.min_candidate_samples)
+        _, auxiliary_checks = evaluate_auxiliary_guards(candidate, args.min_absolute_sla)
+        updated = dict(state)
+        previous_window = state.get("last_gate_window_end")
+        if passed and previous_window != args.window_end:
+            updated["gate_consecutive_passes"] = int(state.get("gate_consecutive_passes", 0)) + 1
+        elif not passed and reason != "insufficient_candidate_samples":
+            updated["gate_consecutive_passes"] = 0
+        updated["last_gate_window_end"] = args.window_end
+        updated["last_gate_passed"] = passed
+        updated["last_gate_scope"] = "api_key" if args.api_key_id is not None else "all_production"
+        updated["updated_at"] = now_utc()
+        atomic_write_json(STATE_PATH, updated)
+        consecutive = int(updated.get("gate_consecutive_passes", 0))
+        eligible = passed and consecutive >= args.required_consecutive_passes
+        return emit({"supported": True, "action": "gate", "release_id": state.get("release_id"),
+                     "window_start": args.window_start, "window_end": args.window_end,
+                     "scope": "api_key" if args.api_key_id is not None else "all_production",
+                     "baseline": baseline, "candidate": candidate, "checks": checks,
+                     "auxiliary_checks": auxiliary_checks,
+                     "auxiliary_enforced": False,
+                     "cycle_passed": passed, "consecutive_passes": consecutive,
+                     "required_consecutive_passes": args.required_consecutive_passes,
+                     "eligible_for_promotion": eligible, "reason": reason})
+
+
+def change_weights(args):
+    if args.blue < 0 or args.green < 0 or args.blue + args.green != 100:
+        raise ControllerError(EXIT_ARGUMENT, "invalid_weights", "Blue and green weights must be non-negative and sum to 100.")
+    if args.phase not in ("canary_10", "soak_100", "ready"):
+        raise ControllerError(EXIT_ARGUMENT, "invalid_phase", "Requested rollout phase is invalid.")
+    with controller_lock():
+        state = load_state()
+        stable = state.get("stable_slot")
+        candidate = state.get("candidate_slot")
+        if stable not in SLOTS or candidate not in SLOTS or stable == candidate:
+            raise ControllerError(EXIT_PRECONDITION, "invalid_rollout_slots", "Rollout slots are invalid.")
+        expected = {
+            "canary_10": {stable: 90, candidate: 10},
+            "soak_100": {stable: 0, candidate: 100},
+            "ready": {stable: 100, candidate: 0},
+        }[args.phase]
+        if args.blue != expected["blue"] or args.green != expected["green"]:
+            raise ControllerError(EXIT_PRECONDITION, "weights_do_not_match_phase", "Weights do not match the requested rollout phase.")
+        target_status = container_state(candidate)
+        expected_digest = state.get(candidate, {}).get("digest")
+        if args.phase in ("canary_10", "soak_100") and (
+            target_status.get("health") != "healthy" or not expected_digest or target_status.get("image_id") != expected_digest
+        ):
+            raise ControllerError(EXIT_PRECONDITION, "candidate_not_ready", "Candidate health or immutable digest verification failed.")
+        gate_satisfied = state.get("last_gate_passed") and int(state.get("gate_consecutive_passes", 0)) >= 3
+        gate_bypass_reason = str(getattr(args, "gate_bypass_reason", "") or "").strip()
+        if gate_bypass_reason:
+            validate_audit_value("gate_bypass_reason", gate_bypass_reason)
+        if args.phase == "soak_100" and not gate_satisfied and not gate_bypass_reason:
+            raise ControllerError(EXIT_PRECONDITION, "gate_not_satisfied", "Three consecutive passing gate cycles are required before promotion.")
+        before_status = actual_status(state)
+        console_target = candidate if args.phase == "soak_100" else stable
+        console_source = stable if console_target == candidate else candidate
+        expected_runtime = {
+            "blue": {"weight": args.blue, "console_weight": 100 if console_target == "blue" else 0},
+            "green": {"weight": args.green, "console_weight": 100 if console_target == "green" else 0},
+        }
+        try:
+            for slot, weight in (("blue", args.blue), ("green", args.green)):
+                set_server(slot, "ready" if weight > 0 else "drain", weight, backends=("api_pool",))
+            # Keep the admin/console pinned to stable until promotion.
+            set_server(console_target, "ready", 100, backends=("console_pool",))
+            set_server(console_source, "drain", 0, backends=("console_pool",))
+            if not runtime_matches_weights(expected_runtime):
+                raise ControllerError(EXIT_VERIFY, "weight_change_verification_failed", "HAProxy weights did not match the requested phase.")
+            persist_server_state()
+        except ControllerError as original_error:
+            reverted, restoration_errors = restore_weight_snapshot(before_status)
+            if reverted:
+                try:
+                    persist_server_state()
+                except ControllerError as restore_error:
+                    reverted = False
+                    restoration_errors.append(restore_error.error_code)
+            append_history({"at": now_utc(), "action": "weights", "phase": args.phase,
+                            "result": "weight_change_reverted_safe" if reverted else "weight_change_failed_safe",
+                            "trigger_error": original_error.error_code,
+                            "restoration_errors": restoration_errors})
+            if reverted:
+                raise ControllerError(EXIT_HAPROXY, "weight_change_reverted_safe",
+                                      "Weight change failed; previous runtime weights were restored safely.") from original_error
+            raise ControllerError(EXIT_HAPROXY, "weight_change_failed_safe",
+                                  "Weight change and automatic restoration were not fully verified; inspect state before retrying.") from original_error
+        updated = dict(state)
+        updated["phase"] = args.phase
+        updated["active_slot"] = "blue" if args.blue >= args.green else "green"
+        updated["generation"] = int(state.get("generation", 0)) + 1
+        if args.phase == "soak_100" and state.get("phase") != "soak_100":
+            updated["promotion_started_at"] = now_utc()
+        if args.phase == "soak_100" and gate_bypass_reason:
+            updated["promotion_gate_bypass"] = {
+                "at": now_utc(),
+                "reason": gate_bypass_reason,
+            }
+        for slot, weight in (("blue", args.blue), ("green", args.green)):
+            console_weight = 100 if slot == stable else 0
+            if args.phase == "soak_100":
+                console_weight = weight
+            updated[slot] = {**updated.get(slot, {}), "desired_weight": weight,
+                             "desired_api_weight": weight, "desired_console_weight": console_weight,
+                             "desired_state": "ready" if max(weight, console_weight) > 0 else "drain"}
+        updated["updated_at"] = now_utc()
+        atomic_write_json(STATE_PATH, updated)
+        append_history({"at": now_utc(), "action": "weights", "phase": args.phase,
+                        "blue": args.blue, "green": args.green, "generation": updated["generation"],
+                        "gate_bypassed": bool(gate_bypass_reason),
+                        "gate_bypass_reason": gate_bypass_reason or None})
+        return emit(actual_status(updated))
+
+
+def reconcile():
+    with controller_lock():
+        state = load_state()
+        for slot in SLOTS:
+            desired = state.get(slot, {})
+            desired_state = desired.get("desired_state")
+            api_weight = desired.get("desired_api_weight", desired.get("desired_weight"))
+            console_weight = desired.get("desired_console_weight", desired.get("desired_weight"))
+            if desired_state not in ("ready", "drain") or not isinstance(api_weight, int) or not isinstance(console_weight, int):
+                raise ControllerError(EXIT_PRECONDITION, "invalid_desired_state", "Rollout desired state is incomplete.")
+            if max(api_weight, console_weight) > 0:
+                observed = container_state(slot)
+                if observed.get("health") != "healthy" or observed.get("image_id") != desired.get("digest"):
+                    raise ControllerError(EXIT_TARGET_UNHEALTHY, "desired_slot_unhealthy", "A traffic-bearing desired slot is unhealthy or has the wrong digest.")
+        # Enable every traffic-bearing backend before applying drains.
+        for backend, key in (("api_pool", "desired_api_weight"), ("console_pool", "desired_console_weight")):
+            for slot in SLOTS:
+                desired = state[slot]
+                weight = desired.get(key, desired.get("desired_weight"))
+                if weight > 0:
+                    set_server(slot, "ready", weight, backends=(backend,))
+            for slot in SLOTS:
+                desired = state[slot]
+                weight = desired.get(key, desired.get("desired_weight"))
+                if weight == 0:
+                    set_server(slot, "drain", 0, backends=(backend,))
+        status = actual_status(state)
+        for slot in SLOTS:
+            desired = state[slot]
+            if (status[slot]["weight"] != desired.get("desired_api_weight", desired.get("desired_weight")) or
+                    status[slot]["console_weight"] != desired.get("desired_console_weight", desired.get("desired_weight"))):
+                raise ControllerError(EXIT_VERIFY, "reconcile_verification_failed", "HAProxy weights do not match desired state.")
+        persist_server_state()
+        return emit({**status, "action": "reconcile", "result": "desired_state_applied"})
+
+
+def persist_runtime_state():
+    path = persist_server_state()
+    return emit({"supported": True, "action": "persist-runtime-state", "result": "persisted",
+                 "path": str(path)})
+
+
+def init_state(args):
+    if STATE_PATH.exists():
+        raise ControllerError(EXIT_PRECONDITION, "state_already_exists", "Rollout state already exists.")
+    for value in (args.release_id, args.blue_version, args.green_version):
+        validate_audit_value("release_metadata", value)
+    for digest in (args.blue_digest, args.green_digest):
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+            raise ControllerError(EXIT_ARGUMENT, "invalid_digest", "Image digest must be an immutable sha256 ID.")
+    state = {
+        "topology_mode": "blue_green", "generation": 1, "phase": "complete",
+        "release_id": args.release_id, "active_slot": "blue", "stable_slot": "blue",
+        "candidate_slot": "green", "rollback_target_slot": "blue",
+        "rollback_schema_compatible": True, "gate_consecutive_passes": 0,
+        "blue": {"version": args.blue_version, "digest": args.blue_digest,
+                 "desired_state": "ready", "desired_weight": 100,
+                 "desired_api_weight": 100, "desired_console_weight": 100},
+        "green": {"version": args.green_version, "digest": args.green_digest,
+                  "desired_state": "drain", "desired_weight": 0,
+                  "desired_api_weight": 0, "desired_console_weight": 0},
+        "created_at": now_utc(), "updated_at": now_utc(),
+    }
+    atomic_write_json(STATE_PATH, state)
+    append_history({"at": now_utc(), "action": "init", "release_id": args.release_id, "generation": 1})
+    return emit(state)
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(add_help=True)
+    sub = parser.add_subparsers(dest="command", required=True)
+    status = sub.add_parser("status")
+    status.add_argument("--json", action="store_true")
+    rollback_parser = sub.add_parser("rollback")
+    rollback_parser.add_argument("--to", choices=["rollback-target"], required=True)
+    rollback_parser.add_argument("--actor", default="controller")
+    rollback_parser.add_argument("--reason", default="manual-rollback")
+    rollback_parser.add_argument("--action-id")
+    rollback_parser.add_argument("--dry-run", action="store_true")
+    rollback_parser.add_argument("--json", action="store_true")
+    prepare_parser = sub.add_parser("prepare-stage")
+    prepare_parser.add_argument("--release-id", required=True)
+    prepare_parser.add_argument("--candidate-slot", choices=SLOTS, required=True)
+    prepare_parser.add_argument("--schema-compatible", action=argparse.BooleanOptionalAction, default=True)
+    prepare_parser.add_argument("--actor", default="controller")
+    prepare_parser.add_argument("--action-id", required=True)
+    prepare_parser.add_argument("--json", action="store_true")
+    attest_parser = sub.add_parser("attest-identical")
+    attest_parser.add_argument("--evidence-dir", required=True)
+    attest_parser.add_argument("--actor", default="controller")
+    attest_parser.add_argument("--action-id", required=True)
+    attest_parser.add_argument("--json", action="store_true")
+    stage_parser = sub.add_parser("stage")
+    stage_parser.add_argument("--release-id", required=True)
+    stage_parser.add_argument("--candidate-slot", choices=SLOTS, required=True)
+    stage_parser.add_argument("--candidate-version", required=True)
+    stage_parser.add_argument("--candidate-digest", required=True)
+    stage_parser.add_argument("--schema-compatible", action=argparse.BooleanOptionalAction, default=True)
+    stage_parser.add_argument("--actor", default="controller")
+    stage_parser.add_argument("--action-id", required=True)
+    stage_parser.add_argument("--json", action="store_true")
+    complete_parser = sub.add_parser("complete")
+    complete_parser.add_argument("--min-soak-seconds", type=int, default=600)
+    complete_parser.add_argument("--actor", default="controller")
+    complete_parser.add_argument("--action-id", required=True)
+    complete_parser.add_argument("--json", action="store_true")
+    gate_parser = sub.add_parser("gate")
+    gate_parser.add_argument("--window-start", required=True)
+    gate_parser.add_argument("--window-end", required=True)
+    gate_parser.add_argument("--min-window-seconds", type=int, default=600)
+    gate_parser.add_argument("--min-candidate-samples", type=int, default=200)
+    gate_parser.add_argument("--required-consecutive-passes", type=int, default=3)
+    gate_parser.add_argument("--min-absolute-sla", type=float, default=0.995)
+    gate_parser.add_argument("--api-key-id", type=int)
+    gate_parser.add_argument("--json", action="store_true")
+    weights = sub.add_parser("weights")
+    weights.add_argument("--blue", type=int, required=True)
+    weights.add_argument("--green", type=int, required=True)
+    weights.add_argument("--phase", required=True)
+    weights.add_argument("--gate-bypass-reason")
+    weights.add_argument("--json", action="store_true")
+    init_parser = sub.add_parser("init")
+    init_parser.add_argument("--release-id", required=True)
+    init_parser.add_argument("--blue-version", required=True)
+    init_parser.add_argument("--blue-digest", required=True)
+    init_parser.add_argument("--green-version", required=True)
+    init_parser.add_argument("--green-digest", required=True)
+    init_parser.add_argument("--json", action="store_true")
+    reconcile_parser = sub.add_parser("reconcile")
+    reconcile_parser.add_argument("--json", action="store_true")
+    persist_parser = sub.add_parser("persist-runtime-state")
+    persist_parser.add_argument("--json", action="store_true")
+    return parser
+
+
+def main():
+    try:
+        args = build_parser().parse_args()
+        if args.command == "status":
+            return emit(actual_status(load_state()))
+        if args.command == "rollback":
+            return rollback(args)
+        if args.command == "prepare-stage":
+            return prepare_stage(args)
+        if args.command == "attest-identical":
+            return attest_identical_image(args)
+        if args.command == "stage":
+            return stage_release(args)
+        if args.command == "complete":
+            return complete_release(args)
+        if args.command == "gate":
+            return gate(args)
+        if args.command == "weights":
+            return change_weights(args)
+        if args.command == "init":
+            with controller_lock():
+                return init_state(args)
+        if args.command == "reconcile":
+            return reconcile()
+        if args.command == "persist-runtime-state":
+            return persist_runtime_state()
+        raise ControllerError(EXIT_ARGUMENT, "unknown_command", "Unknown command.")
+    except ControllerError as exc:
+        return emit({"supported": exc.code != EXIT_UNSUPPORTED, "error_code": exc.error_code, "message": exc.message}, exc.code)
+    except (subprocess.SubprocessError, OSError) as exc:
+        return emit({"supported": True, "error_code": "controller_internal_error", "message": "Controller operation failed safely."}, EXIT_HAPROXY)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

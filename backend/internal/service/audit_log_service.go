@@ -50,12 +50,21 @@ func NewAuditLogService(repo AuditLogRepository, settingService *SettingService)
 
 // Start 启动异步写入与保留期清理协程。
 func (s *AuditLogService) Start() {
+	s.StartForRole(true)
+}
+
+// StartForRole always starts the request-local writer. Retention cleanup is a
+// singleton responsibility and is disabled on blue/green API replicas.
+func (s *AuditLogService) StartForRole(runSingletonJobs bool) {
 	if s == nil || s.repo == nil {
 		return
 	}
-	s.wg.Add(2)
+	s.wg.Add(1)
 	go s.runWriter()
-	go s.runRetentionLoop()
+	if runSingletonJobs {
+		s.wg.Add(1)
+		go s.runRetentionLoop()
+	}
 }
 
 // Stop 停止服务并尽量落盘队列中剩余记录。

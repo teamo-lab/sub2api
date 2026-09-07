@@ -1543,17 +1543,32 @@
         <ProxySelector v-model="form.proxy_id" :proxies="proxies" />
       </div>
 
+      <ProCooldownPolicySection v-if="showProCooldownPolicy" v-model="proCooldownPolicy" />
+
       <UpstreamRequestIdHeaderField
         v-model="upstreamRequestIdHeader"
         :platform="account.platform"
         :type="account.type"
       />
 
-      <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">
+      <div class="grid grid-cols-2 gap-4 lg:grid-cols-5">
         <div>
           <label class="input-label">{{ t('admin.accounts.concurrency') }}</label>
           <input v-model.number="form.concurrency" type="number" min="1" class="input"
             @input="form.concurrency = Math.max(1, form.concurrency || 1)" />
+        </div>
+        <div v-if="props.account?.platform === 'openai' && props.account?.type === 'oauth' && !isSparkShadow">
+          <label class="input-label">{{ t('admin.accounts.stickyBurst') }}</label>
+          <input
+            v-model.number="form.sticky_burst"
+            type="number"
+            min="0"
+            max="10"
+            class="input"
+            data-testid="account-sticky-burst"
+            @input="form.sticky_burst = Math.min(10, Math.max(0, form.sticky_burst ?? 1))"
+          />
+          <p class="input-hint">{{ t('admin.accounts.stickyBurstHint') }}</p>
         </div>
         <div>
           <label class="input-label">{{ t('admin.accounts.loadFactor') }}</label>
@@ -2921,6 +2936,8 @@ import type {
   OllamaCloudUsageState
 } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
+import ProCooldownPolicySection from '@/components/account/ProCooldownPolicySection.vue'
+import { readCooldownPolicy, validateCooldownPolicy } from '@/utils/proCooldownPolicy'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Select from '@/components/common/Select.vue'
 import HelpTooltip from '@/components/common/HelpTooltip.vue'
@@ -3637,6 +3654,7 @@ const form = reactive({
   notes: '',
   proxy_id: null as number | null,
   concurrency: 1,
+  sticky_burst: 1,
   load_factor: null as number | null,
   priority: 1,
   rate_multiplier: 1,
@@ -3727,6 +3745,9 @@ const applyOpenAIModelMappingCredentials = (credentials: Record<string, unknown>
   }
 }
 
+const proCooldownPolicy = ref(readCooldownPolicy(null))
+const showProCooldownPolicy = computed(() => props.account?.platform === 'openai' && (props.account?.credentials?.plan_type === 'pro' || props.account?.credentials?.chatgpt_plan_type === 'pro'))
+
 const syncFormFromAccount = (newAccount: Account | null) => {
   if (!newAccount) {
     return
@@ -3741,6 +3762,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   mixedChannelWarningDetails.value = null
   mixedChannelWarningRawMessage.value = ''
   mixedChannelWarningAction.value = null
+  proCooldownPolicy.value = readCooldownPolicy(newAccount.extra?.pro_cooldown_policy)
   form.name = newAccount.name
   form.notes = newAccount.notes || ''
   form.proxy_id = newAccount.proxy_id
@@ -3772,6 +3794,10 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   mixedScheduling.value = false
   allowOverages.value = false
 	const extra = newAccount.extra as Record<string, unknown> | undefined
+	form.sticky_burst =
+		typeof extra?.openai_sticky_burst === 'number'
+			? Math.min(10, Math.max(0, extra.openai_sticky_burst))
+			: 1
 	mixedScheduling.value = extra?.mixed_scheduling === true
 	allowOverages.value = extra?.allow_overages === true
 	upstreamRequestIdHeader.value = readUpstreamRequestIdHeader(extra)
@@ -4689,6 +4715,10 @@ const submitUpdateAccount = async (accountID: number, updatePayload: Record<stri
 }
 
 const handleSubmit = async () => {
+  if (showProCooldownPolicy.value) {
+    const error = validateCooldownPolicy(proCooldownPolicy.value)
+    if (error) { appStore.showError(error); return }
+  }
   if (!props.account) return
   const accountID = props.account.id
 
@@ -5221,6 +5251,12 @@ const handleSubmit = async () => {
     if (props.account.platform === 'openai' && (props.account.type === 'oauth' || props.account.type === 'setup-token' || props.account.type === 'apikey')) {
       const currentExtra = (props.account.extra as Record<string, unknown>) || {}
       const newExtra: Record<string, unknown> = { ...currentExtra }
+      if (showProCooldownPolicy.value) newExtra.pro_cooldown_policy = { ...proCooldownPolicy.value }
+	  if (props.account.type === 'oauth' && !isSparkShadow.value) {
+		newExtra.openai_sticky_burst = Math.min(10, Math.max(0, form.sticky_burst ?? 1))
+	  } else {
+		delete newExtra.openai_sticky_burst
+	  }
       const hadCodexCLIOnlyEnabled = currentExtra.codex_cli_only === true
       if (props.account.type === 'oauth' || props.account.type === 'setup-token') {
         newExtra.openai_oauth_responses_websockets_v2_mode = openaiOAuthResponsesWebSocketV2Mode.value

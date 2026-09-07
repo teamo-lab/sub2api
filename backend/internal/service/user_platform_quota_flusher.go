@@ -59,6 +59,7 @@ type UserPlatformQuotaUsageFlusher struct {
 	batchSize    int
 	flushTimeout time.Duration
 	metrics      *FlusherMetrics
+	started      atomic.Bool
 	stopped      atomic.Bool
 }
 
@@ -253,12 +254,18 @@ func (s *UserPlatformQuotaUsageFlusher) Start() {
 	if s == nil || !s.enabled {
 		return
 	}
+	if !s.started.CompareAndSwap(false, true) {
+		return
+	}
 	s.timingWheel.ScheduleRecurring("deferred:platform_quota", s.interval, s.tick)
 }
 
 // Stop 停止 flusher：标记 stopped → Cancel 定时器 → 执行最后一次 flush。
 func (s *UserPlatformQuotaUsageFlusher) Stop() {
 	if s == nil {
+		return
+	}
+	if !s.started.Load() {
 		return
 	}
 	s.stopped.Store(true)

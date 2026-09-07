@@ -9,6 +9,15 @@ redis_data/
 
 # Environment configuration (contains sensitive information)
 .env
+rollout/runtime.env
+rollout/runtime/
+rollout/data-blue/
+rollout/data-green/
+rollout/data-worker/
+rollout/state.json
+rollout/history.jsonl
+rollout/controller.lock
+reports/
 
 # Backup files
 *.backup

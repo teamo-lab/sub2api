@@ -18,6 +18,11 @@ func (r *opsRepository) GetLatencyHistogram(ctx context.Context, filter *service
 	if filter.StartTime.IsZero() || filter.EndTime.IsZero() {
 		return nil, fmt.Errorf("start_time/end_time required")
 	}
+	if strings.TrimSpace(filter.Model) != "" && filter.QueryMode != service.OpsQueryModeRaw {
+		if out, ok, err := r.getModelLatencyHistogramRollup(ctx, filter); err != nil || ok {
+			return out, err
+		}
+	}
 
 	start := filter.StartTime.UTC()
 	end := filter.EndTime.UTC()

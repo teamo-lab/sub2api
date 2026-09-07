@@ -351,7 +351,9 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	if account.ProxyID != nil && account.Proxy != nil {
 		proxyURL = account.Proxy.URL()
 	}
+	upstreamStartedAt := time.Now()
 	resp, err := s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+	SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStartedAt).Milliseconds())
 	if err != nil {
 		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)
 	}
@@ -666,6 +668,10 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 	firstChunk := true
 	clientDisconnected := false
 	clientOutputStarted := false
+	// answerOutputStarted flips once a chunk carrying answer output (content,
+	// tool calls) was written; reasoning-only chunks do not pin the attempt.
+	answerOutputStarted := false
+	pendingAnswerOutput := false
 	pendingSSE := make([]string, 0, 4)
 	refusalDetector := newOpenAIChatSilentRefusalDetector(requestBodyLen)
 	var streamFailoverErr *UpstreamFailoverError
@@ -788,8 +794,16 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 			if strings.TrimSpace(event.Type) == "error" {
 				shouldFailover = openAIStreamErrorEventShouldFailover(payloadBytes, message)
 			}
-			if !clientOutputStarted && shouldFailover {
+			failoverAfterReasoning := clientOutputStarted && !answerOutputStarted && !pendingAnswerOutput && !clientDisconnected &&
+				account != nil && account.Platform == PlatformOpenAI
+			if shouldFailover && (!clientOutputStarted || failoverAfterReasoning) {
 				streamFailoverErr = s.newOpenAIStreamFailoverErrorWithModel(c, account, false, requestID, payloadBytes, message, upstreamModel, resp.Header)
+				if failoverAfterReasoning {
+					// Only reasoning reached the client: replaying on another account
+					// is safe, the handler continues on the already-open stream.
+					streamFailoverErr.SafeToFailoverAfterWrite = true
+					logOpenAIFailoverAfterReasoningOutput(c.Request.Context(), account, "chat_completions", requestID, strings.TrimSpace(event.Type))
+				}
 				return true
 			}
 			message = s.recordOpenAIStreamUpstreamError(c, account, false, requestID, "http_error", payloadBytes, message)
@@ -829,6 +843,9 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 			return true
 		}
 
+		if openAIStreamDataStartsAnswerOutput(payload, event.Type) {
+			pendingAnswerOutput = true
+		}
 		chunks := apicompat.ResponsesEventToChatChunks(&event, state)
 		if !clientDisconnected {
 			for _, chunk := range chunks {
@@ -868,6 +885,10 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 						zap.String("request_id", requestID),
 					)
 					break
+				}
+				if pendingAnswerOutput {
+					answerOutputStarted = true
+					pendingAnswerOutput = false
 				}
 			}
 		}

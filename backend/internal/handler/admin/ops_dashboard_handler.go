@@ -12,6 +12,38 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// GetDashboardModels returns the model catalog for the active dashboard window.
+func (h *OpsHandler) GetDashboardModels(c *gin.Context) {
+	if h.opsService == nil {
+		response.Error(c, http.StatusServiceUnavailable, "Ops service not available")
+		return
+	}
+	startTime, endTime, err := parseOpsTimeRange(c, "1h")
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	filter := &service.OpsDashboardFilter{
+		StartTime: startTime,
+		EndTime:   endTime,
+		Platform:  strings.TrimSpace(c.Query("platform")),
+	}
+	if v := strings.TrimSpace(c.Query("group_id")); v != "" {
+		id, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || id <= 0 {
+			response.BadRequest(c, "Invalid group_id")
+			return
+		}
+		filter.GroupID = &id
+	}
+	models, err := h.opsService.ListDashboardModels(c.Request.Context(), filter)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"models": models})
+}
+
 // GetDashboardOverview returns vNext ops dashboard overview (raw path).
 // GET /api/v1/admin/ops/dashboard/overview
 func (h *OpsHandler) GetDashboardOverview(c *gin.Context) {
@@ -29,11 +61,11 @@ func (h *OpsHandler) GetDashboardOverview(c *gin.Context) {
 		response.BadRequest(c, err.Error())
 		return
 	}
-
 	filter := &service.OpsDashboardFilter{
 		StartTime: startTime,
 		EndTime:   endTime,
 		Platform:  strings.TrimSpace(c.Query("platform")),
+		Model:     strings.TrimSpace(c.Query("model")),
 		QueryMode: parseOpsQueryMode(c),
 	}
 	if v := strings.TrimSpace(c.Query("group_id")); v != "" {
@@ -70,11 +102,11 @@ func (h *OpsHandler) GetDashboardThroughputTrend(c *gin.Context) {
 		response.BadRequest(c, err.Error())
 		return
 	}
-
 	filter := &service.OpsDashboardFilter{
 		StartTime: startTime,
 		EndTime:   endTime,
 		Platform:  strings.TrimSpace(c.Query("platform")),
+		Model:     strings.TrimSpace(c.Query("model")),
 		QueryMode: parseOpsQueryMode(c),
 	}
 	if v := strings.TrimSpace(c.Query("group_id")); v != "" {
@@ -112,11 +144,11 @@ func (h *OpsHandler) GetDashboardLatencyHistogram(c *gin.Context) {
 		response.BadRequest(c, err.Error())
 		return
 	}
-
 	filter := &service.OpsDashboardFilter{
 		StartTime: startTime,
 		EndTime:   endTime,
 		Platform:  strings.TrimSpace(c.Query("platform")),
+		Model:     strings.TrimSpace(c.Query("model")),
 		QueryMode: parseOpsQueryMode(c),
 	}
 	if v := strings.TrimSpace(c.Query("group_id")); v != "" {
@@ -153,11 +185,11 @@ func (h *OpsHandler) GetDashboardErrorTrend(c *gin.Context) {
 		response.BadRequest(c, err.Error())
 		return
 	}
-
 	filter := &service.OpsDashboardFilter{
 		StartTime: startTime,
 		EndTime:   endTime,
 		Platform:  strings.TrimSpace(c.Query("platform")),
+		Model:     strings.TrimSpace(c.Query("model")),
 		QueryMode: parseOpsQueryMode(c),
 	}
 	if v := strings.TrimSpace(c.Query("group_id")); v != "" {
@@ -195,11 +227,11 @@ func (h *OpsHandler) GetDashboardErrorDistribution(c *gin.Context) {
 		response.BadRequest(c, err.Error())
 		return
 	}
-
 	filter := &service.OpsDashboardFilter{
 		StartTime: startTime,
 		EndTime:   endTime,
 		Platform:  strings.TrimSpace(c.Query("platform")),
+		Model:     strings.TrimSpace(c.Query("model")),
 		QueryMode: parseOpsQueryMode(c),
 	}
 	if v := strings.TrimSpace(c.Query("group_id")); v != "" {

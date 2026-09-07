@@ -515,7 +515,7 @@ func stripEmptyTextBlocksFromSlice(blocks []any) ([]any, bool) {
 // This is a lightweight pre-filter for the initial request path to prevent upstream 400 errors.
 // Returns the original body unchanged if no empty text blocks are found.
 func StripEmptyTextBlocks(body []byte) []byte {
-	// Fast path: check if body contains empty text patterns
+	// Preserve the existing fast path for requests without empty text.
 	hasEmptyTextBlock := bytes.Contains(body, patternEmptyText) ||
 		bytes.Contains(body, patternEmptyTextSpaced) ||
 		bytes.Contains(body, patternEmptyTextSp1) ||
@@ -523,47 +523,15 @@ func StripEmptyTextBlocks(body []byte) []byte {
 	if !hasEmptyTextBlock {
 		return body
 	}
-
-	jsonStr := *(*string)(unsafe.Pointer(&body))
-	msgsRes := gjson.Get(jsonStr, "messages")
-	if !msgsRes.Exists() || !msgsRes.IsArray() {
-		return body
-	}
-
-	var messages []any
-	if err := json.Unmarshal(sliceRawFromBody(body, msgsRes), &messages); err != nil {
-		return body
-	}
-
-	modified := false
-	for _, msg := range messages {
-		msgMap, ok := msg.(map[string]any)
-		if !ok {
-			continue
-		}
-		content, ok := msgMap["content"].([]any)
-		if !ok {
-			continue
-		}
-		if cleaned, changed := stripEmptyTextBlocksFromSlice(content); changed {
-			modified = true
-			msgMap["content"] = cleaned
-		}
-	}
-
-	if !modified {
-		return body
-	}
-
-	msgsBytes, err := json.Marshal(messages)
-	if err != nil {
-		return body
-	}
-	out, err := sjson.SetRawBytes(body, "messages", msgsBytes)
-	if err != nil {
-		return body
-	}
-	return out
+	return rewriteGatewayMessageContentRaw(body, func(_ string, content gjson.Result) ([]byte, bool, error) {
+		return filterGatewayContentRaw(content, func(block gjson.Result) bool {
+			if block.Get("type").Str != "text" {
+				return true
+			}
+			text := block.Get("text")
+			return text.Type == gjson.String && text.Str != ""
+		}, true)
+	})
 }
 
 // FilterThinkingBlocks removes thinking blocks from request body
@@ -577,9 +545,8 @@ func StripEmptyTextBlocks(body []byte) []byte {
 // .pensieve/short-term/knowledge/thinking-block-filter-third-party-upstream-inversion/。
 //
 // 策略 (anthropic-strict only)：
-//   - 当 thinking.type 不是 "enabled"/"adaptive"：移除所有 thinking 相关块
-//   - 当 thinking.type 是 "enabled"/"adaptive"：仅移除缺失/无效 signature 的 thinking 块（避免 400）
-//     (blocks with missing/empty/dummy signatures that would cause 400 errors)
+//   - 保留 assistant 历史中的不透明 signature / redacted data，不由下一轮 thinking.type 决定删除。
+//   - 仅清理缺失签名/加密数据等已知畸形块，保留其他块的原始 JSON；不自行验证密码学签名。
 func FilterThinkingBlocks(body []byte, mappedModel string) []byte {
 	if !ShouldPreFilterThinkingBlocks(mappedModel) {
 		return body
@@ -1188,105 +1155,32 @@ func FilterSignatureSensitiveBlocksForRetry(body []byte, mappedModel string) []b
 	return newBody
 }
 
-// filterThinkingBlocksInternal removes invalid thinking blocks from request
-// 策略：
-//   - 当 thinking.type 不是 "enabled"/"adaptive"：移除所有 thinking 相关块
-//   - 当 thinking.type 是 "enabled"/"adaptive"：仅移除缺失/无效 signature 的 thinking 块
+// filterThinkingBlocksInternal preserves opaque assistant history independently
+// of the next turn's generation mode. A redacted_thinking block carries data,
+// not signature; treating both block types alike breaks signed block sequences.
+// Cryptographic validity belongs to the upstream, not this syntax-only filter.
 func filterThinkingBlocksInternal(body []byte, _ bool) []byte {
-	// Fast path: if body doesn't contain "thinking", skip parsing
-	if !bytes.Contains(body, []byte(`"type":"thinking"`)) &&
-		!bytes.Contains(body, []byte(`"type": "thinking"`)) &&
-		!bytes.Contains(body, []byte(`"type":"redacted_thinking"`)) &&
-		!bytes.Contains(body, []byte(`"type": "redacted_thinking"`)) &&
-		!bytes.Contains(body, []byte(`"thinking":`)) &&
-		!bytes.Contains(body, []byte(`"thinking" :`)) {
+	if !bytes.Contains(body, []byte(`"thinking"`)) &&
+		!bytes.Contains(body, []byte(`"redacted_thinking"`)) {
 		return body
 	}
-
-	var req map[string]any
-	if err := json.Unmarshal(body, &req); err != nil {
-		return body
-	}
-
-	// Check if thinking is enabled
-	thinkingEnabled := false
-	if thinking, ok := req["thinking"].(map[string]any); ok {
-		if thinkType, ok := thinking["type"].(string); ok && (thinkType == "enabled" || thinkType == "adaptive") {
-			thinkingEnabled = true
-		}
-	}
-
-	messages, ok := req["messages"].([]any)
-	if !ok {
-		return body
-	}
-
-	filtered := false
-	for _, msg := range messages {
-		msgMap, ok := msg.(map[string]any)
-		if !ok {
-			continue
-		}
-
-		role, _ := msgMap["role"].(string)
-		content, ok := msgMap["content"].([]any)
-		if !ok {
-			continue
-		}
-
-		newContent := make([]any, 0, len(content))
-		filteredThisMessage := false
-
-		for _, block := range content {
-			blockMap, ok := block.(map[string]any)
-			if !ok {
-				newContent = append(newContent, block)
-				continue
+	return rewriteGatewayMessageContentRaw(body, func(role string, content gjson.Result) ([]byte, bool, error) {
+		return filterGatewayContentRaw(content, func(block gjson.Result) bool {
+			switch block.Get("type").Str {
+			case "thinking":
+				signature := block.Get("signature")
+				return role == "assistant" && signature.Type == gjson.String &&
+					signature.Str != "" && signature.Str != antigravity.DummyThoughtSignature
+			case "redacted_thinking":
+				data := block.Get("data")
+				return role == "assistant" && data.Type == gjson.String && data.Str != ""
+			case "":
+				return !block.Get("thinking").Exists()
+			default:
+				return true
 			}
-
-			blockType, _ := blockMap["type"].(string)
-
-			if blockType == "thinking" || blockType == "redacted_thinking" {
-				// When thinking is enabled and this is an assistant message,
-				// only keep thinking blocks with valid signatures
-				if thinkingEnabled && role == "assistant" {
-					signature, _ := blockMap["signature"].(string)
-					if signature != "" && signature != antigravity.DummyThoughtSignature {
-						newContent = append(newContent, block)
-						continue
-					}
-				}
-				filtered = true
-				filteredThisMessage = true
-				continue
-			}
-
-			// Handle blocks without type discriminator but with "thinking" key
-			if blockType == "" {
-				if _, hasThinking := blockMap["thinking"]; hasThinking {
-					filtered = true
-					filteredThisMessage = true
-					continue
-				}
-			}
-
-			newContent = append(newContent, block)
-		}
-
-		if filteredThisMessage {
-			msgMap["content"] = newContent
-		}
-	}
-
-	if !filtered {
-		return body
-	}
-
-	newBody, err := json.Marshal(req)
-	if err != nil {
-		return body
-	}
-	return newBody
+		}, false)
+	})
 }
 
 // NormalizeClaudeOutputEffort normalizes Claude's output_config.effort value.

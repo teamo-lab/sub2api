@@ -112,6 +112,10 @@ func configureTrustedProxies(r *gin.Engine, cfg config.ServerConfig) {
 // ProvideHTTPServer 提供 HTTP 服务器
 func ProvideHTTPServer(cfg *config.Config, router *gin.Engine) *http.Server {
 	httpHandler := http.Handler(router)
+	if !cfg.Deployment.ServesAPI() {
+		httpHandler = workerOnlyHandler()
+	}
+	httpHandler = deploymentIdentityHandler(cfg.Deployment, httpHandler)
 	server := &http.Server{
 		Addr:           cfg.Server.Address(),
 		Handler:        httpHandler,
@@ -161,6 +165,57 @@ func ProvideHTTPServer(cfg *config.Config, router *gin.Engine) *http.Server {
 
 	server.Handler = httpHandler
 	return server
+}
+
+const (
+	deploymentSlotHeader    = "X-Sub2API-Deployment-Slot"
+	deploymentReleaseHeader = "X-Sub2API-Release-ID"
+	deploymentVersionHeader = "X-Sub2API-Deployment-Version"
+	deploymentDigestHeader  = "X-Sub2API-Deployment-Digest"
+	processRoleHeader       = "X-Sub2API-Process-Role"
+)
+
+func deploymentIdentityHandler(identity config.DeploymentConfig, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Never let client-provided rollout identity reach application handlers.
+		for _, header := range []string{
+			deploymentSlotHeader,
+			deploymentReleaseHeader,
+			deploymentVersionHeader,
+			deploymentDigestHeader,
+			processRoleHeader,
+		} {
+			r.Header.Del(header)
+		}
+
+		w.Header().Set(processRoleHeader, identity.ProcessRole)
+		if identity.Slot != "" {
+			w.Header().Set(deploymentSlotHeader, identity.Slot)
+		}
+		if identity.ReleaseID != "" {
+			w.Header().Set(deploymentReleaseHeader, identity.ReleaseID)
+		}
+		if identity.Version != "" {
+			w.Header().Set(deploymentVersionHeader, identity.Version)
+		}
+		if identity.Digest != "" {
+			w.Header().Set(deploymentDigestHeader, identity.Digest)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func workerOnlyHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"ok","role":"worker"}`))
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":{"type":"worker_only","message":"This process does not serve API traffic."}}`))
+	})
 }
 
 func derefInt64(p *int64) int64 {

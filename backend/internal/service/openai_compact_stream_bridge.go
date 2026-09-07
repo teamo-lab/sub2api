@@ -112,7 +112,10 @@ func writeOpenAICompactSSEFailureMessage(c *gin.Context, statusCode int, errType
 	if c == nil {
 		return
 	}
-	MarkOpsStreamError(c, errType, message, statusCode)
+	// response.failed is a terminal protocol outcome, not a recovered upstream
+	// attempt.  The wire status may already be 200 because the keepalive committed
+	// the SSE headers, so persist the intended status for Ops/SLA accounting.
+	MarkOpsStreamFailure(c, errType, errType, message, statusCode)
 	payload, err := json.Marshal(map[string]any{
 		"type": "response.failed",
 		"response": map[string]any{

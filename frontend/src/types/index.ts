@@ -1460,6 +1460,7 @@ export interface OpenAICompactState {
 
 export interface OpenAIResponsesState {
   openai_responses_mode?: OpenAIResponsesMode
+  openai_sticky_burst?: number
   openai_responses_supported?: boolean
 }
 

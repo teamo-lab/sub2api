@@ -36,6 +36,10 @@ server:
   # Keep-alive idle timeout in seconds.
   # Keep-Alive 空闲连接超时（秒）。
   idle_timeout: 120
+  # Maximum graceful shutdown wait. Production blue-green slots drain at the
+  # proxy first; this is only the final application-side safety boundary.
+  # 优雅停机最长等待时间。生产蓝绿实例会先在代理层排空；这里是应用侧最终保护边界。
+  shutdown_timeout: 900
   # Trusted proxies used when security.trust_forwarded_ip_for_api_key_acl is false.
   # List only the exact proxy addresses that connect directly to Sub2API.
   # Set [] explicitly to disable forwarded-IP trust in high-security mode.
@@ -71,6 +75,20 @@ server:
     # Max upload buffer per stream in bytes (default: 512KB)
     # 每个流的最大上传缓冲区（字节，默认 512KB）
     max_upload_buffer_per_stream: 524288
+
+# =============================================================================
+# Blue-green Deployment Identity
+# 蓝绿部署身份
+# =============================================================================
+# Keep process_role=all for legacy/local single-process deployments. Production
+# blue/green API slots must use api; the singleton background process uses worker.
+# 旧版/本地单进程保持 all；生产蓝绿 API 实例使用 api，单例后台进程使用 worker。
+deployment:
+  process_role: "all" # all | api | worker
+  slot: ""            # api: blue|green; worker: worker
+  release_id: ""
+  version: ""
+  digest: ""          # immutable sha256:<64 hex>; required for api/worker
 
 # =============================================================================
 # WebAuthn / Passkey Configuration
@@ -526,10 +544,10 @@ gateway:
     sticky_session_max_waiting: 3
     # Sticky session wait timeout (duration)
     # 粘性会话等待超时（时间段）
-    sticky_session_wait_timeout: 120s
+    sticky_session_wait_timeout: 30s
     # Fallback wait timeout (duration)
     # 兜底排队等待超时（时间段）
-    fallback_wait_timeout: 30s
+    fallback_wait_timeout: 1s
     # Fallback max waiting queue size
     # 兜底最大排队长度
     fallback_max_waiting: 100

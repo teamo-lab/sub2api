@@ -1,0 +1,111 @@
+name: sub2api-rollout
+
+x-api-common: &api-common
+  restart: unless-stopped
+  env_file:
+    - ./rollout/runtime.env
+  security_opt:
+    - no-new-privileges:true
+  ulimits:
+    nofile:
+      soft: 100000
+      hard: 100000
+  stop_grace_period: 16m
+  depends_on: {}
+  networks:
+    - sub2api-network
+  healthcheck:
+    test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://localhost:8080/health"]
+    interval: 5s
+    timeout: 5s
+    retries: 3
+    start_period: 20s
+
+services:
+  haproxy:
+    image: haproxy:3.2-alpine@sha256:79799e8b2977e60802774fa53d29e6b54e045402cdd8a8b9fe43923e7095a047
+    container_name: sub2api-haproxy
+    restart: unless-stopped
+    user: root
+    ports:
+      - "${ROLLOUT_BIND_HOST:-0.0.0.0}:${ROLLOUT_ENTRY_PORT:-18080}:8080"
+    volumes:
+      - ./rollout/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ./rollout/runtime:/run/sub2api-rollout
+    networks:
+      - sub2api-network
+    healthcheck:
+      test: ["CMD", "haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  haproxy-final:
+    image: haproxy:3.2-alpine@sha256:79799e8b2977e60802774fa53d29e6b54e045402cdd8a8b9fe43923e7095a047
+    container_name: sub2api-haproxy-final
+    profiles: ["final-entry"]
+    restart: unless-stopped
+    user: root
+    ports:
+      - "${ROLLOUT_FINAL_BIND_HOST:-0.0.0.0}:${ROLLOUT_FINAL_ENTRY_PORT:-8080}:8080"
+    volumes:
+      - ./rollout/haproxy-final.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ./rollout/runtime:/run/sub2api-rollout
+    networks:
+      - sub2api-network
+    healthcheck:
+      test: ["CMD", "haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  sub2api-blue:
+    <<: *api-common
+    image: "${SUB2API_BLUE_IMAGE:?SUB2API_BLUE_IMAGE is required}"
+    container_name: sub2api-blue
+    environment:
+      SUB2API_PROCESS_ROLE: api
+      SUB2API_DEPLOYMENT_SLOT: blue
+      SUB2API_RELEASE_ID: "${SUB2API_BLUE_RELEASE_ID:?SUB2API_BLUE_RELEASE_ID is required}"
+      SUB2API_DEPLOYMENT_VERSION: "${SUB2API_BLUE_VERSION:?SUB2API_BLUE_VERSION is required}"
+      SUB2API_DEPLOYMENT_DIGEST: "${SUB2API_BLUE_DIGEST:?SUB2API_BLUE_DIGEST is required}"
+      SERVER_SHUTDOWN_TIMEOUT: "900"
+    volumes:
+      - ./rollout/data-blue:/app/data
+
+  sub2api-green:
+    <<: *api-common
+    image: "${SUB2API_GREEN_IMAGE:?SUB2API_GREEN_IMAGE is required}"
+    container_name: sub2api-green
+    profiles: ["candidate"]
+    environment:
+      SUB2API_PROCESS_ROLE: api
+      SUB2API_DEPLOYMENT_SLOT: green
+      SUB2API_RELEASE_ID: "${SUB2API_GREEN_RELEASE_ID:?SUB2API_GREEN_RELEASE_ID is required}"
+      SUB2API_DEPLOYMENT_VERSION: "${SUB2API_GREEN_VERSION:?SUB2API_GREEN_VERSION is required}"
+      SUB2API_DEPLOYMENT_DIGEST: "${SUB2API_GREEN_DIGEST:?SUB2API_GREEN_DIGEST is required}"
+      SERVER_SHUTDOWN_TIMEOUT: "900"
+    volumes:
+      - ./rollout/data-green:/app/data
+
+  sub2api-worker:
+    <<: *api-common
+    image: "${SUB2API_WORKER_IMAGE:?SUB2API_WORKER_IMAGE is required}"
+    container_name: sub2api-worker
+    profiles: ["worker"]
+    environment:
+      SUB2API_PROCESS_ROLE: worker
+      SUB2API_DEPLOYMENT_SLOT: worker
+      SUB2API_RELEASE_ID: "${SUB2API_WORKER_RELEASE_ID:?SUB2API_WORKER_RELEASE_ID is required}"
+      SUB2API_DEPLOYMENT_VERSION: "${SUB2API_WORKER_VERSION:?SUB2API_WORKER_VERSION is required}"
+      SUB2API_DEPLOYMENT_DIGEST: "${SUB2API_WORKER_DIGEST:?SUB2API_WORKER_DIGEST is required}"
+      SERVER_SHUTDOWN_TIMEOUT: "900"
+    volumes:
+      - ./rollout/data-worker:/app/data
+
+networks:
+  sub2api-network:
+    external: true
+    name: "${SUB2API_DOCKER_NETWORK:-deploy_sub2api-network}"

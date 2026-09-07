@@ -1179,6 +1179,8 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 	// rewriting the durable binding here would make a short burst migrate the
 	// whole conversation to a cache-cold account.
 	stickySpillover := false
+	stickyPriorityReclaimFromID := int64(0)
+	stickyPriorityReclaimFromPriority := 0
 	if sessionHash != "" {
 		accountID := stickyAccountID
 		if accountID > 0 && !isExcluded(accountID) {
@@ -1200,6 +1202,23 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 						_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
 					} else if !parentHealthyForShadow(account, s.parentAccountLookup(ctx)) {
 						_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+					} else if s.hasEligibleHigherPriorityOpenAIAccount(
+						ctx,
+						groupID,
+						platform,
+						accounts,
+						account,
+						requestedModel,
+						excludedIDs,
+						requireCompact,
+						requiredCapability,
+						needsUpstreamCheck,
+					) {
+						// Re-enter the strict priority/load loop instead of letting a
+						// historical P2 sticky binding bypass currently available P1.
+						// Layer 2 will still select P2 when all eligible P1 slots are busy.
+						stickyPriorityReclaimFromID = account.ID
+						stickyPriorityReclaimFromPriority = account.Priority
 					} else {
 						result, err := s.tryAcquireAccountSlot(ctx, accountID, account.Concurrency)
 						if err == nil && result != nil && result.Acquired {
@@ -1209,6 +1228,28 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 							}
 							_ = s.refreshStickySessionTTL(ctx, groupID, sessionHash, openaiStickySessionTTL)
 							return selection, nil
+						}
+
+						// A recently successful sticky session may borrow a bounded,
+						// account-configured number of temporary slots before entering
+						// the legacy 30-second wait path. The same Redis ZSET owns both
+						// durable and burst slots, so the hard ceiling remains
+						// account.Concurrency + account.OpenAIStickyBurstExtraSlots().
+						burstExtra := account.OpenAIStickyBurstExtraSlots()
+						if err == nil && result != nil && !result.Acquired && burstExtra > 0 &&
+							s.openAIStickyBurstEligible(groupID, requestedModel, account) &&
+							s.hasRecentOpenAIStickyBurstSession(ctx, groupID, sessionHash, accountID) {
+							burstResult, burstErr := s.tryAcquireAccountSlot(ctx, accountID, account.Concurrency+burstExtra)
+							if burstErr == nil && burstResult != nil && burstResult.Acquired {
+								selection, selectErr := s.newAcquiredSelectionResult(ctx, account, burstResult.ReleaseFunc)
+								if selectErr != nil {
+									return nil, selectErr
+								}
+								selection.StickyBurstBypass = true
+								_ = s.refreshStickySessionTTL(ctx, groupID, sessionHash, openaiStickySessionTTL)
+								s.recordOpenAIStickyBurstAcquired(ctx, accountID)
+								return selection, nil
+							}
 						}
 
 						waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, accountID)
@@ -1288,6 +1329,18 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			ID:             acc.ID,
 			MaxConcurrency: acc.EffectiveLoadFactor(),
 		})
+	}
+	recordStickyPriorityReclaimSelection := func(account *Account) {
+		if account == nil || stickyPriorityReclaimFromID <= 0 || account.Priority >= stickyPriorityReclaimFromPriority {
+			return
+		}
+		slog.Info("openai.sticky_priority_reclaim_selected",
+			"group_id", derefGroupID(groupID),
+			"from_account_id", stickyPriorityReclaimFromID,
+			"from_priority", stickyPriorityReclaimFromPriority,
+			"to_account_id", account.ID,
+			"to_priority", account.Priority,
+		)
 	}
 
 	tryAcquireFromLoadMap := func(loadMap map[int64]*AccountLoadInfo) (*AccountSelectionResult, bool, error) {
@@ -1375,6 +1428,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 				if sessionHash != "" && !stickySpillover && !gatewayProfitControlGateActive(ctx) {
 					_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, fresh.ID, openaiStickySessionTTL)
 				}
+				recordStickyPriorityReclaimSelection(fresh)
 				return selection, true, nil
 			}
 		}
@@ -1414,6 +1468,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 				if sessionHash != "" && !stickySpillover && !gatewayProfitControlGateActive(ctx) {
 					_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, fresh.ID, openaiStickySessionTTL)
 				}
+				recordStickyPriorityReclaimSelection(fresh)
 				return selection, nil
 			}
 		}

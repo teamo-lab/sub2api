@@ -17,6 +17,8 @@ const (
 	FieldCreatedAt = "created_at"
 	// FieldUpdatedAt holds the string denoting the updated_at field in the database.
 	FieldUpdatedAt = "updated_at"
+	// FieldRecoveryPolicy holds the string denoting the recovery_policy field in the database.
+	FieldRecoveryPolicy = "recovery_policy"
 	// FieldName holds the string denoting the name field in the database.
 	FieldName = "name"
 	// FieldEnabled holds the string denoting the enabled field in the database.
@@ -52,6 +54,7 @@ var Columns = []string{
 	FieldID,
 	FieldCreatedAt,
 	FieldUpdatedAt,
+	FieldRecoveryPolicy,
 	FieldName,
 	FieldEnabled,
 	FieldPriority,

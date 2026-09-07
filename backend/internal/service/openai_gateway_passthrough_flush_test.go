@@ -145,6 +145,68 @@ func TestOpenAIStreamingPassthroughKeepsPreamblePendingUntilFirstOutputBoundary(
 	}, writer.flushBodyLengths)
 }
 
+func TestOpenAIStreamingPassthroughStagesLiveMetadataBeforeRetryableFailure(t *testing.T) {
+	// Codex upstreams may return HTTP 200 and several live SSE frames before
+	// surfacing a retryable failure. None of this prefix is a successful model
+	// chunk, so the retry must discard it rather than commit the first account.
+	upstream := "event: response.created\n" +
+		`data: {"type":"response.created","response":{"id":"resp_live"}}` + "\n\n" +
+		"event: codex.rate_limits\n" +
+		`data: {"type":"codex.rate_limits","rate_limits":{"primary":{"limit":100}}}` + "\n\n" +
+		"event: codex.response.metadata\n" +
+		`data: {"type":"codex.response.metadata","response_id":"resp_live"}` + "\n\n" +
+		"event: response.output_text.delta\n" +
+		`data: {"type":"response.output_text.delta","item_id":"SSE-Keep-Alive","delta":"\u200b","SSE-Keep-Alive":true}` + "\n\n" +
+		"event: response.failed\n" +
+		`data: {"type":"response.failed","response":{"id":"resp_live","status":"failed","error":{"code":"server_error","message":"Our servers are currently overloaded. Please try again later."}}}` + "\n\n"
+
+	_, recorder, writer, err := runPassthroughFlushTest(t, io.NopCloser(strings.NewReader(upstream)), -1)
+
+	require.Error(t, err)
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.Empty(t, recorder.Body.String())
+	require.Empty(t, writer.flushBodyLengths)
+}
+
+func TestOpenAIStreamingPassthroughDeliversExplicitTerminalAfterMetadata(t *testing.T) {
+	prefix := "event: codex.rate_limits\n" +
+		`data: {"type":"codex.rate_limits","rate_limits":{"primary":{"limit":100}}}` + "\n\n" +
+		"event: codex.response.metadata\n" +
+		`data: {"type":"codex.response.metadata","response_id":"resp_complete"}` + "\n\n"
+	terminal := "event: response.completed\n" +
+		`data: {"type":"response.completed","response":{"id":"resp_complete","status":"completed","output":[],"usage":{"input_tokens":3,"output_tokens":0}}}` + "\n\n"
+
+	_, recorder, writer, err := runPassthroughFlushTest(t, io.NopCloser(strings.NewReader(prefix+terminal)), -1)
+
+	require.NoError(t, err)
+	require.Equal(t, prefix+terminal, recorder.Body.String())
+	require.Equal(t, []int{len(prefix) + len(terminal)}, writer.flushBodyLengths)
+}
+
+func TestOpenAIStreamLiveFramesDoNotStartOutputOrTTFT(t *testing.T) {
+	cases := []struct {
+		name      string
+		eventType string
+		data      string
+	}{
+		{"rate limits", "codex.rate_limits", `{"type":"codex.rate_limits"}`},
+		{"response metadata", "codex.response.metadata", `{"type":"codex.response.metadata"}`},
+		{"ping", "ping", `{"type":"ping"}`},
+		{"tagged keepalive", "response.output_text.delta", `{"type":"response.output_text.delta","SSE-Keep-Alive":true}`},
+		{"empty output delta", "response.output_text.delta", `{"type":"response.output_text.delta"}`},
+		{"empty reasoning delta", "response.reasoning_text.delta", `{"type":"response.reasoning_text.delta","delta":""}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.False(t, openAIStreamDataStartsClientOutput(tc.data, tc.eventType))
+			require.False(t, openAIStreamDataStartsSemanticTTFT(tc.data, tc.eventType))
+		})
+	}
+
+	require.True(t, openAIStreamDataStartsClientOutput(`{"type":"response.output_text.delta","delta":"ready"}`, "response.output_text.delta"))
+}
+
 func TestOpenAIStreamingPassthroughFlushesTerminalEventAtEOFWithoutBlankLine(t *testing.T) {
 	upstream := "event: response.completed\n" +
 		`data: {"type":"response.completed","response":{"id":"resp_eof","usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}}`
@@ -173,6 +235,47 @@ func TestOpenAIStreamingPassthroughFailedBeforeOutputCanStillFailOverWithoutFlus
 	require.ErrorAs(t, err, &failoverErr)
 	require.Empty(t, recorder.Body.String())
 	require.Empty(t, writer.flushBodyLengths)
+}
+
+func TestOpenAIStreamingPassthroughFailedDuringFunctionArgumentsCanFailOverWithoutPartialJSON(t *testing.T) {
+	upstream := "event: response.created\n" +
+		`data: {"type":"response.created","response":{"id":"resp_tool_failover"}}` + "\n\n" +
+		"event: response.output_item.added\n" +
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"exec","arguments":""}}` + "\n\n" +
+		"event: response.function_call_arguments.delta\n" +
+		`data: {"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_1","delta":"{\"cmd\":\"half"}` + "\n\n" +
+		"event: response.failed\n" +
+		`data: {"type":"response.failed","response":{"id":"resp_tool_failover","error":{"code":"server_is_overloaded","message":"Please retry later."}}}` + "\n\n"
+
+	_, recorder, writer, err := runPassthroughFlushTest(t, io.NopCloser(strings.NewReader(upstream)), -1)
+
+	require.Error(t, err)
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.Empty(t, recorder.Body.String())
+	require.Empty(t, writer.flushBodyLengths)
+}
+
+func TestOpenAIStreamingPassthroughCompleteFunctionArgumentsFlushAtDoneBoundary(t *testing.T) {
+	prefix := "event: response.output_item.added\n" +
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"exec","arguments":""}}` + "\n\n" +
+		"event: response.function_call_arguments.delta\n" +
+		`data: {"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_1","delta":"{\"cmd\":\"pwd\"}"}` + "\n\n"
+	// 暂存的工具参数在携带完整 arguments 的 response.output_item.done 边界整体放行
+	//（而非 function_call_arguments.done），下游永远只看到完整的工具调用。
+	done := "event: response.function_call_arguments.done\n" +
+		`data: {"type":"response.function_call_arguments.done","output_index":0,"item_id":"fc_1","arguments":"{\"cmd\":\"pwd\"}"}` + "\n\n" +
+		"event: response.output_item.done\n" +
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"exec","arguments":"{\"cmd\":\"pwd\"}","status":"completed"}}` + "\n\n"
+	terminal := "event: response.completed\n" +
+		`data: {"type":"response.completed","response":{"id":"resp_tool_ok","usage":{"input_tokens":3,"output_tokens":2}}}` + "\n\n"
+
+	_, recorder, writer, err := runPassthroughFlushTest(t, io.NopCloser(strings.NewReader(prefix+done+terminal)), -1)
+
+	require.NoError(t, err)
+	require.Equal(t, prefix+done+terminal, recorder.Body.String())
+	require.NotEmpty(t, writer.flushBodyLengths)
+	require.Equal(t, len(prefix)+len(done), writer.flushBodyLengths[0])
 }
 
 func TestOpenAIStreamingPassthroughNonRetryableFailedBeforeOutputFlushesAtBoundary(t *testing.T) {

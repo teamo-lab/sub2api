@@ -21,36 +21,38 @@ func NewErrorPassthroughHandler(service *service.ErrorPassthroughService) *Error
 
 // CreateErrorPassthroughRuleRequest 创建规则请求
 type CreateErrorPassthroughRuleRequest struct {
-	Name            string   `json:"name" binding:"required"`
-	Enabled         *bool    `json:"enabled"`
-	Priority        int      `json:"priority"`
-	ErrorCodes      []int    `json:"error_codes"`
-	Keywords        []string `json:"keywords"`
-	MatchMode       string   `json:"match_mode"`
-	Platforms       []string `json:"platforms"`
-	PassthroughCode *bool    `json:"passthrough_code"`
-	ResponseCode    *int     `json:"response_code"`
-	PassthroughBody *bool    `json:"passthrough_body"`
-	CustomMessage   *string  `json:"custom_message"`
-	SkipMonitoring  *bool    `json:"skip_monitoring"`
-	Description     *string  `json:"description"`
+	RecoveryPolicy  *model.ErrorRecoveryPolicy `json:"recovery_policy"`
+	Name            string                     `json:"name" binding:"required"`
+	Enabled         *bool                      `json:"enabled"`
+	Priority        int                        `json:"priority"`
+	ErrorCodes      []int                      `json:"error_codes"`
+	Keywords        []string                   `json:"keywords"`
+	MatchMode       string                     `json:"match_mode"`
+	Platforms       []string                   `json:"platforms"`
+	PassthroughCode *bool                      `json:"passthrough_code"`
+	ResponseCode    *int                       `json:"response_code"`
+	PassthroughBody *bool                      `json:"passthrough_body"`
+	CustomMessage   *string                    `json:"custom_message"`
+	SkipMonitoring  *bool                      `json:"skip_monitoring"`
+	Description     *string                    `json:"description"`
 }
 
 // UpdateErrorPassthroughRuleRequest 更新规则请求（部分更新，所有字段可选）
 type UpdateErrorPassthroughRuleRequest struct {
-	Name            *string  `json:"name"`
-	Enabled         *bool    `json:"enabled"`
-	Priority        *int     `json:"priority"`
-	ErrorCodes      []int    `json:"error_codes"`
-	Keywords        []string `json:"keywords"`
-	MatchMode       *string  `json:"match_mode"`
-	Platforms       []string `json:"platforms"`
-	PassthroughCode *bool    `json:"passthrough_code"`
-	ResponseCode    *int     `json:"response_code"`
-	PassthroughBody *bool    `json:"passthrough_body"`
-	CustomMessage   *string  `json:"custom_message"`
-	SkipMonitoring  *bool    `json:"skip_monitoring"`
-	Description     *string  `json:"description"`
+	RecoveryPolicy  *model.ErrorRecoveryPolicy `json:"recovery_policy"`
+	Name            *string                    `json:"name"`
+	Enabled         *bool                      `json:"enabled"`
+	Priority        *int                       `json:"priority"`
+	ErrorCodes      []int                      `json:"error_codes"`
+	Keywords        []string                   `json:"keywords"`
+	MatchMode       *string                    `json:"match_mode"`
+	Platforms       []string                   `json:"platforms"`
+	PassthroughCode *bool                      `json:"passthrough_code"`
+	ResponseCode    *int                       `json:"response_code"`
+	PassthroughBody *bool                      `json:"passthrough_body"`
+	CustomMessage   *string                    `json:"custom_message"`
+	SkipMonitoring  *bool                      `json:"skip_monitoring"`
+	Description     *string                    `json:"description"`
 }
 
 // List 获取所有规则
@@ -96,11 +98,12 @@ func (h *ErrorPassthroughHandler) Create(c *gin.Context) {
 	}
 
 	rule := &model.ErrorPassthroughRule{
-		Name:       req.Name,
-		Priority:   req.Priority,
-		ErrorCodes: req.ErrorCodes,
-		Keywords:   req.Keywords,
-		Platforms:  req.Platforms,
+		RecoveryPolicy: req.RecoveryPolicy,
+		Name:           req.Name,
+		Priority:       req.Priority,
+		ErrorCodes:     req.ErrorCodes,
+		Keywords:       req.Keywords,
+		Platforms:      req.Platforms,
 	}
 
 	// 设置默认值
@@ -200,6 +203,9 @@ func (h *ErrorPassthroughHandler) Update(c *gin.Context) {
 	}
 
 	// 应用请求中提供的更新
+	if req.RecoveryPolicy != nil {
+		rule.RecoveryPolicy = req.RecoveryPolicy
+	}
 	if req.Name != nil {
 		rule.Name = *req.Name
 	}

@@ -28,6 +28,7 @@ export default {
       loadingText: 'loading',
       ready: 'ready',
       autoRefreshRemaining: 'Remaining {seconds}s',
+      allModels: 'All models',
       systemLogs: {
         title: 'System Logs',
         description: 'Newest logs are shown first. Filter, search, and clean up by condition.',

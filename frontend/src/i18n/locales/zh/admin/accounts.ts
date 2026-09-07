@@ -1018,6 +1018,8 @@ export default {
       proxy: '代理',
       noProxy: '无代理',
       concurrency: '并发数',
+	  stickyBurst: 'Sticky Burst',
+	  stickyBurstHint: '已成功的粘性会话可临时借用的额外并发槽位；默认 1，设为 0 可关闭。',
       loadFactor: '负载因子',
       loadFactorHint: '提高负载因子可以提高对账号的调度频率',
       priority: '优先级',

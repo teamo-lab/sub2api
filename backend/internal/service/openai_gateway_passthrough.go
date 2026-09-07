@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -423,6 +424,9 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 			// 透传模式默认保持原样代理；容量错误以及 API-key 上游的瞬时
 			// 5xx 应先触发多账号 failover，且此时尚未写入下游响应。
 			// probeBody 已在上方任务探测时读取过一次，直接复用避免重复读取。
+			if rejected := newOpenAIContentAuditRejection(c, account, reqModel, resp.StatusCode, probeBody); rejected != nil {
+				return nil, rejected
+			}
 			if shouldFailoverOpenAIPassthroughResponse(account, resp.StatusCode, probeBody) {
 				return nil, s.handleFailoverErrorResponsePassthrough(ctx, resp, c, account, body, probeBody)
 			}
@@ -1073,10 +1077,71 @@ func openAIStreamClientOutputStarted(c *gin.Context, localStarted bool) bool {
 	return OpenAICompactKeepaliveAdjustedWrittenSize(c) >= 0
 }
 
+// openAIPassthroughPendingMaxBytes 是 pendingLines 暂存的字节上限。超长工具参数
+// （如整文件写入）超过上限后放弃暂存保护、按原顺序放行。
+const openAIPassthroughPendingMaxBytes = 4 << 20
+
 func openAIStreamEventIsPreamble(eventType string) bool {
-	switch strings.TrimSpace(eventType) {
-	case "response.created", "response.in_progress":
+	switch strings.ToLower(strings.TrimSpace(eventType)) {
+	case "response.created",
+		"response.in_progress",
+		"response.queued",
+		"response.metadata",
+		"codex.rate_limits",
+		"codex.response.metadata",
+		"ping",
+		"heartbeat",
+		"keepalive",
+		"keep-alive":
 		return true
+	default:
+		return false
+	}
+}
+
+// openAIStreamDataIsKeepalive recognizes upstream keepalives that arrive as a
+// data frame instead of an SSE comment. They prove the TCP stream is live, not
+// that the model has produced an answer, so they must stay attempt-local until
+// a semantic commit point is reached.
+func openAIStreamDataIsKeepalive(data, eventType string) bool {
+	if openAIStreamEventIsPreamble(eventType) {
+		return true
+	}
+	trimmed := strings.TrimSpace(data)
+	if strings.EqualFold(trimmed, "SSE-Keep-Alive") {
+		return true
+	}
+	if !gjson.Valid(trimmed) {
+		return false
+	}
+	if !gjson.Get(trimmed, "SSE-Keep-Alive").Bool() && !gjson.Get(trimmed, "sse_keep_alive").Bool() {
+		return false
+	}
+	if eventType == "" {
+		eventType = gjson.Get(trimmed, "type").String()
+	}
+	if strings.TrimSpace(eventType) != "response.output_text.delta" {
+		return true
+	}
+	delta := gjson.Get(trimmed, "delta")
+	return !delta.Exists() || delta.Type != gjson.String || openAIStreamTextDeltaIsOnlyFiller(trimmed, eventType)
+}
+
+// openAIStreamKnownDeltaIsEmpty identifies protocol lifecycle deltas that
+// carry no usable content. Unknown delta families intentionally remain
+// fail-closed in openAIStreamDataStartsClientOutput below.
+func openAIStreamKnownDeltaIsEmpty(data, eventType string) bool {
+	trimmed := strings.TrimSpace(data)
+	if !gjson.Valid(trimmed) {
+		return false
+	}
+	if eventType == "" {
+		eventType = gjson.Get(trimmed, "type").String()
+	}
+	switch strings.TrimSpace(eventType) {
+	case "response.output_text.delta", "response.reasoning_text.delta", "response.reasoning_summary_text.delta", "response.audio_transcript.delta":
+		delta := gjson.Get(trimmed, "delta")
+		return !delta.Exists() || delta.Type != gjson.String || strings.TrimSpace(delta.String()) == ""
 	default:
 		return false
 	}
@@ -1129,15 +1194,18 @@ func openAIStreamAddedEventStartsClientOutput(payload []byte, eventType string) 
 			}
 			return false
 		case "function_call":
-			return item.Get("arguments").String() != ""
+			// Function arguments are not usable until the item/done boundary. Keep
+			// every partial delta attempt-local so a late capacity failure can be
+			// discarded and retried without leaking half of a JSON document.
+			return false
 		case "custom_tool_call":
-			return item.Get("input").String() != ""
+			return false
 		case "compaction":
 			return item.Get("encrypted_content").String() != ""
 		default:
 			return true
 		}
-	case "response.content_part.added":
+	case "response.content_part.added", "response.content_part.done":
 		part := gjson.GetBytes(payload, "part")
 		if !part.Exists() || !part.IsObject() {
 			return true
@@ -1150,7 +1218,7 @@ func openAIStreamAddedEventStartsClientOutput(payload []byte, eventType string) 
 		default:
 			return true
 		}
-	case "response.reasoning_summary_part.added":
+	case "response.reasoning_summary_part.added", "response.reasoning_summary_part.done":
 		part := gjson.GetBytes(payload, "part")
 		if !part.Exists() || !part.IsObject() || strings.TrimSpace(part.Get("type").String()) != "summary_text" {
 			return true
@@ -1161,12 +1229,45 @@ func openAIStreamAddedEventStartsClientOutput(payload []byte, eventType string) 
 	}
 }
 
+// Text filler is staged, not discarded. It cannot start output or TTFT, and
+// after real output the caller's committed state remains sticky.
+func openAIStreamTextDeltaIsOnlyFiller(data, eventType string) bool {
+	const kind = "response.output_text.delta"
+	if (eventType != "" && eventType != kind) || !gjson.Valid(data) {
+		return false
+	}
+	v := gjson.Parse(data)
+	payloadType := v.Get("type").String()
+	if payloadType != kind && !(payloadType == "" && eventType == kind) {
+		return false
+	}
+	delta := v.Get("delta")
+	if delta.Type != gjson.String {
+		return false
+	}
+	for _, ch := range delta.String() {
+		if !unicode.IsSpace(ch) && ch != '\u200b' && ch != '\u200c' && ch != '\u200d' && ch != '\u2060' && ch != '\ufeff' {
+			return false
+		}
+	}
+	return true
+}
+
 func openAIStreamDataStartsClientOutput(data, eventType string) bool {
 	trimmed := strings.TrimSpace(data)
 	if trimmed == "" {
 		return false
 	}
-	switch strings.TrimSpace(eventType) {
+	eventType = strings.TrimSpace(eventType)
+	if eventType == "" && gjson.Valid(trimmed) {
+		eventType = strings.TrimSpace(gjson.Get(trimmed, "type").String())
+	}
+	if openAIStreamDataIsKeepalive(trimmed, eventType) ||
+		openAIStreamTextDeltaIsOnlyFiller(trimmed, eventType) ||
+		openAIStreamKnownDeltaIsEmpty(trimmed, eventType) {
+		return false
+	}
+	switch eventType {
 	case "response.failed":
 		return false
 	case "error":
@@ -1177,8 +1278,17 @@ func openAIStreamDataStartsClientOutput(data, eventType string) bool {
 		// （content_policy / invalid_request 等）维持原样转发，保留上游错误细节。
 		payload := []byte(trimmed)
 		return !openAIStreamFailedEventShouldFailover(payload, extractOpenAISSEErrorMessage(payload))
-	case "response.output_item.added", "response.content_part.added", "response.reasoning_summary_part.added":
+	case "response.output_item.added", "response.content_part.added", "response.content_part.done", "response.reasoning_summary_part.added", "response.reasoning_summary_part.done":
 		return openAIStreamAddedEventStartsClientOutput([]byte(trimmed), eventType)
+	case "response.function_call_arguments.delta",
+		"response.function_call_arguments.done",
+		"response.custom_tool_call_input.delta",
+		"response.custom_tool_call_input.done":
+		// 没吐完的工具参数对客户端不可执行。这些帧留在 pendingLines 里，
+		// 直到携带完整参数的 response.output_item.done 一起放行；上游在
+		// 参数中途失败时缓冲整体丢弃、按 pre-output 规则换号，下游永远
+		// 只会看到完整的工具调用。
+		return false
 	}
 	return !openAIStreamEventIsPreamble(eventType)
 }
@@ -1207,6 +1317,11 @@ func openAIStreamDataStartsVisibleOutput(data, eventType string) bool {
 	eventType = strings.TrimSpace(eventType)
 	if eventType == "" {
 		eventType = strings.TrimSpace(gjson.Get(trimmed, "type").String())
+	}
+	if openAIStreamDataIsKeepalive(trimmed, eventType) ||
+		openAIStreamTextDeltaIsOnlyFiller(trimmed, eventType) ||
+		openAIStreamKnownDeltaIsEmpty(trimmed, eventType) {
+		return false
 	}
 	if strings.HasSuffix(eventType, ".delta") {
 		delta := gjson.Get(trimmed, "delta")
@@ -1251,6 +1366,11 @@ func openAIStreamDataStartsSemanticTTFT(data, eventType string) bool {
 	if eventType == "" && gjson.Valid(trimmed) {
 		eventType = strings.TrimSpace(gjson.Get(trimmed, "type").String())
 	}
+	if openAIStreamDataIsKeepalive(trimmed, eventType) ||
+		openAIStreamTextDeltaIsOnlyFiller(trimmed, eventType) ||
+		openAIStreamKnownDeltaIsEmpty(trimmed, eventType) {
+		return false
+	}
 	switch eventType {
 	case "response.failed":
 		return false
@@ -1272,6 +1392,86 @@ func (s *OpenAIGatewayService) openAITTFTMode(ctx context.Context) string {
 		}
 	}
 	return normalizeOpenAITTFTMode(mode)
+}
+
+// openAIStreamDataStartsAnswerOutput reports whether an event carries answer
+// output that the client can act on: message text, refusal, tool-call
+// arguments, custom tool input or image bytes. Reasoning items and reasoning
+// summaries are deliberately excluded: they are visible progress, but a
+// request that has only produced reasoning can still be replayed on another
+// account without the client having received any answer it must keep.
+func openAIStreamDataStartsAnswerOutput(data, eventType string) bool {
+	trimmed := strings.TrimSpace(data)
+	if trimmed == "" || trimmed == "[DONE]" || !gjson.Valid(trimmed) {
+		return false
+	}
+	eventType = strings.TrimSpace(eventType)
+	if eventType == "" {
+		eventType = strings.TrimSpace(gjson.Get(trimmed, "type").String())
+	}
+	if strings.HasPrefix(eventType, "response.reasoning") {
+		return false
+	}
+	switch eventType {
+	case "response.function_call_arguments.delta",
+		"response.function_call_arguments.done",
+		"response.custom_tool_call_input.delta",
+		"response.custom_tool_call_input.done":
+		// 这些帧被扣在 pendingLines 里、还没写给客户端；答案输出以携带完整
+		// 参数的 output_item.done（放行点）为准。中途失败时客户端并未收到
+		// 任何答案，保持可换号。
+		return false
+	case "response.output_item.added", "response.output_item.done":
+		item := gjson.Get(trimmed, "item")
+		if strings.TrimSpace(item.Get("type").String()) == "reasoning" {
+			return false
+		}
+		return openAIStreamItemHasVisibleOutput(item)
+	case "response.completed", "response.done":
+		for _, item := range gjson.Get(trimmed, "response.output").Array() {
+			if strings.TrimSpace(item.Get("type").String()) == "reasoning" {
+				continue
+			}
+			if openAIStreamItemHasVisibleOutput(item) {
+				return true
+			}
+		}
+		return false
+	}
+	return openAIStreamDataStartsVisibleOutput(trimmed, eventType)
+}
+
+// openAIStreamFailedEventFailoverAfterReasoning decides whether a failed/error
+// event that arrived after reasoning-only output may still fail over to another
+// account. The predicates are the same ones used before any output: the only
+// thing that changed is that the client already saw reasoning progress, which
+// the caller marks with SafeToFailoverAfterWrite.
+func openAIStreamFailedEventFailoverAfterReasoning(payload []byte, eventType, message string) bool {
+	if strings.TrimSpace(eventType) == "error" {
+		return openAIStreamErrorEventShouldFailover(payload, message)
+	}
+	return openAIStreamFailedEventShouldFailover(payload, message)
+}
+
+func logOpenAIFailoverAfterReasoningOutput(
+	ctx context.Context,
+	account *Account,
+	path string,
+	upstreamRequestID string,
+	eventType string,
+) {
+	fields := []zap.Field{
+		zap.String("path", path),
+		zap.String("event_type", strings.TrimSpace(eventType)),
+		zap.String("upstream_request_id", strings.TrimSpace(upstreamRequestID)),
+	}
+	if account != nil {
+		fields = append(fields,
+			zap.Int64("account_id", account.ID),
+			zap.String("platform", account.Platform),
+		)
+	}
+	logger.FromContext(ctx).Warn("gateway.failover_after_reasoning_output", fields...)
 }
 
 func openAIStreamDataStartsTTFT(data, eventType string, forceOutput bool, mode string) bool {
@@ -1591,15 +1791,26 @@ func openAIStreamErrorEventShouldFailover(payload []byte, message string) bool {
 	case http.StatusUnauthorized, http.StatusTooManyRequests, 529:
 		return true
 	}
+	// An explicit upstream 5xx carried inside the error frame (relay
+	// "temporarily unavailable", capacity shedding, gateway timeout) is not
+	// actionable by the client: another account may serve the same request.
+	for _, path := range []string{"response.error.status_code", "error.status_code", "status_code"} {
+		if status := int(gjson.GetBytes(payload, path).Int()); status >= 500 && status <= 504 {
+			return true
+		}
+	}
 	if isOpenAITransientProcessingError(http.StatusBadRequest, message, payload) {
 		return true
 	}
 	combined := strings.ToLower(strings.TrimSpace(message + " " +
 		gjson.GetBytes(payload, "error.message").String() + " " +
 		gjson.GetBytes(payload, "response.error.message").String()))
-	return strings.Contains(combined, "temporary") ||
-		strings.Contains(combined, "try again") ||
-		strings.Contains(combined, "please retry")
+	for _, marker := range []string{"temporary", "temporarily", "unavailable", "overloaded", "try again", "please retry"} {
+		if strings.Contains(combined, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *OpenAIGatewayService) handleOpenAIStreamTerminalAccountSideEffects(
@@ -1611,6 +1822,30 @@ func (s *OpenAIGatewayService) handleOpenAIStreamTerminalAccountSideEffects(
 	canonicalModel ...string,
 ) (int, bool) {
 	statusCode := openAIStreamFailureStatus(payload, message)
+	if isOpenAIGPTContentAuditRejection(account, firstNonEmpty(canonicalModel...), statusCode, payload) {
+		return statusCode, false
+	}
+	// 账号不具备该模型：写"账号+模型"冷却，让调度绕开这个账号，而不是每次都
+	// 重新撞一遍（线上样本中位 45s、最长 259s 才失败）。这里显式传 404，让流内
+	// 形态复用 HTTP 路径同一套判定与冷却，不新增第二套语义。
+	// 只冷却该模型，不停用账号：账号对其它模型仍然可用。
+	if s != nil && s.rateLimitService != nil && isOpenAIStreamModelNotFoundEvent(payload) {
+		ctx := context.Background()
+		if c != nil && c.Request != nil {
+			ctx = c.Request.Context()
+		}
+		model := firstNonEmpty(canonicalModel...)
+		if model == "" {
+			model = firstNonEmpty(
+				gjson.GetBytes(payload, "model").String(),
+				gjson.GetBytes(payload, "response.model").String(),
+			)
+		}
+		if strings.TrimSpace(model) != "" {
+			s.rateLimitService.HandleUpstreamModelNotFound(ctx, account, model, http.StatusNotFound, payload)
+		}
+		return statusCode, false
+	}
 	switch statusCode {
 	case http.StatusForbidden:
 		if !openAIStream403AccountFailure(payload, message) {
@@ -1732,6 +1967,9 @@ func (s *OpenAIGatewayService) newOpenAIStreamFailoverErrorWithModel(
 	if len(responseHeaders) > 0 && responseHeaders[0] != nil {
 		headers = responseHeaders[0].Clone()
 	}
+	if rejected := newOpenAIContentAuditRejection(c, account, canonicalModel, openAIStreamFailureStatus(payload, message), payload); rejected != nil {
+		return rejected
+	}
 	statusCode, shouldDisable := s.handleOpenAIStreamTerminalAccountSideEffects(c, account, payload, message, headers, canonicalModel)
 	// 流内 failed 事件承载于 HTTP 200；使用事件的语义状态更新账号健康，
 	// 再由 failover 引擎按 StatusCode/RetryableOnSameAccount 决定恢复策略。
@@ -1740,12 +1978,18 @@ func (s *OpenAIGatewayService) newOpenAIStreamFailoverErrorWithModel(
 	if statusCode == http.StatusTooManyRequests {
 		errType = "rate_limit_error"
 	}
-	body, _ := json.Marshal(gin.H{
-		"error": gin.H{
-			"type":    errType,
-			"message": message,
-		},
-	})
+	// 上游流内错误码必须随信封一起下传：错误恢复规则（error_passthrough_rules 的
+	// recovery_policy）以 upstream_codes 匹配，而 matchRecoveryRule 第一步就是
+	// recoveryErrorCode(ResponseBody)——取不到 code 直接放弃匹配。此前信封只带
+	// type/message，导致流内 429 / 503 / 502（线上主力失败类）永远进不了换号恢复。
+	errorEnvelope := gin.H{
+		"type":    errType,
+		"message": message,
+	}
+	if upstreamCode := openAIStreamFailedEventErrorCode(payload); upstreamCode != "" {
+		errorEnvelope["code"] = upstreamCode
+	}
+	body, _ := json.Marshal(gin.H{"error": errorEnvelope})
 	retryableOnSameAccount := openAIStreamFailedEventRetryableOnSameAccount(account, payload, message)
 	// 流终止事件承载在 HTTP 200 内，外层响应头描述的是成功流状态，而不是语义上的
 	// 429 事件。仅在配额分类时忽略这些头；故障转移错误仍保留它们，使 Retry-After
@@ -1868,6 +2112,11 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	terminalEventType := ""
 	semanticOutputSeen := false
 	capacityFailoverSuppressedLogged := false
+	// answerOutputStarted flips once answer output (not reasoning) was written to
+	// the client; pendingAnswerOutput marks answer output still held in pendingLines.
+	answerOutputStarted := false
+	pendingAnswerOutput := false
+	answerOutputReached := func() bool { return answerOutputStarted || pendingAnswerOutput }
 	failedMessage := ""
 	clientOutputStarted := false
 	codexFailureTerminal := account != nil && account.Platform == PlatformOpenAI
@@ -1878,7 +2127,10 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	bareErrorAccountSideEffectsPending := false
 	upstreamRequestID := strings.TrimSpace(resp.Header.Get("x-request-id"))
 	// pendingLines 在首个可见输出前保留前导事件，确保无输出失败仍可安全 failover。
+	// 工具调用参数帧也扣在这里直到 item 完成；pendingBytes 超出上限即放弃保护
+	// 立刻放行（fail-open），迟到的保护不能变成饿死下游。
 	pendingLines := make([]string, 0, 8)
+	pendingBytes := 0
 
 	// ── 首个可见输出之前的下游 keepalive ──────────────────────────────────
 	//
@@ -1943,6 +2195,17 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		if !sawBareError || sawResponseFailed || failureDelivered {
 			return
 		}
+		// 裸 error 帧在读取分支里先置位 sawBareError，随后的透传规则判定被
+		// `!sawBareError` 短路掉；若上游没有再补一个权威 response.failed，规则就
+		// 一次都没被问过。命中 skip_monitoring 的规则（如"上下文超限"）因此无法
+		// 抑制这类失败的落库，运维面板仍会把它计入。
+		//
+		// 这里只补评估、不改响应：响应体已由下面的合成逻辑决定，规则的
+		// passthrough_code / passthrough_body 对已提交的流没有意义，需要的只是
+		// 让 skip_monitoring 的裁决能落到 ops 记录上。
+		if len(bareErrorPayload) > 0 {
+			applyOpenAIStreamFailedErrorPassthroughRule(c, account.Platform, bareErrorPayload, failedMessage)
+		}
 		if bareErrorAccountSideEffectsPending {
 			s.handleOpenAIStreamTerminalAccountSideEffects(c, account, bareErrorPayload, failedMessage, resp.Header, mappedModel)
 			bareErrorAccountSideEffectsPending = false
@@ -1955,6 +2218,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			return
 		}
 		clientOutputStarted = true
+		CompleteErrorRecovery(c)
 		failureDelivered = true
 		flushPending = true
 		flushPendingOutput()
@@ -2030,7 +2294,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			}
 			if !capacityFailoverSuppressedLogged && account != nil && account.Platform == PlatformOpenAI &&
 				(eventType == "error" || eventType == "response.failed") &&
-				openAIStreamClientOutputStarted(c, clientOutputStarted) &&
+				answerOutputReached() &&
 				isOpenAIUpstreamCapacityShedEvent(dataBytes) {
 				logOpenAICapacityFailoverSuppressed(ctx, account, "passthrough_sse", upstreamRequestID, eventType)
 				capacityFailoverSuppressedLogged = true
@@ -2069,6 +2333,17 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 					if compactErr := newOpenAICompactFallbackSignal(c, dataBytes, failedMessage); compactErr != nil {
 						return resultWithUsage(), compactErr
 					}
+				}
+				// Reasoning-only output reached the client: the upstream failed before
+				// any answer, so replay on another account instead of forwarding the
+				// terminal error (see native_sse for the same rule).
+				if outputStarted && !answerOutputReached() && !cyberHit && !clientDisconnected &&
+					account != nil && account.Platform == PlatformOpenAI &&
+					openAIStreamFailedEventFailoverAfterReasoning(dataBytes, eventType, failedMessage) {
+					failoverErr := s.newOpenAIStreamFailoverErrorWithModel(c, account, true, upstreamRequestID, dataBytes, failedMessage, mappedModel, resp.Header)
+					failoverErr.SafeToFailoverAfterWrite = true
+					logOpenAIFailoverAfterReasoningOutput(ctx, account, "passthrough_sse", upstreamRequestID, eventType)
+					return resultWithUsage(), failoverErr
 				}
 				if outputStarted && !cyberHit {
 					if codexFailureTerminal && eventType == "error" {
@@ -2140,6 +2415,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			if lineStartsClientOutput && trimmedData != "[DONE]" && !openAIStreamEventTypeIsTerminal(eventType) {
 				semanticOutputSeen = true
 			}
+			if openAIStreamDataStartsAnswerOutput(trimmedData, eventType) {
+				pendingAnswerOutput = true
+			}
 			// OpenAI Responses streams that terminate with an empty
 			// response.completed (no output, no usage, no error, nothing sent
 			// to the client) are silent upstream refusals: fail over instead of
@@ -2165,8 +2443,13 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		}
 
 		if !clientDisconnected && !failureDelivered && !suppressCurrentEvent {
+			if !clientOutputStarted && !lineStartsClientOutput &&
+				pendingBytes+len(line) > openAIPassthroughPendingMaxBytes {
+				lineStartsClientOutput = true
+			}
 			if !clientOutputStarted && !lineStartsClientOutput {
 				pendingLines = append(pendingLines, line)
+				pendingBytes += len(line)
 				continue
 			}
 			// 真实输出开始，心跳的使命结束。停拍是幂等的，且会与心跳 goroutine
@@ -2184,6 +2467,11 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				logger.LegacyPrintf("service.openai_gateway", "[OpenAI passthrough] Client disconnected during streaming, continue draining upstream for usage: account=%d", account.ID)
 			} else {
 				clientOutputStarted = true
+				if pendingAnswerOutput {
+					answerOutputStarted = true
+					pendingAnswerOutput = false
+				}
+				CompleteErrorRecovery(c)
 				flushPending = true
 				if line == "" {
 					flushPendingOutput()
@@ -2243,6 +2531,12 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		if !openAIStreamClientOutputStarted(c, clientOutputStarted) {
 			return resultWithUsage(),
 				s.newOpenAIStreamFailoverError(c, account, true, upstreamRequestID, nil, "OpenAI stream ended before a terminal event")
+		}
+		if !answerOutputReached() && account != nil && account.Platform == PlatformOpenAI {
+			failoverErr := s.newOpenAIStreamFailoverError(c, account, true, upstreamRequestID, nil, "OpenAI stream ended after reasoning-only output")
+			failoverErr.SafeToFailoverAfterWrite = true
+			logOpenAIFailoverAfterReasoningOutput(ctx, account, "passthrough_sse", upstreamRequestID, "eof")
+			return resultWithUsage(), failoverErr
 		}
 		s.recordOpenAIProxyStreamDisconnect(account, errors.New("stream ended before terminal event"), upstreamRequestID)
 		return resultWithUsage(), errors.New("stream usage incomplete: missing terminal event")

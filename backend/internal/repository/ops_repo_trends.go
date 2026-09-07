@@ -20,6 +20,11 @@ func (r *opsRepository) GetThroughputTrend(ctx context.Context, filter *service.
 	if filter.StartTime.IsZero() || filter.EndTime.IsZero() {
 		return nil, fmt.Errorf("start_time/end_time required")
 	}
+	if strings.TrimSpace(filter.Model) != "" && filter.QueryMode != service.OpsQueryModeRaw {
+		if out, ok, err := r.getModelThroughputTrendRollup(ctx, filter); err != nil || ok {
+			return out, err
+		}
+	}
 
 	if bucketSeconds <= 0 {
 		bucketSeconds = 60
@@ -154,20 +159,22 @@ ORDER BY bucket ASC`
 		platform = strings.TrimSpace(strings.ToLower(filter.Platform))
 	}
 	groupID := (*int64)(nil)
+	model := ""
 	if filter != nil {
 		groupID = filter.GroupID
+		model = strings.TrimSpace(filter.Model)
 	}
 
 	// Drilldown helpers:
 	// - No platform/group: totals by platform
 	// - Platform selected but no group: top groups in that platform
-	if platform == "" && (groupID == nil || *groupID <= 0) {
+	if model == "" && platform == "" && (groupID == nil || *groupID <= 0) {
 		items, err := r.getThroughputBreakdownByPlatform(ctx, start, end)
 		if err != nil {
 			return nil, err
 		}
 		byPlatform = items
-	} else if platform != "" && (groupID == nil || *groupID <= 0) {
+	} else if model == "" && platform != "" && (groupID == nil || *groupID <= 0) {
 		items, err := r.getThroughputTopGroupsByPlatform(ctx, start, end, platform, 10)
 		if err != nil {
 			return nil, err
@@ -435,6 +442,11 @@ func (r *opsRepository) GetErrorTrend(ctx context.Context, filter *service.OpsDa
 	if filter.StartTime.IsZero() || filter.EndTime.IsZero() {
 		return nil, fmt.Errorf("start_time/end_time required")
 	}
+	if strings.TrimSpace(filter.Model) != "" && filter.QueryMode != service.OpsQueryModeRaw {
+		if out, ok, err := r.getModelErrorTrendRollup(ctx, filter); err != nil || ok {
+			return out, err
+		}
+	}
 
 	if bucketSeconds <= 0 {
 		bucketSeconds = 60
@@ -554,6 +566,11 @@ func (r *opsRepository) GetErrorDistribution(ctx context.Context, filter *servic
 	}
 	if filter.StartTime.IsZero() || filter.EndTime.IsZero() {
 		return nil, fmt.Errorf("start_time/end_time required")
+	}
+	if strings.TrimSpace(filter.Model) != "" && filter.QueryMode != service.OpsQueryModeRaw {
+		if out, ok, err := r.getModelErrorDistributionRollup(ctx, filter); err != nil || ok {
+			return out, err
+		}
 	}
 
 	start := filter.StartTime.UTC()

@@ -529,12 +529,19 @@ func detachStreamUpstreamContext(ctx context.Context, stream bool) (context.Cont
 	if !stream {
 		return ctx, func() {}
 	}
+	if active, _ := ctx.Value(recoveryContextKey{}).(bool); active {
+		return ctx, func() {}
+	}
 	return context.WithoutCancel(ctx), func() {}
 }
 
 func detachUpstreamContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	if ctx == nil {
 		return context.Background(), func() {}
+	}
+	// Explicit recovery budgets must survive the normal stream cancellation detachment.
+	if active, _ := ctx.Value(recoveryContextKey{}).(bool); active {
+		return ctx, func() {}
 	}
 	return context.WithoutCancel(ctx), func() {}
 }

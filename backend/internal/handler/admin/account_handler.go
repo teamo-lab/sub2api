@@ -886,6 +886,10 @@ func (h *AccountHandler) Create(c *gin.Context) {
 		response.ErrorFrom(c, err)
 		return
 	}
+	if err := service.NormalizeOpenAIStickyBurstExtra(req.Extra); err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
 	if req.RateMultiplier != nil && *req.RateMultiplier < 0 {
 		response.BadRequest(c, "rate_multiplier must be >= 0")
 		return
@@ -1025,6 +1029,10 @@ func (h *AccountHandler) Update(c *gin.Context) {
 	}
 	if req.RateMultiplier != nil && *req.RateMultiplier < 0 {
 		response.BadRequest(c, "rate_multiplier must be >= 0")
+		return
+	}
+	if err := service.NormalizeOpenAIStickyBurstExtra(req.Extra); err != nil {
+		response.BadRequest(c, err.Error())
 		return
 	}
 	// base_rpm 输入校验：负值归零，超过 10000 截断
@@ -2159,6 +2167,10 @@ func (h *AccountHandler) BulkUpdate(c *gin.Context) {
 	}
 	if req.RateMultiplier != nil && *req.RateMultiplier < 0 {
 		response.BadRequest(c, "rate_multiplier must be >= 0")
+		return
+	}
+	if err := service.NormalizeOpenAIStickyBurstExtra(req.Extra); err != nil {
+		response.BadRequest(c, err.Error())
 		return
 	}
 	if len(req.AccountIDs) == 0 && req.Filters == nil {

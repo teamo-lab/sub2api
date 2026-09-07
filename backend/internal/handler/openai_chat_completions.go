@@ -120,6 +120,10 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 
 	if h.errorPassthroughService != nil {
 		service.BindErrorPassthroughService(c, h.errorPassthroughService)
+		defer func() {
+			service.WriteRecoveryBudgetError(c)
+			service.CloseErrorRecovery(c)
+		}()
 	}
 
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
@@ -165,6 +169,9 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 		if failoverClientGone(c) {
 			return
 		}
+		if service.WriteRecoveryBudgetError(c) {
+			return
+		}
 		reqLog.Debug("openai_chat_completions.account_selecting", zap.Int("excluded_account_count", len(failedAccountIDs)))
 		selection, scheduleDecision, err := h.gatewayService.SelectAccountWithSchedulerForCapability(
 			c.Request.Context(),
@@ -198,6 +205,9 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 				h.handleStreamingAwareError(c, cls.Status, cls.ErrType, cls.Message, streamStarted)
 				return
 			} else {
+				if service.WriteActiveErrorRecovery(c) {
+					return
+				}
 				if lastFailoverErr != nil {
 					h.handleFailoverExhausted(c, lastFailoverErr, streamStarted)
 				} else {
@@ -249,6 +259,10 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			}()
 			return h.gatewayService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody, promptCacheKey, "")
 		}()
+		h.gatewayService.ObserveOpenAIStickyBurstResult(
+			c.Request.Context(), apiKey.GroupID, sessionHash, account.ID, reqModel,
+			selection.StickyBurstBypass, err == nil && openAIForwardSucceededForScheduling(result), err,
+		)
 		var cyberBlockBodyChat []byte
 		if service.GetOpsCyberPolicy(c) != nil {
 			cyberBlockBodyChat = body
@@ -308,6 +322,9 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 				}
 			})
 		}
+		if service.WriteRecoveryBudgetError(c) {
+			return
+		}
 		if err != nil {
 			if result != nil && result.ImageCount > 0 {
 				reqLog.Warn("openai_chat_completions.forward_partial_error_with_image_result",
@@ -325,10 +342,34 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						)
 						return
 					}
-					if c.Writer.Size() != writerSizeBeforeForward {
+					if c.Writer.Size() != writerSizeBeforeForward && !failoverErr.SafeToFailoverAfterWrite {
 						h.gatewayService.ObserveOpenAIAccountHealthFailure(c.Request.Context(), account, err)
 						h.handleFailoverExhausted(c, failoverErr, true)
 						return
+					}
+					if c.Writer.Written() {
+						// Reasoning-only bytes were already delivered; a later exhaustion
+						// must still be reported inside the committed SSE stream.
+						streamStarted = true
+					}
+					if action := service.ApplyErrorRecovery(c, account, reqModel, failoverErr); action != service.ErrorRecoveryDefault {
+						switch action {
+						case service.ErrorRecoveryRetry:
+							continue
+						case service.ErrorRecoverySwitch:
+							lastFailoverErr = failoverErr
+							if switchCount >= maxAccountSwitches {
+								service.WriteErrorRecoveryExhausted(c)
+								return
+							}
+							failedAccountIDs[account.ID] = struct{}{}
+							switchCount++
+							h.gatewayService.RecordOpenAIAccountSwitch()
+							continue
+						default:
+							service.WriteErrorRecoveryExhausted(c)
+							return
+						}
 					}
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, reqModel, false, nil), false, nil, err)

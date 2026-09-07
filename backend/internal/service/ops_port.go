@@ -28,6 +28,7 @@ type OpsRepository interface {
 	GetLatencyHistogram(ctx context.Context, filter *OpsDashboardFilter) (*OpsLatencyHistogramResponse, error)
 	GetErrorTrend(ctx context.Context, filter *OpsDashboardFilter, bucketSeconds int) (*OpsErrorTrendResponse, error)
 	GetErrorDistribution(ctx context.Context, filter *OpsDashboardFilter) (*OpsErrorDistributionResponse, error)
+	ListDashboardModels(ctx context.Context, filter *OpsDashboardFilter) ([]string, error)
 	GetOpenAITokenStats(ctx context.Context, filter *OpsOpenAITokenStatsFilter) (*OpsOpenAITokenStatsResponse, error)
 
 	InsertSystemMetrics(ctx context.Context, input *OpsInsertSystemMetricsInput) error
@@ -59,6 +60,11 @@ type OpsRepository interface {
 	UpsertDailyMetrics(ctx context.Context, startTime, endTime time.Time) error
 	GetLatestHourlyBucketStart(ctx context.Context) (time.Time, bool, error)
 	GetLatestDailyBucketDate(ctx context.Context) (time.Time, bool, error)
+	UpsertModelMetrics5m(ctx context.Context, startTime, endTime time.Time) error
+	UpsertModelMetricsHourly(ctx context.Context, startTime, endTime time.Time) error
+	GetLatestModelMetricsBucketStart(ctx context.Context, resolutionSeconds int) (time.Time, bool, error)
+	GetOldestModelMetricsBucketStart(ctx context.Context, resolutionSeconds int) (time.Time, bool, error)
+	GetMissingModelMetricsBucketStart(ctx context.Context, resolutionSeconds int, start, end time.Time) (time.Time, bool, error)
 }
 
 type OpsInsertErrorLogInput struct {

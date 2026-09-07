@@ -186,18 +186,38 @@ func (r *opsRepository) getDashboardOverviewPreaggregated(ctx context.Context, f
 	start := filter.StartTime.UTC()
 	end := filter.EndTime.UTC()
 
-	// Stable full-hour range covered by pre-aggregation.
+	// Stable full-bucket range covered by pre-aggregation. Model-filtered
+	// windows use their dedicated 5m/hourly rollups, while the live head and
+	// tail retain the same raw-query semantics as the original dashboard.
 	aggSafeEnd := preaggSafeEnd(end)
-	aggFullStart := utcCeilToHour(start)
-	aggFullEnd := utcFloorToHour(aggSafeEnd)
+	step := time.Hour
+	if strings.TrimSpace(filter.Model) != "" {
+		step = time.Duration(modelRollupFor(filter).seconds) * time.Second
+	}
+	aggFullStart := utcCeilToStep(start, step)
+	aggFullEnd := aggSafeEnd.UTC().Truncate(step)
 
-	// If there are no stable full-hour buckets, use raw directly (short windows).
+	// If there are no stable full buckets, use raw directly (short windows).
 	if !aggFullStart.Before(aggFullEnd) {
 		return r.getDashboardOverviewRaw(ctx, filter)
 	}
 
 	// 1) Pre-aggregated stable segment.
-	preaggRows, err := r.listHourlyMetricsRows(ctx, filter, aggFullStart, aggFullEnd)
+	var preaggRows []opsHourlyMetricsRow
+	var err error
+	if strings.TrimSpace(filter.Model) != "" {
+		spec := modelRollupFor(filter)
+		covered, coverageErr := modelRollupCoverage(ctx, r, spec, aggFullStart, aggFullEnd)
+		if coverageErr != nil {
+			return nil, coverageErr
+		}
+		if !covered {
+			return nil, service.ErrOpsPreaggregatedNotPopulated
+		}
+		preaggRows, err = r.listModelMetricsRows(ctx, filter, aggFullStart, aggFullEnd)
+	} else {
+		preaggRows, err = r.listHourlyMetricsRows(ctx, filter, aggFullStart, aggFullEnd)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -762,12 +782,16 @@ func preaggSafeEnd(endTime time.Time) time.Time {
 }
 
 func utcCeilToHour(t time.Time) time.Time {
+	return utcCeilToStep(t, time.Hour)
+}
+
+func utcCeilToStep(t time.Time, step time.Duration) time.Time {
 	u := t.UTC()
-	f := u.Truncate(time.Hour)
+	f := u.Truncate(step)
 	if f.Equal(u) {
 		return f
 	}
-	return f.Add(time.Hour)
+	return f.Add(step)
 }
 
 func utcFloorToHour(t time.Time) time.Time {
@@ -975,9 +999,11 @@ func isQueryTimeoutErr(err error) bool {
 func buildUsageWhere(filter *service.OpsDashboardFilter, start, end time.Time, startIndex int) (join string, where string, args []any, nextIndex int) {
 	platform := ""
 	groupID := (*int64)(nil)
+	model := ""
 	if filter != nil {
 		platform = strings.TrimSpace(strings.ToLower(filter.Platform))
 		groupID = filter.GroupID
+		model = strings.TrimSpace(filter.Model)
 	}
 
 	idx := startIndex
@@ -1004,6 +1030,11 @@ func buildUsageWhere(filter *service.OpsDashboardFilter, start, end time.Time, s
 		clauses = append(clauses, fmt.Sprintf("COALESCE(NULLIF(g.platform,''), a.platform) = $%d", idx))
 		idx++
 	}
+	if model != "" {
+		args = append(args, model)
+		clauses = append(clauses, fmt.Sprintf("COALESCE(NULLIF(BTRIM(ul.requested_model), ''), ul.model) = $%d", idx))
+		idx++
+	}
 
 	where = "WHERE " + strings.Join(clauses, " AND ")
 	return join, where, args, idx
@@ -1012,9 +1043,11 @@ func buildUsageWhere(filter *service.OpsDashboardFilter, start, end time.Time, s
 func buildErrorWhere(filter *service.OpsDashboardFilter, start, end time.Time, startIndex int) (where string, args []any, nextIndex int) {
 	platform := ""
 	groupID := (*int64)(nil)
+	model := ""
 	if filter != nil {
 		platform = strings.TrimSpace(strings.ToLower(filter.Platform))
 		groupID = filter.GroupID
+		model = strings.TrimSpace(filter.Model)
 	}
 
 	idx := startIndex
@@ -1038,6 +1071,11 @@ func buildErrorWhere(filter *service.OpsDashboardFilter, start, end time.Time, s
 	if platform != "" {
 		args = append(args, platform)
 		clauses = append(clauses, fmt.Sprintf("platform = $%d", idx))
+		idx++
+	}
+	if model != "" {
+		args = append(args, model)
+		clauses = append(clauses, fmt.Sprintf("COALESCE(NULLIF(BTRIM(requested_model), ''), model) = $%d", idx))
 		idx++
 	}
 

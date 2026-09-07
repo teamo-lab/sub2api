@@ -102,7 +102,7 @@ func ProvideBatchImageModelPricingResolver(resolver *ModelPricingResolver) *Batc
 
 func ProvideBatchImageCleanupService(repo BatchImageRepository, accountRepo AccountRepository, cfg *config.Config) *BatchImageCleanupService {
 	svc := NewBatchImageCleanupService(repo, accountRepo, cfg)
-	svc.Start()
+	startSingletonJob(cfg, "batch_image_cleanup", svc.Start)
 	return svc
 }
 
@@ -142,7 +142,7 @@ func ProvideTokenRefreshService(
 	// 调用侧显式注入后台刷新策略，避免策略漂移
 	svc.SetRefreshPolicy(DefaultBackgroundRefreshPolicy())
 	svc.SetAccountRuntimeBlocker(runtimeBlocker)
-	svc.Start()
+	startSingletonJob(cfg, "token_refresh", svc.Start)
 	return svc
 }
 
@@ -375,21 +375,21 @@ func ProvideGrokTokenProvider(
 func ProvideDashboardAggregationService(repo DashboardAggregationRepository, timingWheel *TimingWheelService, lockCache LeaderLockCache, db *sql.DB, cfg *config.Config) *DashboardAggregationService {
 	svc := NewDashboardAggregationService(repo, timingWheel, cfg)
 	svc.SetLeaderLock(lockCache, db)
-	svc.Start()
+	startSingletonJob(cfg, "dashboard_aggregation", svc.Start)
 	return svc
 }
 
 // ProvideUsageCleanupService 创建并启动使用记录清理任务服务
 func ProvideUsageCleanupService(repo UsageCleanupRepository, timingWheel *TimingWheelService, dashboardAgg *DashboardAggregationService, cfg *config.Config) *UsageCleanupService {
 	svc := NewUsageCleanupService(repo, timingWheel, dashboardAgg, cfg)
-	svc.Start()
+	startSingletonJob(cfg, "usage_cleanup", svc.Start)
 	return svc
 }
 
 // ProvideAccountExpiryService creates and starts AccountExpiryService.
-func ProvideAccountExpiryService(accountRepo AccountRepository) *AccountExpiryService {
+func ProvideAccountExpiryService(accountRepo AccountRepository, cfg *config.Config) *AccountExpiryService {
 	svc := NewAccountExpiryService(accountRepo, time.Minute)
-	svc.Start()
+	startSingletonJob(cfg, "account_expiry", svc.Start)
 	return svc
 }
 
@@ -399,26 +399,27 @@ func ProvideOpenAICodexVersionSyncService(
 	settingRepo SettingRepository,
 	settingService *SettingService,
 	githubClient GitHubReleaseClient,
+	cfg *config.Config,
 ) *OpenAICodexVersionSyncService {
 	svc := NewOpenAICodexVersionSyncService(settingRepo, settingService, githubClient, openAICodexVersionSyncInterval)
-	svc.Start()
+	startSingletonJob(cfg, "openai_codex_version_sync", svc.Start)
 	return svc
 }
 
 // ProvideProxyExpiryService creates and starts ProxyExpiryService.
-func ProvideProxyExpiryService(proxyRepo ProxyRepository) *ProxyExpiryService {
+func ProvideProxyExpiryService(proxyRepo ProxyRepository, cfg *config.Config) *ProxyExpiryService {
 	svc := NewProxyExpiryService(proxyRepo, time.Minute)
-	svc.Start()
+	startSingletonJob(cfg, "proxy_expiry", svc.Start)
 	return svc
 }
 
 // ProvideSubscriptionExpiryService creates and starts SubscriptionExpiryService.
-func ProvideSubscriptionExpiryService(userSubRepo UserSubscriptionRepository, settingRepo SettingRepository, notificationEmailService *NotificationEmailService, lockCache LeaderLockCache, db *sql.DB) *SubscriptionExpiryService {
+func ProvideSubscriptionExpiryService(userSubRepo UserSubscriptionRepository, settingRepo SettingRepository, notificationEmailService *NotificationEmailService, lockCache LeaderLockCache, db *sql.DB, cfg *config.Config) *SubscriptionExpiryService {
 	svc := NewSubscriptionExpiryService(userSubRepo, time.Minute)
 	svc.SetSettingRepository(settingRepo)
 	svc.SetNotificationEmailService(notificationEmailService)
 	svc.SetLeaderLock(lockCache, db)
-	svc.Start()
+	startSingletonJob(cfg, "subscription_expiry", svc.Start)
 	return svc
 }
 
@@ -470,7 +471,7 @@ func ProvideSchedulerSnapshotService(
 	cfg *config.Config,
 ) *SchedulerSnapshotService {
 	svc := NewSchedulerSnapshotService(cache, outboxRepo, accountRepo, groupRepo, cfg)
-	svc.Start()
+	startSingletonJob(cfg, "scheduler_snapshot", svc.Start)
 	return svc
 }
 
@@ -508,7 +509,7 @@ func ProvideOpsMetricsCollector(
 	cfg *config.Config,
 ) *OpsMetricsCollector {
 	collector := NewOpsMetricsCollector(opsRepo, settingRepo, accountRepo, concurrencyService, db, redisClient, cfg)
-	collector.Start()
+	startSingletonJob(cfg, "ops_metrics_collector", collector.Start)
 	return collector
 }
 
@@ -521,7 +522,7 @@ func ProvideOpsAggregationService(
 	cfg *config.Config,
 ) *OpsAggregationService {
 	svc := NewOpsAggregationService(opsRepo, settingRepo, db, redisClient, cfg)
-	svc.Start()
+	startSingletonJob(cfg, "ops_aggregation", svc.Start)
 	return svc
 }
 
@@ -535,7 +536,7 @@ func ProvideOpsAlertEvaluatorService(
 	proxyRepo ProxyRepository,
 ) *OpsAlertEvaluatorService {
 	svc := NewOpsAlertEvaluatorService(opsService, opsRepo, emailService, redisClient, cfg, proxyRepo)
-	svc.Start()
+	startSingletonJob(cfg, "ops_alert_evaluator", svc.Start)
 	return svc
 }
 
@@ -554,8 +555,8 @@ func ProvideOpsCleanupService(
 	opsService *OpsService,
 ) *OpsCleanupService {
 	svc := NewOpsCleanupService(opsRepo, db, redisClient, cfg, channelMonitorSvc, settingRepo)
-	svc.Start()
-	if opsService != nil {
+	startSingletonJob(cfg, "ops_cleanup", svc.Start)
+	if opsService != nil && (cfg == nil || cfg.Deployment.RunsSingletonJobs()) {
 		opsService.SetCleanupReloader(svc)
 	}
 	return svc
@@ -570,9 +571,9 @@ func ProvideOpsSystemLogSink(opsRepo OpsRepository) *OpsSystemLogSink {
 
 // ProvideAuditLogService 创建操作审计日志服务并启动异步写入与保留期清理协程。
 // 停止逻辑挂在 cmd/server 的 provideCleanup。
-func ProvideAuditLogService(repo AuditLogRepository, settingService *SettingService) *AuditLogService {
+func ProvideAuditLogService(repo AuditLogRepository, settingService *SettingService, cfg *config.Config) *AuditLogService {
 	svc := NewAuditLogService(repo, settingService)
-	svc.Start()
+	svc.StartForRole(cfg == nil || cfg.Deployment.RunsSingletonJobs())
 	return svc
 }
 
@@ -611,7 +612,7 @@ func ProvideSystemOperationLockService(repo IdempotencyRepository, cfg *config.C
 
 func ProvideIdempotencyCleanupService(repo IdempotencyRepository, cfg *config.Config) *IdempotencyCleanupService {
 	svc := NewIdempotencyCleanupService(repo, cfg)
-	svc.Start()
+	startSingletonJob(cfg, "idempotency_cleanup", svc.Start)
 	return svc
 }
 
@@ -632,7 +633,7 @@ func ProvideScheduledTestRunnerService(
 	cfg *config.Config,
 ) *ScheduledTestRunnerService {
 	svc := NewScheduledTestRunnerService(planRepo, scheduledSvc, accountTestSvc, rateLimitSvc, cfg)
-	svc.Start()
+	startSingletonJob(cfg, "scheduled_test_runner", svc.Start)
 	return svc
 }
 
@@ -645,7 +646,7 @@ func ProvideOpsScheduledReportService(
 	cfg *config.Config,
 ) *OpsScheduledReportService {
 	svc := NewOpsScheduledReportService(opsService, userService, emailService, redisClient, cfg)
-	svc.Start()
+	startSingletonJob(cfg, "ops_scheduled_report", svc.Start)
 	return svc
 }
 
@@ -697,7 +698,7 @@ func ProvideBackupService(
 ) *BackupService {
 	svc := NewBackupService(settingRepo, cfg, encryptor, storeFactory, dumper)
 	svc.SetLeaderLock(lockCache, db)
-	svc.Start()
+	startSingletonJob(cfg, "backup", svc.Start)
 	return svc
 }
 
@@ -951,7 +952,7 @@ var ProviderSet = wire.NewSet(
 // ProvideUserPlatformQuotaUsageFlusher 创建并启动 UserPlatformQuotaUsageFlusher。
 func ProvideUserPlatformQuotaUsageFlusher(cfg *config.Config, cache BillingCache, quotaRepo UserPlatformQuotaRepository, tw *TimingWheelService) *UserPlatformQuotaUsageFlusher {
 	svc := NewUserPlatformQuotaUsageFlusher(cfg, cache, quotaRepo, tw)
-	svc.Start()
+	startSingletonJob(cfg, "user_platform_quota_flusher", svc.Start)
 	return svc
 }
 
@@ -976,10 +977,10 @@ func ProvidePaymentService(entClient *dbent.Client, registry *payment.Registry, 
 }
 
 // ProvidePaymentOrderExpiryService creates and starts PaymentOrderExpiryService.
-func ProvidePaymentOrderExpiryService(paymentSvc *PaymentService, lockCache LeaderLockCache, db *sql.DB) *PaymentOrderExpiryService {
+func ProvidePaymentOrderExpiryService(paymentSvc *PaymentService, lockCache LeaderLockCache, db *sql.DB, cfg *config.Config) *PaymentOrderExpiryService {
 	svc := NewPaymentOrderExpiryService(paymentSvc, 60*time.Second)
 	svc.SetLeaderLock(lockCache, db)
-	svc.Start()
+	startSingletonJob(cfg, "payment_order_expiry", svc.Start)
 	return svc
 }
 
@@ -1006,16 +1007,21 @@ func ProvideChannelMonitorRunner(
 	svc *ChannelMonitorService,
 	settingService *SettingService,
 	quotaFetcher *ChannelMonitorQuotaFetcher,
+	cfg *config.Config,
 ) *ChannelMonitorRunner {
 	r := NewChannelMonitorRunner(svc, settingService)
 	if svc != nil {
 		// Ensure runtime reader is set even if ProvideChannelMonitorService
 		// was constructed without settings (tests / alternate providers).
 		svc.SetRuntimeReader(settingService)
-		svc.SetScheduler(r)
 		svc.SetQuotaFetcher(quotaFetcher)
+		if cfg == nil || cfg.Deployment.RunsSingletonJobs() {
+			svc.SetScheduler(r)
+		}
 	}
-	r.Start()
+	if cfg == nil || cfg.Deployment.RunsSingletonJobs() {
+		startSingletonJob(cfg, "channel_monitor_runner", r.Start)
+	}
 	return r
 }
 
