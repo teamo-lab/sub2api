@@ -97,3 +97,17 @@ func TestErrorRecoveryCommittedStreamUsesSSEError(t *testing.T) {
 	require.Contains(t, w.Body.String(), "event: error")
 	require.Contains(t, w.Body.String(), "server_is_overloaded")
 }
+
+// 中转上游把错误装在 SSE 帧里连同 5xx 状态码返回（线上账号 69 样本）：
+// code 必须能从 data 载荷里取出来，否则恢复规则永远不匹配。
+func TestRecoveryErrorCodeParsesSSEFramedBodies(t *testing.T) {
+	sse := []byte("event: error\ndata: {\"error\":{\"code\":\"server_error\",\"message\":\"Our servers are currently overloaded. Please try again later.\",\"type\":\"service_unavailable_error\"},\"sequence_number\":2,\"type\":\"error\"}\n\n")
+	require.Equal(t, "server_error", recoveryErrorCode(sse))
+
+	multi := []byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\"}}\n\ndata: {\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"slow down\"}}\n\n")
+	require.Equal(t, "rate_limit_exceeded", recoveryErrorCode(multi))
+
+	require.Equal(t, "server_error", recoveryErrorCode([]byte(`{"error":{"code":"server_error"}}`)))
+	require.Equal(t, "", recoveryErrorCode([]byte("event: ping\ndata: {\"type\":\"ping\"}\n\n")))
+	require.Equal(t, "", recoveryErrorCode([]byte("plain text failure")))
+}
