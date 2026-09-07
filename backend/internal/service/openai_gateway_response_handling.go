@@ -734,8 +734,10 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			// 写入客户端（客户端断开后继续 drain 上游）
 			if !clientDisconnected && !failureDelivered && !suppressCurrentEvent {
 				shouldFlush := queueDrained && (clientOutputStarted || startsClientOutput)
-				if firstTokenMs == nil && startsVisibleOutput {
-					// 保证首个 token 事件尽快出站，避免影响 TTFT。
+				if firstTokenMs == nil && startsVisibleOutput && startsClientOutput {
+					// 保证首个 token 事件尽快出站，避免影响 TTFT。工具参数增量
+					// 是可见输出但被暂存（见 openAIStreamDataStartsClientOutput），
+					// 不能借 TTFT 通道提前出站，否则参数中途失败又漏半截给下游。
 					shouldFlush = true
 				}
 				eventShouldFlush = eventShouldFlush || shouldFlush
