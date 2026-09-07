@@ -1890,12 +1890,18 @@ func (s *OpenAIGatewayService) newOpenAIStreamFailoverErrorWithModel(
 	if statusCode == http.StatusTooManyRequests {
 		errType = "rate_limit_error"
 	}
-	body, _ := json.Marshal(gin.H{
-		"error": gin.H{
-			"type":    errType,
-			"message": message,
-		},
-	})
+	// 上游流内错误码必须随信封一起下传：错误恢复规则（error_passthrough_rules 的
+	// recovery_policy）以 upstream_codes 匹配，而 matchRecoveryRule 第一步就是
+	// recoveryErrorCode(ResponseBody)——取不到 code 直接放弃匹配。此前信封只带
+	// type/message，导致流内 429 / 503 / 502（线上主力失败类）永远进不了换号恢复。
+	errorEnvelope := gin.H{
+		"type":    errType,
+		"message": message,
+	}
+	if upstreamCode := openAIStreamFailedEventErrorCode(payload); upstreamCode != "" {
+		errorEnvelope["code"] = upstreamCode
+	}
+	body, _ := json.Marshal(gin.H{"error": errorEnvelope})
 	retryableOnSameAccount := openAIStreamFailedEventRetryableOnSameAccount(account, payload, message)
 	// 流终止事件承载在 HTTP 200 内，外层响应头描述的是成功流状态，而不是语义上的
 	// 429 事件。仅在配额分类时忽略这些头；故障转移错误仍保留它们，使 Retry-After
