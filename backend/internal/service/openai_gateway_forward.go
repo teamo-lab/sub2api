@@ -132,6 +132,16 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			return nil, err
 		}
 	}
+	if shouldStripOpenAIResponsesInternalMetadata(account) {
+		body, err = stripOpenAIResponsesInternalMetadata(body)
+		if err != nil {
+			setOpsUpstreamError(c, http.StatusBadRequest, err.Error(), "")
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+				"type": "invalid_request_error", "message": err.Error(), "param": "input",
+			}})
+			return nil, err
+		}
+	}
 
 	nativeCNResponses := account.UsesNativeCNResponses()
 	nativeDeepSeekResponses := account.Platform == PlatformDeepseek && nativeCNResponses

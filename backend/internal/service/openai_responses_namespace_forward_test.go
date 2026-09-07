@@ -168,3 +168,75 @@ func TestOpenAIGatewayService_ForwardClearsStaleNamespaceNames(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, openAIResponsesNamespaceNames(c))
 }
+
+// API Key 出口（中转 / Azure）打开摊平开关后：namespace 声明被摊成平名工具、历史
+// 调用项的 namespace 被清掉、Codex 桌面端附带的 internal_chat_message_metadata_passthrough
+// 也不再转发。线上样本：中转丢 namespace 后上游 400 "Missing namespace for
+// function_call"，Azure / 标准 Responses 对该元数据字段 400 "Unknown parameter"。
+func TestOpenAIGatewayService_APIKeyFlattenStripsNamespacesAndInternalMetadata(t *testing.T) {
+	body := []byte(`{
+	"model":"gpt-6-astra",
+	"stream":false,
+	"instructions":"test",
+	"tools":[
+		{"type":"namespace","name":"collaboration","description":"Tools for spawning and managing sub-agents.","tools":[
+			{"type":"function","name":"spawn_agent","parameters":{"type":"object"}}
+		]},
+		{"type":"function","name":"exec","parameters":{"type":"object"}}
+	],
+	"input":[
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}],"internal_chat_message_metadata_passthrough":{"cell_id":"c1"}},
+		{"type":"function_call","namespace":"collaboration","name":"spawn_agent","call_id":"call_1","arguments":"{}"},
+		{"type":"function_call_output","call_id":"call_1","output":"ok"}
+	]
+}`)
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		newOpenAIRejectedFieldTestResponse(http.StatusOK, namespaceForwardOKResponse),
+	}}
+	c := newOpenAIRejectedFieldTestContext(body)
+	account := newOpenAIRejectedFieldTestAccount()
+	account.Extra["openai_responses_flatten_namespaces"] = true
+
+	result, err := newOpenAIRejectedFieldTestService(upstream).Forward(context.Background(), c, account, body)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, upstream.bodies, 1)
+	forwarded := upstream.bodies[0]
+
+	require.False(t, gjson.GetBytes(forwarded, `tools.#(type=="namespace")`).Exists(), "namespace 声明必须被摊平")
+	require.Contains(t, string(forwarded), "collaboration__spawn_agent")
+	require.NotContains(t, string(forwarded), "internal_chat_message_metadata_passthrough")
+	for _, item := range gjson.GetBytes(forwarded, "input").Array() {
+		require.False(t, item.Get("namespace").Exists(), "摊平后调用项不得残留 namespace")
+	}
+	require.Equal(t, "collaboration__spawn_agent", gjson.GetBytes(forwarded, "input.1.name").String())
+}
+
+// 开关未打开的 API Key 出口保持原行为：namespace 声明与调用项 namespace 原样转发，
+// 但 internal_chat_message_metadata_passthrough 仍然清掉。
+func TestOpenAIGatewayService_APIKeyDefaultKeepsNamespacesButStripsInternalMetadata(t *testing.T) {
+	body := []byte(`{
+	"model":"gpt-6-astra",
+	"stream":false,
+	"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent","parameters":{"type":"object"}}]}],
+	"input":[
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}],"internal_chat_message_metadata_passthrough":{"cell_id":"c1"}},
+		{"type":"function_call","namespace":"collaboration","name":"spawn_agent","call_id":"call_1","arguments":"{}"}
+	]
+}`)
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		newOpenAIRejectedFieldTestResponse(http.StatusOK, namespaceForwardOKResponse),
+	}}
+	c := newOpenAIRejectedFieldTestContext(body)
+
+	result, err := newOpenAIRejectedFieldTestService(upstream).Forward(context.Background(), c, newOpenAIRejectedFieldTestAccount(), body)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, upstream.bodies, 1)
+	forwarded := upstream.bodies[0]
+	require.True(t, gjson.GetBytes(forwarded, `tools.#(type=="namespace")`).Exists())
+	require.Equal(t, "collaboration", gjson.GetBytes(forwarded, "input.1.namespace").String())
+	require.NotContains(t, string(forwarded), "internal_chat_message_metadata_passthrough")
+}
