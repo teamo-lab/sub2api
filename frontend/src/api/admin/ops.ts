@@ -13,6 +13,16 @@ export interface OpsRequestOptions {
   signal?: AbortSignal
 }
 
+export interface OpsDashboardFilterParams {
+  time_range?: '5m' | '30m' | '1h' | '6h' | '24h'
+  start_time?: string
+  end_time?: string
+  platform?: string
+  group_id?: number | null
+  model?: string
+  mode?: OpsQueryMode
+}
+
 export type OpsUpstreamErrorEvent = {
   at_unix_ms?: number
   platform?: string
@@ -961,14 +971,7 @@ export interface OpsErrorDetail extends OpsErrorLog {
 export type OpsErrorLogsResponse = PaginatedResponse<OpsErrorLog>
 
 export async function getDashboardOverview(
-  params: {
-  time_range?: '5m' | '30m' | '1h' | '6h' | '24h'
-  start_time?: string
-  end_time?: string
-  platform?: string
-  group_id?: number | null
-  mode?: OpsQueryMode
-  },
+  params: OpsDashboardFilterParams,
   options: OpsRequestOptions = {}
 ): Promise<OpsDashboardOverview> {
   const { data } = await apiClient.get<OpsDashboardOverview>('/admin/ops/dashboard/overview', {
@@ -979,14 +982,7 @@ export async function getDashboardOverview(
 }
 
 export async function getDashboardSnapshotV2(
-  params: {
-  time_range?: '5m' | '30m' | '1h' | '6h' | '24h'
-  start_time?: string
-  end_time?: string
-  platform?: string
-  group_id?: number | null
-  mode?: OpsQueryMode
-  },
+  params: OpsDashboardFilterParams,
   options: OpsRequestOptions = {}
 ): Promise<OpsDashboardSnapshotV2Response> {
   const { data } = await apiClient.get<OpsDashboardSnapshotV2Response>('/admin/ops/dashboard/snapshot-v2', {
@@ -997,14 +993,7 @@ export async function getDashboardSnapshotV2(
 }
 
 export async function getThroughputTrend(
-  params: {
-  time_range?: '5m' | '30m' | '1h' | '6h' | '24h'
-  start_time?: string
-  end_time?: string
-  platform?: string
-  group_id?: number | null
-  mode?: OpsQueryMode
-  },
+  params: OpsDashboardFilterParams,
   options: OpsRequestOptions = {}
 ): Promise<OpsThroughputTrendResponse> {
   const { data } = await apiClient.get<OpsThroughputTrendResponse>('/admin/ops/dashboard/throughput-trend', {
@@ -1015,14 +1004,7 @@ export async function getThroughputTrend(
 }
 
 export async function getLatencyHistogram(
-  params: {
-  time_range?: '5m' | '30m' | '1h' | '6h' | '24h'
-  start_time?: string
-  end_time?: string
-  platform?: string
-  group_id?: number | null
-  mode?: OpsQueryMode
-  },
+  params: OpsDashboardFilterParams,
   options: OpsRequestOptions = {}
 ): Promise<OpsLatencyHistogramResponse> {
   const { data } = await apiClient.get<OpsLatencyHistogramResponse>('/admin/ops/dashboard/latency-histogram', {
@@ -1033,14 +1015,7 @@ export async function getLatencyHistogram(
 }
 
 export async function getErrorTrend(
-  params: {
-  time_range?: '5m' | '30m' | '1h' | '6h' | '24h'
-  start_time?: string
-  end_time?: string
-  platform?: string
-  group_id?: number | null
-  mode?: OpsQueryMode
-  },
+  params: OpsDashboardFilterParams,
   options: OpsRequestOptions = {}
 ): Promise<OpsErrorTrendResponse> {
   const { data } = await apiClient.get<OpsErrorTrendResponse>('/admin/ops/dashboard/error-trend', {
@@ -1051,14 +1026,7 @@ export async function getErrorTrend(
 }
 
 export async function getErrorDistribution(
-  params: {
-  time_range?: '5m' | '30m' | '1h' | '6h' | '24h'
-  start_time?: string
-  end_time?: string
-  platform?: string
-  group_id?: number | null
-  mode?: OpsQueryMode
-  },
+  params: OpsDashboardFilterParams,
   options: OpsRequestOptions = {}
 ): Promise<OpsErrorDistributionResponse> {
   const { data } = await apiClient.get<OpsErrorDistributionResponse>('/admin/ops/dashboard/error-distribution', {
@@ -1066,6 +1034,17 @@ export async function getErrorDistribution(
     signal: options.signal
   })
   return data
+}
+
+export async function getDashboardModels(
+  params: OpsDashboardFilterParams,
+  options: OpsRequestOptions = {}
+): Promise<string[]> {
+  const { data } = await apiClient.get<{ models: string[] }>('/admin/ops/dashboard/models', {
+    params,
+    signal: options.signal
+  })
+  return data.models ?? []
 }
 
 export async function getOpenAITokenStats(
@@ -1312,6 +1291,7 @@ export const opsAPI = {
   getLatencyHistogram,
   getErrorTrend,
   getErrorDistribution,
+  getDashboardModels,
   getOpenAITokenStats,
   getConcurrencyStats,
   getUserConcurrencyStats,

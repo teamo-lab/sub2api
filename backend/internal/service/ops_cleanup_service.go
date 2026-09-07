@@ -374,6 +374,10 @@ func (s *OpsCleanupService) runCleanupOnce(ctx context.Context) (opsCleanupDelet
 		{effective.MinuteMetricsRetentionDays, "ops_system_metrics", "created_at", false, &out.systemMetrics},
 		{effective.HourlyMetricsRetentionDays, "ops_metrics_hourly", "bucket_start", false, &out.hourlyPreagg},
 		{effective.HourlyMetricsRetentionDays, "ops_metrics_daily", "bucket_date", true, &out.dailyPreagg},
+		// Model rollup retention is intentionally fixed: the dashboard routing
+		// contract depends on 5m=14d and hourly=90d independently of legacy UI settings.
+		{int(opsModel5mRetention / (24 * time.Hour)), "ops_model_metrics_5m", "bucket_start", false, &out.model5mPreagg},
+		{int(opsModelHourlyRetention / (24 * time.Hour)), "ops_model_metrics_hourly", "bucket_start", false, &out.modelHourlyPreagg},
 	}
 
 	for _, t := range targets {
@@ -386,6 +390,29 @@ func (s *OpsCleanupService) runCleanupOnce(ctx context.Context) (opsCleanupDelet
 			return out, err
 		}
 		*t.counter = n
+	}
+
+	coverageTargets := []struct {
+		days, resolution int
+		counter          *int64
+	}{{int(opsModel5mRetention / (24 * time.Hour)), 300, &out.model5mCoverage}, {int(opsModelHourlyRetention / (24 * time.Hour)), 3600, &out.modelHourlyCoverage}}
+	for _, target := range coverageTargets {
+		cutoff := now.AddDate(0, 0, -target.days)
+		q := `WITH batch AS (SELECT bucket_start FROM ops_model_metrics_coverage WHERE resolution_seconds=$1 AND bucket_start < $2 ORDER BY bucket_start LIMIT $3) DELETE FROM ops_model_metrics_coverage c USING batch b WHERE c.resolution_seconds=$1 AND c.bucket_start=b.bucket_start`
+		for {
+			res, err := s.db.ExecContext(ctx, q, target.resolution, cutoff, opsCleanupBatchSize)
+			if err != nil {
+				return out, err
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return out, err
+			}
+			*target.counter += n
+			if n < opsCleanupBatchSize {
+				break
+			}
+		}
 	}
 
 	// Channel monitor 每日维护（聚合昨日明细 + 软删过期明细/聚合）。

@@ -59,6 +59,39 @@ func TestIsMissingRelationError(t *testing.T) {
 	}
 }
 
+func TestOpsModelRollupRetentionIsFixed(t *testing.T) {
+	if got := opsModel5mRetention / (5 * time.Minute); got != 4032 {
+		t.Fatalf("5m retained bucket count = %d", got)
+	}
+	if got := opsModelHourlyRetention / time.Hour; got != 2160 {
+		t.Fatalf("hourly retained bucket count = %d", got)
+	}
+}
+
+func TestModelAggregationPolicy(t *testing.T) {
+	cases := []struct {
+		resolution int
+		retention  time.Duration
+		step       time.Duration
+		chunk      time.Duration
+	}{
+		{300, opsModel5mRetention, 5 * time.Minute, 6 * time.Hour},
+		{3600, opsModelHourlyRetention, time.Hour, 24 * time.Hour},
+	}
+	for _, tc := range cases {
+		var retention, step, chunk time.Duration
+		switch tc.resolution {
+		case 300:
+			retention, step, chunk = opsModel5mRetention, 5*time.Minute, 6*time.Hour
+		case 3600:
+			retention, step, chunk = opsModelHourlyRetention, time.Hour, 24*time.Hour
+		}
+		if retention != tc.retention || step != tc.step || chunk != tc.chunk {
+			t.Fatalf("resolution %d policy=(%s,%s,%s)", tc.resolution, retention, step, chunk)
+		}
+	}
+}
+
 type fakeErr string
 
 func (e fakeErr) Error() string { return string(e) }

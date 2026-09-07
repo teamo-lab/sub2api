@@ -29,6 +29,14 @@ func (r *opsRepository) GetDashboardOverview(ctx context.Context, filter *servic
 	}
 
 	mode := filter.QueryMode
+	if strings.TrimSpace(filter.Model) != "" {
+		if filter.QueryMode != service.OpsQueryModeRaw {
+			if out, ok, err := r.getModelDashboardOverviewRollup(ctx, filter); err != nil || ok {
+				return out, err
+			}
+		}
+		return r.getDashboardOverviewRaw(ctx, filter)
+	}
 	if !mode.IsValid() {
 		mode = service.OpsQueryModeRaw
 	}
@@ -975,9 +983,11 @@ func isQueryTimeoutErr(err error) bool {
 func buildUsageWhere(filter *service.OpsDashboardFilter, start, end time.Time, startIndex int) (join string, where string, args []any, nextIndex int) {
 	platform := ""
 	groupID := (*int64)(nil)
+	model := ""
 	if filter != nil {
 		platform = strings.TrimSpace(strings.ToLower(filter.Platform))
 		groupID = filter.GroupID
+		model = strings.TrimSpace(filter.Model)
 	}
 
 	idx := startIndex
@@ -1004,6 +1014,11 @@ func buildUsageWhere(filter *service.OpsDashboardFilter, start, end time.Time, s
 		clauses = append(clauses, fmt.Sprintf("COALESCE(NULLIF(g.platform,''), a.platform) = $%d", idx))
 		idx++
 	}
+	if model != "" {
+		args = append(args, model)
+		clauses = append(clauses, fmt.Sprintf("COALESCE(NULLIF(BTRIM(ul.requested_model), ''), ul.model) = $%d", idx))
+		idx++
+	}
 
 	where = "WHERE " + strings.Join(clauses, " AND ")
 	return join, where, args, idx
@@ -1012,9 +1027,11 @@ func buildUsageWhere(filter *service.OpsDashboardFilter, start, end time.Time, s
 func buildErrorWhere(filter *service.OpsDashboardFilter, start, end time.Time, startIndex int) (where string, args []any, nextIndex int) {
 	platform := ""
 	groupID := (*int64)(nil)
+	model := ""
 	if filter != nil {
 		platform = strings.TrimSpace(strings.ToLower(filter.Platform))
 		groupID = filter.GroupID
+		model = strings.TrimSpace(filter.Model)
 	}
 
 	idx := startIndex
@@ -1038,6 +1055,11 @@ func buildErrorWhere(filter *service.OpsDashboardFilter, start, end time.Time, s
 	if platform != "" {
 		args = append(args, platform)
 		clauses = append(clauses, fmt.Sprintf("platform = $%d", idx))
+		idx++
+	}
+	if model != "" {
+		args = append(args, model)
+		clauses = append(clauses, fmt.Sprintf("COALESCE(NULLIF(BTRIM(requested_model), ''), model) = $%d", idx))
 		idx++
 	}
 

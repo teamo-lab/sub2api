@@ -27,6 +27,7 @@ type opsDashboardSnapshotV2CacheKey struct {
 	StartTime    string               `json:"start_time"`
 	EndTime      string               `json:"end_time"`
 	Platform     string               `json:"platform"`
+	Model        string               `json:"model"`
 	GroupID      *int64               `json:"group_id"`
 	QueryMode    service.OpsQueryMode `json:"mode"`
 	BucketSecond int                  `json:"bucket_second"`
@@ -49,11 +50,13 @@ func (h *OpsHandler) GetDashboardSnapshotV2(c *gin.Context) {
 		response.BadRequest(c, err.Error())
 		return
 	}
+	startTime, endTime = alignModelDashboardPresetWindow(c, startTime, endTime)
 
 	filter := &service.OpsDashboardFilter{
 		StartTime: startTime,
 		EndTime:   endTime,
 		Platform:  strings.TrimSpace(c.Query("platform")),
+		Model:     strings.TrimSpace(c.Query("model")),
 		QueryMode: parseOpsQueryMode(c),
 	}
 	if v := strings.TrimSpace(c.Query("group_id")); v != "" {
@@ -70,6 +73,7 @@ func (h *OpsHandler) GetDashboardSnapshotV2(c *gin.Context) {
 		StartTime:    startTime.UTC().Format(time.RFC3339),
 		EndTime:      endTime.UTC().Format(time.RFC3339),
 		Platform:     filter.Platform,
+		Model:        filter.Model,
 		GroupID:      filter.GroupID,
 		QueryMode:    filter.QueryMode,
 		BucketSecond: bucketSeconds,
