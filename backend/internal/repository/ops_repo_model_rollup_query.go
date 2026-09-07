@@ -34,13 +34,19 @@ func modelRollupWindow(ctx context.Context, r *opsRepository, f *service.OpsDash
 	if !start.Before(end) || !start.Equal(start.Truncate(step)) || !end.Equal(end.Truncate(step)) {
 		return s, false, nil
 	}
+	covered, err := modelRollupCoverage(ctx, r, s, start, end)
+	return s, covered, err
+}
+
+func modelRollupCoverage(ctx context.Context, r *opsRepository, s modelRollupSpec, start, end time.Time) (bool, error) {
+	step := time.Duration(s.seconds) * time.Second
 	expected := int64(end.Sub(start) / step)
 	var covered int64
-	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM ops_model_metrics_coverage WHERE resolution_seconds=$1 AND bucket_start >= $2 AND bucket_start < $3`, s.seconds, start, end).Scan(&covered)
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM ops_model_metrics_coverage WHERE resolution_seconds=$1 AND bucket_start >= $2 AND bucket_start < $3`, s.seconds, start.UTC(), end.UTC()).Scan(&covered)
 	if err != nil {
-		return s, false, err
+		return false, err
 	}
-	return s, covered == expected, nil
+	return covered == expected, nil
 }
 
 func modelRollupWhere(f *service.OpsDashboardFilter, startIndex int) (string, []any) {
@@ -62,6 +68,33 @@ func modelRollupWhere(f *service.OpsDashboardFilter, startIndex int) (string, []
 		clauses = append(clauses, "platform IS NULL", "group_id IS NULL")
 	}
 	return strings.Join(clauses, " AND "), args
+}
+
+func (r *opsRepository) listModelMetricsRows(ctx context.Context, f *service.OpsDashboardFilter, start, end time.Time) ([]opsHourlyMetricsRow, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("nil ops repository")
+	}
+	if !start.Before(end) {
+		return []opsHourlyMetricsRow{}, nil
+	}
+	s := modelRollupFor(f)
+	w, args := modelRollupWhere(f, 3)
+	args = append([]any{start.UTC(), end.UTC()}, args...)
+	q := fmt.Sprintf(`SELECT bucket_start,success_count,error_count_total,business_limited_count,error_count_sla,upstream_error_count_excl_429_529,upstream_429_count,upstream_529_count,token_consumed,duration_p50_ms,duration_p90_ms,duration_p95_ms,duration_p99_ms,duration_avg_ms,duration_max_ms,ttft_p50_ms,ttft_p90_ms,ttft_p95_ms,ttft_p99_ms,ttft_avg_ms,ttft_max_ms,ttft_sample_count FROM %s WHERE bucket_start >= $1 AND bucket_start < $2 AND %s ORDER BY bucket_start ASC`, s.table, w)
+	rows, err := r.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]opsHourlyMetricsRow, 0, int(end.Sub(start)/(time.Duration(s.seconds)*time.Second)))
+	for rows.Next() {
+		var row opsHourlyMetricsRow
+		if err := rows.Scan(&row.bucketStart, &row.successCount, &row.errorCountTotal, &row.businessLimitedCount, &row.errorCountSLA, &row.upstreamErrorCountExcl429529, &row.upstream429Count, &row.upstream529Count, &row.tokenConsumed, &row.durationP50, &row.durationP90, &row.durationP95, &row.durationP99, &row.durationAvg, &row.durationMax, &row.ttftP50, &row.ttftP90, &row.ttftP95, &row.ttftP99, &row.ttftAvg, &row.ttftMax, &row.ttftSampleCount); err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
 }
 
 func unavailableModelRollup(f *service.OpsDashboardFilter) (bool, error) {
