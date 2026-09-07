@@ -1082,9 +1082,66 @@ func openAIStreamClientOutputStarted(c *gin.Context, localStarted bool) bool {
 const openAIPassthroughPendingMaxBytes = 4 << 20
 
 func openAIStreamEventIsPreamble(eventType string) bool {
-	switch strings.TrimSpace(eventType) {
-	case "response.created", "response.in_progress":
+	switch strings.ToLower(strings.TrimSpace(eventType)) {
+	case "response.created",
+		"response.in_progress",
+		"response.queued",
+		"response.metadata",
+		"codex.rate_limits",
+		"codex.response.metadata",
+		"ping",
+		"heartbeat",
+		"keepalive",
+		"keep-alive":
 		return true
+	default:
+		return false
+	}
+}
+
+// openAIStreamDataIsKeepalive recognizes upstream keepalives that arrive as a
+// data frame instead of an SSE comment. They prove the TCP stream is live, not
+// that the model has produced an answer, so they must stay attempt-local until
+// a semantic commit point is reached.
+func openAIStreamDataIsKeepalive(data, eventType string) bool {
+	if openAIStreamEventIsPreamble(eventType) {
+		return true
+	}
+	trimmed := strings.TrimSpace(data)
+	if strings.EqualFold(trimmed, "SSE-Keep-Alive") {
+		return true
+	}
+	if !gjson.Valid(trimmed) {
+		return false
+	}
+	if !gjson.Get(trimmed, "SSE-Keep-Alive").Bool() && !gjson.Get(trimmed, "sse_keep_alive").Bool() {
+		return false
+	}
+	if eventType == "" {
+		eventType = gjson.Get(trimmed, "type").String()
+	}
+	if strings.TrimSpace(eventType) != "response.output_text.delta" {
+		return true
+	}
+	delta := gjson.Get(trimmed, "delta")
+	return !delta.Exists() || delta.Type != gjson.String || openAIStreamTextDeltaIsOnlyFiller(trimmed, eventType)
+}
+
+// openAIStreamKnownDeltaIsEmpty identifies protocol lifecycle deltas that
+// carry no usable content. Unknown delta families intentionally remain
+// fail-closed in openAIStreamDataStartsClientOutput below.
+func openAIStreamKnownDeltaIsEmpty(data, eventType string) bool {
+	trimmed := strings.TrimSpace(data)
+	if !gjson.Valid(trimmed) {
+		return false
+	}
+	if eventType == "" {
+		eventType = gjson.Get(trimmed, "type").String()
+	}
+	switch strings.TrimSpace(eventType) {
+	case "response.output_text.delta", "response.reasoning_text.delta", "response.reasoning_summary_text.delta", "response.audio_transcript.delta":
+		delta := gjson.Get(trimmed, "delta")
+		return !delta.Exists() || delta.Type != gjson.String || strings.TrimSpace(delta.String()) == ""
 	default:
 		return false
 	}
@@ -1148,7 +1205,7 @@ func openAIStreamAddedEventStartsClientOutput(payload []byte, eventType string) 
 		default:
 			return true
 		}
-	case "response.content_part.added":
+	case "response.content_part.added", "response.content_part.done":
 		part := gjson.GetBytes(payload, "part")
 		if !part.Exists() || !part.IsObject() {
 			return true
@@ -1161,7 +1218,7 @@ func openAIStreamAddedEventStartsClientOutput(payload []byte, eventType string) 
 		default:
 			return true
 		}
-	case "response.reasoning_summary_part.added":
+	case "response.reasoning_summary_part.added", "response.reasoning_summary_part.done":
 		part := gjson.GetBytes(payload, "part")
 		if !part.Exists() || !part.IsObject() || strings.TrimSpace(part.Get("type").String()) != "summary_text" {
 			return true
@@ -1197,14 +1254,20 @@ func openAIStreamTextDeltaIsOnlyFiller(data, eventType string) bool {
 }
 
 func openAIStreamDataStartsClientOutput(data, eventType string) bool {
-	if openAIStreamTextDeltaIsOnlyFiller(data, eventType) {
-		return false
-	}
 	trimmed := strings.TrimSpace(data)
 	if trimmed == "" {
 		return false
 	}
-	switch strings.TrimSpace(eventType) {
+	eventType = strings.TrimSpace(eventType)
+	if eventType == "" && gjson.Valid(trimmed) {
+		eventType = strings.TrimSpace(gjson.Get(trimmed, "type").String())
+	}
+	if openAIStreamDataIsKeepalive(trimmed, eventType) ||
+		openAIStreamTextDeltaIsOnlyFiller(trimmed, eventType) ||
+		openAIStreamKnownDeltaIsEmpty(trimmed, eventType) {
+		return false
+	}
+	switch eventType {
 	case "response.failed":
 		return false
 	case "error":
@@ -1215,7 +1278,7 @@ func openAIStreamDataStartsClientOutput(data, eventType string) bool {
 		// （content_policy / invalid_request 等）维持原样转发，保留上游错误细节。
 		payload := []byte(trimmed)
 		return !openAIStreamFailedEventShouldFailover(payload, extractOpenAISSEErrorMessage(payload))
-	case "response.output_item.added", "response.content_part.added", "response.reasoning_summary_part.added":
+	case "response.output_item.added", "response.content_part.added", "response.content_part.done", "response.reasoning_summary_part.added", "response.reasoning_summary_part.done":
 		return openAIStreamAddedEventStartsClientOutput([]byte(trimmed), eventType)
 	case "response.function_call_arguments.delta",
 		"response.function_call_arguments.done",
@@ -1247,9 +1310,6 @@ func openAIStreamItemHasVisibleOutput(item gjson.Result) bool {
 // Structural progress can commit an attempt and disarm first-output failover,
 // but TTFT should start only when the stream carries content a client can use.
 func openAIStreamDataStartsVisibleOutput(data, eventType string) bool {
-	if openAIStreamTextDeltaIsOnlyFiller(data, eventType) {
-		return false
-	}
 	trimmed := strings.TrimSpace(data)
 	if trimmed == "" || trimmed == "[DONE]" || !gjson.Valid(trimmed) {
 		return false
@@ -1257,6 +1317,11 @@ func openAIStreamDataStartsVisibleOutput(data, eventType string) bool {
 	eventType = strings.TrimSpace(eventType)
 	if eventType == "" {
 		eventType = strings.TrimSpace(gjson.Get(trimmed, "type").String())
+	}
+	if openAIStreamDataIsKeepalive(trimmed, eventType) ||
+		openAIStreamTextDeltaIsOnlyFiller(trimmed, eventType) ||
+		openAIStreamKnownDeltaIsEmpty(trimmed, eventType) {
+		return false
 	}
 	if strings.HasSuffix(eventType, ".delta") {
 		delta := gjson.Get(trimmed, "delta")
@@ -1293,9 +1358,6 @@ func openAIStreamDataStartsVisibleOutput(data, eventType string) bool {
 // openAIStreamDataStartsSemanticTTFT 保留 900194fab 之前的 first_token_ms
 // 口径：跳过 Responses preamble 后，首个语义 SSE 事件即视为首 token。
 func openAIStreamDataStartsSemanticTTFT(data, eventType string) bool {
-	if openAIStreamTextDeltaIsOnlyFiller(data, eventType) {
-		return false
-	}
 	trimmed := strings.TrimSpace(data)
 	if trimmed == "" || trimmed == "[DONE]" {
 		return false
@@ -1303,6 +1365,11 @@ func openAIStreamDataStartsSemanticTTFT(data, eventType string) bool {
 	eventType = strings.TrimSpace(eventType)
 	if eventType == "" && gjson.Valid(trimmed) {
 		eventType = strings.TrimSpace(gjson.Get(trimmed, "type").String())
+	}
+	if openAIStreamDataIsKeepalive(trimmed, eventType) ||
+		openAIStreamTextDeltaIsOnlyFiller(trimmed, eventType) ||
+		openAIStreamKnownDeltaIsEmpty(trimmed, eventType) {
+		return false
 	}
 	switch eventType {
 	case "response.failed":
