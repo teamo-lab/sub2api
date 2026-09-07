@@ -505,7 +505,11 @@ func TestOpenAIStreamDataStartsAnswerOutputExcludesReasoning(t *testing.T) {
 		{"reasoning item added", "response.output_item.added", `{"type":"response.output_item.added","item":{"type":"reasoning","summary":[{"type":"summary_text","text":"x"}]}}`, false},
 		{"message text delta", "response.output_text.delta", `{"type":"response.output_text.delta","delta":"x"}`, true},
 		{"empty text delta", "response.output_text.delta", `{"type":"response.output_text.delta","delta":""}`, false},
-		{"function call args done", "response.function_call_arguments.done", `{"type":"response.function_call_arguments.done","arguments":"{}"}`, true},
+		// 参数帧被扣在 pendingLines 里直到 item 完成；答案输出以携带完整参数的
+		// output_item.done 为准（工具参数暂存，见 openAIStreamDataStartsClientOutput）。
+		{"function call args done held", "response.function_call_arguments.done", `{"type":"response.function_call_arguments.done","arguments":"{}"}`, false},
+		{"function call args delta held", "response.function_call_arguments.delta", `{"type":"response.function_call_arguments.delta","delta":"{"}`, false},
+		{"function call item done", "response.output_item.done", `{"type":"response.output_item.done","item":{"type":"function_call","name":"exec","arguments":"{}"}}`, true},
 		{"message item done", "response.output_item.done", `{"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"hi"}]}}`, true},
 		{"completed reasoning only", "response.completed", `{"type":"response.completed","response":{"output":[{"type":"reasoning","summary":[{"type":"summary_text","text":"x"}]}]}}`, false},
 		{"completed with message", "response.completed", `{"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"hi"}]}]}}`, true},

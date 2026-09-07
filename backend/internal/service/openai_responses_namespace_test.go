@@ -47,8 +47,11 @@ func TestShouldFlattenOpenAIResponsesNamespaces(t *testing.T) {
 		{name: "oauth_flatten_enabled_wsv2", account: flattenOAuth, transport: OpenAIUpstreamTransportResponsesWebsocketV2, want: false},
 		// 透传账号先于 WSv2 分支经 HTTP 转发返回，开关打开时仍需摊平。
 		{name: "oauth_flatten_enabled_wsv2_passthrough", account: flattenOAuth, transport: OpenAIUpstreamTransportResponsesWebsocketV2, passthroughEnabled: true, want: true},
-		// 开关仅对 OAuth 生效：API Key 走 chat completions 回退桥时由桥自行摊平。
-		{name: "apikey_flatten_enabled_http", account: flattenAPIKey, transport: OpenAIUpstreamTransportHTTPSSE, want: false},
+		// API Key 出口开关打开时也摊平：NewAPI 类中转会丢掉调用项 namespace，
+		// 上游随即 400 "Missing namespace for function_call"；摊平 + 回程还原是唯一退路。
+		{name: "apikey_flatten_enabled_http", account: flattenAPIKey, transport: OpenAIUpstreamTransportHTTPSSE, want: true},
+		{name: "apikey_flatten_enabled_compact", account: flattenAPIKey, transport: OpenAIUpstreamTransportHTTPSSE, compactPath: true, want: false},
+		{name: "apikey_flatten_enabled_wsv2", account: flattenAPIKey, transport: OpenAIUpstreamTransportResponsesWebsocketV2, want: false},
 		{name: "apikey_http", account: apiKey, transport: OpenAIUpstreamTransportHTTPSSE, want: false},
 		{name: "grok_oauth_http", account: grokOAuth, transport: OpenAIUpstreamTransportHTTPSSE, want: false},
 		{name: "nil_account", account: nil, transport: OpenAIUpstreamTransportHTTPSSE, want: false},
@@ -238,4 +241,64 @@ func TestStripOpenAIResponsesInputNamespacesKeepsToolCallNamespaces(t *testing.T
 	for index := 0; index < 8; index++ {
 		require.False(t, gjson.GetBytes(strippedAll, "input."+strconv.Itoa(index)+".namespace").Exists())
 	}
+}
+
+func TestStripOpenAIResponsesInternalMetadata(t *testing.T) {
+	body := []byte(`{"model":"gpt-6-astra","input":[` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}],"internal_chat_message_metadata_passthrough":{"cell_id":"c1"}},` +
+		`{"type":"function_call","name":"exec","call_id":"call_1","arguments":"{}"},` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"again"}],"internal_chat_message_metadata_passthrough":{"cell_id":"c2","x":1}}` +
+		`],"metadata":{"internal_chat_message_metadata_passthrough":"keep-non-input"}}`)
+
+	stripped, err := stripOpenAIResponsesInternalMetadata(body)
+	require.NoError(t, err)
+	input := gjson.GetBytes(stripped, "input")
+	require.Equal(t, 3, len(input.Array()))
+	for _, item := range input.Array() {
+		require.False(t, item.Get("internal_chat_message_metadata_passthrough").Exists())
+	}
+	require.Equal(t, "hi", gjson.GetBytes(stripped, "input.0.content.0.text").String())
+	require.Equal(t, "exec", gjson.GetBytes(stripped, "input.1.name").String())
+	// 只清 input 项上的字段，其它位置不动。
+	require.Equal(t, "keep-non-input", gjson.GetBytes(stripped, "metadata.internal_chat_message_metadata_passthrough").String())
+
+	untouched := []byte(`{"model":"gpt-6-astra","input":[{"type":"message","role":"user","content":"hi"}]}`)
+	same, err := stripOpenAIResponsesInternalMetadata(untouched)
+	require.NoError(t, err)
+	require.Equal(t, untouched, same)
+
+	require.True(t, shouldStripOpenAIResponsesInternalMetadata(&Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}))
+	require.False(t, shouldStripOpenAIResponsesInternalMetadata(&Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}))
+	require.False(t, shouldStripOpenAIResponsesInternalMetadata(nil))
+}
+
+func TestRepairOpenAIResponsesToolCallNamespaces(t *testing.T) {
+	body := []byte(`{"model":"gpt-6-astra","tools":[` +
+		`{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent"},{"type":"function","name":"send_message"}]},` +
+		`{"type":"namespace","name":"other","tools":[{"type":"function","name":"send_message"}]},` +
+		`{"type":"function","name":"exec"}],` +
+		`"input":[` +
+		`{"type":"function_call","name":"spawn_agent","call_id":"c1","arguments":"{}"},` +
+		`{"type":"function_call","name":"send_message","call_id":"c2","arguments":"{}"},` +
+		`{"type":"function_call","name":"exec","call_id":"c3","arguments":"{}"},` +
+		`{"type":"function_call","namespace":"collaboration","name":"spawn_agent","call_id":"c4","arguments":"{}"},` +
+		`{"type":"message","role":"user","content":"spawn_agent"}]}`)
+
+	repaired, err := repairOpenAIResponsesToolCallNamespaces(body)
+	require.NoError(t, err)
+	// 唯一归属于一个 namespace 的调用项补回 namespace
+	require.Equal(t, "collaboration", gjson.GetBytes(repaired, "input.0.namespace").String())
+	// 两个 namespace 都有 send_message：歧义，不动
+	require.False(t, gjson.GetBytes(repaired, "input.1.namespace").Exists())
+	// 顶层工具不动
+	require.False(t, gjson.GetBytes(repaired, "input.2.namespace").Exists())
+	// 已有 namespace 的保持
+	require.Equal(t, "collaboration", gjson.GetBytes(repaired, "input.3.namespace").String())
+	// 非调用项不动
+	require.False(t, gjson.GetBytes(repaired, "input.4.namespace").Exists())
+
+	plain := []byte(`{"model":"gpt-6-astra","tools":[{"type":"function","name":"exec"}],"input":[{"type":"function_call","name":"exec","call_id":"c1","arguments":"{}"}]}`)
+	same, err := repairOpenAIResponsesToolCallNamespaces(plain)
+	require.NoError(t, err)
+	require.Equal(t, plain, same)
 }

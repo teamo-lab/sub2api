@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -61,6 +62,29 @@ func recoveryContains(values []string, value string) bool {
 	return false
 }
 func recoveryErrorCode(body []byte) string {
+	if code := recoveryErrorCodeFromJSON(body); code != "" {
+		return code
+	}
+	// 中转类上游会把错误装在 SSE 帧里连同 5xx 状态码一起返回
+	// （`event: error\ndata: {...}`）。逐个 data 载荷取 code，取最后一个
+	// 非空值：错误帧总在流尾。
+	if !bytes.Contains(body, []byte("data:")) {
+		return ""
+	}
+	code := ""
+	for _, line := range bytes.Split(body, []byte("\n")) {
+		payload, ok := bytes.CutPrefix(bytes.TrimSpace(line), []byte("data:"))
+		if !ok {
+			continue
+		}
+		if v := recoveryErrorCodeFromJSON(bytes.TrimSpace(payload)); v != "" {
+			code = v
+		}
+	}
+	return code
+}
+
+func recoveryErrorCodeFromJSON(body []byte) string {
 	for _, path := range []string{"error.code", "response.error.code", "code"} {
 		if v := gjson.GetBytes(body, path); v.Type == gjson.String && v.String() != "" {
 			return v.String()
