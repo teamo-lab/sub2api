@@ -1794,6 +1794,13 @@ func openAIStreamErrorEventShouldFailover(payload []byte, message string) bool {
 	if isOpenAITransientProcessingError(http.StatusBadRequest, message, payload) {
 		return true
 	}
+	// 部分上游的裸 error 帧只给结构化 server_error/upstream_error，文案仅为
+	// "Internal server error"，没有临时性关键词。仅补这两个瞬态标识，
+	// 并沿用 response.failed 的请求/策略排除；输出后的重放边界仍由调用方控制。
+	switch strings.ToLower(strings.TrimSpace(recoveryErrorCodeFromJSON(payload))) {
+	case "server_error", "upstream_error":
+		return openAIStreamFailedEventShouldFailover(payload, message)
+	}
 	combined := strings.ToLower(strings.TrimSpace(message + " " +
 		gjson.GetBytes(payload, "error.message").String() + " " +
 		gjson.GetBytes(payload, "response.error.message").String()))
@@ -1997,6 +2004,11 @@ func (s *OpenAIGatewayService) newOpenAIStreamFailoverErrorWithModel(
 	// Preserve the existing generic envelope for unclassified stream failures;
 	// only typed access/capacity failures need the original payload downstream.
 	failoverErr.ResponseBody = body
+	// 原始 type-only 错误也必须能命中显式恢复策略。使用独立元数据，避免
+	// 把信封生成的 upstream_error/rate_limit_error 误当成真实上游 identity。
+	// 空值同样要保留：无结构化错误码时不得从合成信封推断恢复类型。
+	recoveryCode := recoveryErrorCode(payload)
+	failoverErr.RecoveryErrorCode = &recoveryCode
 	return failoverErr
 }
 

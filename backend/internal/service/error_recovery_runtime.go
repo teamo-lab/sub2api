@@ -85,18 +85,27 @@ func recoveryErrorCode(body []byte) string {
 }
 
 func recoveryErrorCodeFromJSON(body []byte) string {
-	for _, path := range []string{"error.code", "response.error.code", "code"} {
+	// 上游可以只返回结构化 error.type。它仅在所有 code 字段都缺失时兜底，
+	// 不能读取顶层/response.type：那些字段通常是 SSE 事件或响应元数据。
+	for _, path := range []string{"error.code", "response.error.code", "code", "error.type", "response.error.type"} {
 		if v := gjson.GetBytes(body, path); v.Type == gjson.String && v.String() != "" {
 			return v.String()
 		}
 	}
 	return ""
 }
-func (s *ErrorPassthroughService) matchRecoveryRule(account *Account, requestedModel string, status int, body []byte) *model.ErrorPassthroughRule {
+func recoveryFailureErrorCode(failure *UpstreamFailoverError) string {
+	if failure.RecoveryErrorCode != nil {
+		return *failure.RecoveryErrorCode
+	}
+	return recoveryErrorCode(failure.ResponseBody)
+}
+
+func (s *ErrorPassthroughService) matchRecoveryRule(account *Account, requestedModel string, failure *UpstreamFailoverError) *model.ErrorPassthroughRule {
 	if s == nil || account == nil {
 		return nil
 	}
-	code := recoveryErrorCode(body)
+	code := recoveryFailureErrorCode(failure)
 	if code == "" {
 		return nil
 	}
@@ -111,7 +120,7 @@ func (s *ErrorPassthroughService) matchRecoveryRule(account *Account, requestedM
 		if !s.platformMatchesCached(r, lower) || !recoveryContains(p.AccountTypes, account.Type) || !recoveryContains(p.Models, requestedModel) || !recoveryContains(p.UpstreamCodes, code) {
 			continue
 		}
-		if s.ruleMatchesOptimized(r, status, body, &text, &done) {
+		if s.ruleMatchesOptimized(r, failure.StatusCode, failure.ResponseBody, &text, &done) {
 			return r.ErrorPassthroughRule
 		}
 	}
@@ -127,14 +136,14 @@ func ApplyErrorRecovery(c *gin.Context, account *Account, requestedModel string,
 	s := recoveryState(c)
 	if s == nil {
 		svc := getBoundErrorPassthroughService(c)
-		rule := svc.matchRecoveryRule(account, requestedModel, failure.StatusCode, failure.ResponseBody)
+		rule := svc.matchRecoveryRule(account, requestedModel, failure)
 		if rule == nil {
 			return ErrorRecoveryDefault
 		}
 		parent := c.Request.Context()
 		ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
 		ctx = context.WithValue(ctx, recoveryContextKey{}, true)
-		s = &errorRecoveryState{rule: rule, parent: parent, cancel: cancel, deadline: time.Now().Add(time.Duration(rule.RecoveryPolicy.BudgetSeconds) * time.Second), retries: make(map[int64]int), code: recoveryErrorCode(failure.ResponseBody), failure: failure}
+		s = &errorRecoveryState{rule: rule, parent: parent, cancel: cancel, deadline: time.Now().Add(time.Duration(rule.RecoveryPolicy.BudgetSeconds) * time.Second), retries: make(map[int64]int), code: recoveryFailureErrorCode(failure), failure: failure}
 		s.timer = time.AfterFunc(time.Until(s.deadline), func() {
 			s.mu.Lock()
 			defer s.mu.Unlock()

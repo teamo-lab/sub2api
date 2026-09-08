@@ -689,6 +689,7 @@ type GatewayFailureReason string
 type UpstreamFailoverError struct {
 	StatusCode               int
 	ResponseBody             []byte        // 上游响应体，用于错误透传规则匹配
+	RecoveryErrorCode        *string       // 合成信封保留原始 code/type；非 nil 空值禁止把生成的 type 当作上游错误码
 	ResponseHeaders          http.Header   // 上游响应头，用于透传 cf-ray/cf-mitigated/content-type 等诊断信息
 	ForceCacheBilling        bool          // Antigravity 粘性会话切换时设为 true
 	RetryableOnSameAccount   bool          // 临时性错误（如 Google 间歇性 400、空响应），应在同一账号上重试 N 次再切换

@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"github.com/Wei-Shaw/sub2api/internal/model"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -113,11 +112,60 @@ func TestRecoveryErrorCodeParsesSSEFramedBodies(t *testing.T) {
 	require.Equal(t, "", recoveryErrorCode([]byte("plain text failure")))
 }
 
-// 流内容量错误（HTTP 200 + SSE error/response.failed）合成的 failover 信封必须
-// 保留上游错误码。matchRecoveryRule 的第一步是 recoveryErrorCode(ResponseBody)，
-// 取不到 code 就直接放弃匹配——信封只带 type/message 时，线上主力失败类
-// （429 rate_limit_exceeded、503 server_error、502 upstream_error）永远进不了
-// 换号恢复，表现为规则配了却零命中。
+func TestRecoveryErrorCodeTypeOnly(t *testing.T) {
+	for _, tc := range []struct{ name, body, want string }{
+		{"json", `{"error":{"type":"service_unavailable_error","message":"temporarily unavailable"}}`, "service_unavailable_error"},
+		{"response_failed", `{"type":"response.failed","response":{"error":{"type":"rate_limit_error","code":null}}}`, "rate_limit_error"},
+		{"sse", "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"service_unavailable_error\"}}\n\n", "service_unavailable_error"},
+		{"sse_response_failed", "data: {\"type\":\"response.created\"}\n\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"type\":\"rate_limit_error\"}}}\n\n", "rate_limit_error"},
+		{"code_before_type", `{"error":{"code":"content_policy_violation","type":"service_unavailable_error"}}`, "content_policy_violation"},
+		{"nested_code_before_type", `{"error":{"type":"service_unavailable_error"},"response":{"error":{"code":"invalid_api_key"}}}`, "invalid_api_key"},
+		{"root_code_before_type", `{"code":"invalid_request_error","error":{"type":"service_unavailable_error"}}`, "invalid_request_error"},
+		{"root_type_is_metadata", `{"type":"service_unavailable_error"}`, ""},
+		{"response_type_is_metadata", `{"type":"response.failed","response":{"type":"service_unavailable_error"}}`, ""},
+		{"echoed_request_is_not_error", `{"request":{"error":{"type":"service_unavailable_error"}}}`, ""},
+		{"non_string_type", `{"error":{"type":{"value":"service_unavailable_error"}}}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, recoveryErrorCode([]byte(tc.body)))
+		})
+	}
+}
+
+func TestErrorRecoveryTypeOnlyRuleScope(t *testing.T) {
+	for _, tc := range []struct {
+		name, accountType, platform, model, body string
+		status                                   int
+		want                                     ErrorRecoveryAction
+	}{
+		{"matching", "apikey", "openai", "gpt-5.1", `{"error":{"type":"service_unavailable_error"}}`, 503, ErrorRecoverySwitch},
+		{"matching_sse", "apikey", "openai", "gpt-5.1", "event: error\ndata: {\"error\":{\"type\":\"service_unavailable_error\"}}\n\n", 503, ErrorRecoverySwitch},
+		{"wrong_account_type", "oauth", "openai", "gpt-5.1", `{"error":{"type":"service_unavailable_error"}}`, 503, ErrorRecoveryDefault},
+		{"wrong_platform", "apikey", "anthropic", "gpt-5.1", `{"error":{"type":"service_unavailable_error"}}`, 503, ErrorRecoveryDefault},
+		{"wrong_model", "apikey", "openai", "other-model", `{"error":{"type":"service_unavailable_error"}}`, 503, ErrorRecoveryDefault},
+		{"wrong_http_status", "apikey", "openai", "gpt-5.1", `{"error":{"type":"service_unavailable_error"}}`, 400, ErrorRecoveryDefault},
+		{"permanent_code_wins", "apikey", "openai", "gpt-5.1", `{"error":{"code":"content_policy_violation","type":"service_unavailable_error"}}`, 503, ErrorRecoveryDefault},
+		{"permanent_type", "apikey", "openai", "gpt-5.1", `{"error":{"type":"invalid_request_error"}}`, 503, ErrorRecoveryDefault},
+		{"unknown_type", "apikey", "openai", "gpt-5.1", `{"error":{"type":"unknown_error"}}`, 503, ErrorRecoveryDefault},
+		{"event_metadata", "apikey", "openai", "gpt-5.1", `{"type":"service_unavailable_error","response":{"type":"service_unavailable_error"}}`, 503, ErrorRecoveryDefault},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _, account, failure := recoveryFixture(t, "apikey", 0, 1)
+			rule := &model.ErrorPassthroughRule{ID: 8, Enabled: true, MatchMode: "all", Platforms: []string{"openai"}, ErrorCodes: []int{503}, RecoveryPolicy: &model.ErrorRecoveryPolicy{Mode: "limited", AccountTypes: []string{"apikey"}, Models: []string{"gpt-5.1"}, UpstreamCodes: []string{"service_unavailable_error"}, AccountSwitches: 1, BudgetSeconds: 1}}
+			svc := &ErrorPassthroughService{}
+			svc.setLocalCache([]*model.ErrorPassthroughRule{rule})
+			BindErrorPassthroughService(c, svc)
+			account.Type, account.Platform = tc.accountType, tc.platform
+			failure.StatusCode, failure.ResponseBody = tc.status, []byte(tc.body)
+			require.Equal(t, tc.want, ApplyErrorRecovery(c, account, tc.model, failure))
+			if tc.want == ErrorRecoveryDefault {
+				require.Nil(t, recoveryState(c))
+			}
+		})
+	}
+}
+
+// 合成信封必须保留原始结构化 code/type，不能用网关生成的类型激活恢复规则。
 func TestStreamFailoverEnvelopeKeepsUpstreamErrorCodeForRecovery(t *testing.T) {
 	cases := []struct {
 		name, payload, wantCode string
@@ -125,26 +173,26 @@ func TestStreamFailoverEnvelopeKeepsUpstreamErrorCodeForRecovery(t *testing.T) {
 		{"rate limit", `{"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded","message":"Upstream rate limit exceeded, please retry later","type":"rate_limit_error"},"status":"failed"}}`, "rate_limit_exceeded"},
 		{"overloaded", `{"error":{"code":"server_error","message":"Our servers are currently overloaded. Please try again later.","type":"service_unavailable_error"},"type":"error"}`, "server_error"},
 		{"upstream error", `{"error":{"code":"upstream_error","message":"Upstream service temporarily unavailable","type":"upstream_error"},"type":"response.failed"}`, "upstream_error"},
+		{"type-only error", `{"type":"error","error":{"type":"api_error","message":"temporarily unavailable"}}`, "api_error"},
+		{"type-only response failure", `{"type":"response.failed","response":{"error":{"type":"service_unavailable_error","message":"temporarily unavailable"}}}`, "service_unavailable_error"},
+		{"unknown error", `{"type":"response.failed","response":{"error":{"message":"something failed"}}}`, ""},
+		{"event metadata", `{"type":"response.failed"}`, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.wantCode, openAIStreamFailedEventErrorCode([]byte(tc.payload)),
-				"上游码提取必须先于信封合成成立")
-
-			envelope := gin.H{"type": "upstream_error", "message": "x"}
-			if code := openAIStreamFailedEventErrorCode([]byte(tc.payload)); code != "" {
-				envelope["code"] = code
+			svc := &OpenAIGatewayService{}
+			account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+			failure := svc.newOpenAIStreamFailoverError(nil, account, false, "", []byte(tc.payload), "temporarily unavailable")
+			require.Equal(t, tc.wantCode, recoveryFailureErrorCode(failure))
+			if tc.wantCode == "" {
+				require.NotNil(t, failure.RecoveryErrorCode, "explicit empty identity prevents inference from the generic envelope")
+				c, _, scopedAccount, _ := recoveryFixture(t, "apikey", 0, 1)
+				rule := &model.ErrorPassthroughRule{ID: 10, Enabled: true, MatchMode: "all", ErrorCodes: []int{502}, RecoveryPolicy: &model.ErrorRecoveryPolicy{Mode: "limited", UpstreamCodes: []string{"upstream_error"}, AccountSwitches: 1, BudgetSeconds: 1}}
+				recoveryService := &ErrorPassthroughService{}
+				recoveryService.setLocalCache([]*model.ErrorPassthroughRule{rule})
+				BindErrorPassthroughService(c, recoveryService)
+				require.Equal(t, ErrorRecoveryDefault, ApplyErrorRecovery(c, scopedAccount, "gpt", failure))
 			}
-			body, err := json.Marshal(gin.H{"error": envelope})
-			require.NoError(t, err)
-
-			// 恢复引擎看到的就是这个 body：必须能取回上游码，否则规则零命中。
-			require.Equal(t, tc.wantCode, recoveryErrorCode(body))
 		})
 	}
-
-	// 回归：没有 code 的信封会让恢复引擎放弃匹配。
-	legacy, err := json.Marshal(gin.H{"error": gin.H{"type": "upstream_error", "message": "x"}})
-	require.NoError(t, err)
-	require.Equal(t, "", recoveryErrorCode(legacy))
 }
