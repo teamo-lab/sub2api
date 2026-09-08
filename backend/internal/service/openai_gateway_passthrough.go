@@ -1100,9 +1100,9 @@ func openAIStreamEventIsPreamble(eventType string) bool {
 }
 
 // openAIStreamDataIsKeepalive recognizes upstream keepalives that arrive as a
-// data frame instead of an SSE comment. They prove the TCP stream is live, not
-// that the model has produced an answer, so they must stay attempt-local until
-// a semantic commit point is reached.
+// data frame instead of an SSE comment. SSE-Keep-Alive is an authoritative
+// heartbeat marker: the frame is transport liveness, never model output, and
+// must stay attempt-local until a semantic commit point is reached.
 func openAIStreamDataIsKeepalive(data, eventType string) bool {
 	if openAIStreamEventIsPreamble(eventType) {
 		return true
@@ -1114,17 +1114,8 @@ func openAIStreamDataIsKeepalive(data, eventType string) bool {
 	if !gjson.Valid(trimmed) {
 		return false
 	}
-	if !gjson.Get(trimmed, "SSE-Keep-Alive").Bool() && !gjson.Get(trimmed, "sse_keep_alive").Bool() {
-		return false
-	}
-	if eventType == "" {
-		eventType = gjson.Get(trimmed, "type").String()
-	}
-	if strings.TrimSpace(eventType) != "response.output_text.delta" {
-		return true
-	}
-	delta := gjson.Get(trimmed, "delta")
-	return !delta.Exists() || delta.Type != gjson.String || openAIStreamTextDeltaIsOnlyFiller(trimmed, eventType)
+	return gjson.Get(trimmed, "SSE-Keep-Alive").Bool() ||
+		gjson.Get(trimmed, "sse_keep_alive").Bool()
 }
 
 // openAIStreamKnownDeltaIsEmpty identifies protocol lifecycle deltas that
@@ -1823,27 +1814,6 @@ func (s *OpenAIGatewayService) handleOpenAIStreamTerminalAccountSideEffects(
 ) (int, bool) {
 	statusCode := openAIStreamFailureStatus(payload, message)
 	if isOpenAIGPTContentAuditRejection(account, firstNonEmpty(canonicalModel...), statusCode, payload) {
-		return statusCode, false
-	}
-	// 账号不具备该模型：写"账号+模型"冷却，让调度绕开这个账号，而不是每次都
-	// 重新撞一遍（线上样本中位 45s、最长 259s 才失败）。这里显式传 404，让流内
-	// 形态复用 HTTP 路径同一套判定与冷却，不新增第二套语义。
-	// 只冷却该模型，不停用账号：账号对其它模型仍然可用。
-	if s != nil && s.rateLimitService != nil && isOpenAIStreamModelNotFoundEvent(payload) {
-		ctx := context.Background()
-		if c != nil && c.Request != nil {
-			ctx = c.Request.Context()
-		}
-		model := firstNonEmpty(canonicalModel...)
-		if model == "" {
-			model = firstNonEmpty(
-				gjson.GetBytes(payload, "model").String(),
-				gjson.GetBytes(payload, "response.model").String(),
-			)
-		}
-		if strings.TrimSpace(model) != "" {
-			s.rateLimitService.HandleUpstreamModelNotFound(ctx, account, model, http.StatusNotFound, payload)
-		}
 		return statusCode, false
 	}
 	switch statusCode {
