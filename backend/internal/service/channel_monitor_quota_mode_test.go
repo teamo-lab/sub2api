@@ -251,6 +251,8 @@ func TestAttachQuotaSnapshot_NoteOnlyWhenProbeMessageEmpty(t *testing.T) {
 // --- 校验矩阵 ---
 
 func TestValidateCreateParams_CheckModeMatrix(t *testing.T) {
+	// Required-field validation uses a public IP literal so local DNS/fake-IP
+	// settings cannot change which validation error this unit test observes.
 	accountID := int64(9)
 
 	cases := []struct {
@@ -270,7 +272,7 @@ func TestValidateCreateParams_CheckModeMatrix(t *testing.T) {
 			name: "probe requires api key",
 			params: ChannelMonitorCreateParams{
 				Provider: MonitorProviderOpenAI, CheckMode: MonitorCheckModeProbe,
-				Endpoint: "https://api.openai.com", IntervalSeconds: 60, PrimaryModel: "gpt-5",
+				Endpoint: "https://1.1.1.1", IntervalSeconds: 60, PrimaryModel: "gpt-5",
 			},
 			wantErr: ErrChannelMonitorMissingAPIKey,
 		},
@@ -320,7 +322,7 @@ func TestValidateCreateParams_CheckModeMatrix(t *testing.T) {
 			name: "unknown mode rejected",
 			params: ChannelMonitorCreateParams{
 				Provider: MonitorProviderOpenAI, CheckMode: "auto",
-				Endpoint: "https://api.openai.com", APIKey: "sk",
+				Endpoint: "https://1.1.1.1", APIKey: "sk",
 				IntervalSeconds: 60, PrimaryModel: "gpt-5",
 			},
 			wantErr: ErrChannelMonitorInvalidCheckMode,
@@ -330,7 +332,7 @@ func TestValidateCreateParams_CheckModeMatrix(t *testing.T) {
 			name: "quota_probe requires primary model",
 			params: ChannelMonitorCreateParams{
 				Provider: MonitorProviderKimi, CheckMode: MonitorCheckModeQuotaProbe,
-				Endpoint: "https://api.kimi.com", APIKey: "sk",
+				Endpoint: "https://1.1.1.1", APIKey: "sk",
 				IntervalSeconds: 60, AccountID: &accountID,
 			},
 			wantErr: ErrChannelMonitorMissingPrimaryModel,
