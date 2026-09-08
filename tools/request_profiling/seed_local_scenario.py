@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Seed isolated QA resources using the local app's real admin API."""
-import json,pathlib,urllib.request,urllib.error,subprocess
+import json,pathlib,urllib.request,urllib.error,subprocess,os
 root=pathlib.Path(__file__).parent/'.runtime';token=(root/'admin-token').read_text();base='http://127.0.0.1:8187/api/v1'
 def call(path,payload):
  r=urllib.request.Request(base+path,data=json.dumps(payload).encode(),headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
@@ -9,8 +9,9 @@ def call(path,payload):
   d=json.load(e);raise RuntimeError(str(e.code)+' '+str(d.get('message','request failed')))
 state=root/'scenario.json'
 if state.exists():print('local scenario already seeded');raise SystemExit
+cfg=json.loads((root/'local-env.json').read_text());assert cfg['DATABASE_HOST']=='127.0.0.1' and cfg['DATABASE_DBNAME'].startswith('sub2api_profile_')
 # This balance belongs solely to the newly created synthetic local admin.
-subprocess.run(['psql','-h','127.0.0.1','-U','zhangyiming','-d','sub2api_profile_20260909','-v','ON_ERROR_STOP=1'],input="UPDATE users SET balance=1000,concurrency=10 WHERE email='profiling-local@example.test';",text=True,check=True,stdout=subprocess.DEVNULL)
+subprocess.run(['psql','-h','127.0.0.1','-U',cfg['DATABASE_USER'],'-d',cfg['DATABASE_DBNAME'],'-v','ON_ERROR_STOP=1'],input="UPDATE users SET balance=1000,concurrency=10 WHERE email='profiling-local@example.test';",text=True,check=True,stdout=subprocess.DEVNULL,env=dict(os.environ,PGPASSWORD=cfg['DATABASE_PASSWORD']))
 g=call('/admin/groups',{'name':'Local Profiling QA','platform':'openai','rate_multiplier':1,'is_exclusive':False,'subscription_type':'standard'})
 accounts=[]
 for name,priority,route in [('Controlled 503',1,'first'),('Healthy local stream',2,'second')]:

@@ -29,20 +29,22 @@ type RequestProfileStage struct {
 	MeanUS float64 `json:"mean_us"`
 }
 type RequestProfileSummary struct {
-	Count     int64                 `json:"count"`
-	MeanUS    float64               `json:"mean_us"`
-	P90US     float64               `json:"p90_us"`
-	Truncated int64                 `json:"truncated"`
-	Retries   int64                 `json:"retries"`
-	Fallbacks int64                 `json:"fallbacks"`
-	Stages    []RequestProfileStage `json:"stages"`
+	LocalReselect int64                 `json:"local_reselect"`
+	Count         int64                 `json:"count"`
+	MeanUS        float64               `json:"mean_us"`
+	P90US         float64               `json:"p90_us"`
+	Truncated     int64                 `json:"truncated"`
+	Retries       int64                 `json:"retries"`
+	Fallbacks     int64                 `json:"fallbacks"`
+	Stages        []RequestProfileStage `json:"stages"`
 }
 type RequestProfileResult struct {
-	Rows    []RequestProfileRow     `json:"rows"`
-	Summary RequestProfileSummary   `json:"summary"`
-	Page    int                     `json:"page"`
-	Limit   int                     `json:"limit"`
-	Health  *OpsSystemLogSinkHealth `json:"health,omitempty"`
+	RecordingEnabled bool                    `json:"recording_enabled"`
+	Rows             []RequestProfileRow     `json:"rows"`
+	Summary          RequestProfileSummary   `json:"summary"`
+	Page             int                     `json:"page"`
+	Limit            int                     `json:"limit"`
+	Health           *OpsSystemLogSinkHealth `json:"health,omitempty"`
 }
 type requestProfileRepository interface {
 	QueryRequestProfiles(context.Context, RequestProfileFilter) (*RequestProfileResult, error)
@@ -72,8 +74,10 @@ func (s *OpsService) QueryRequestProfiles(ctx context.Context, f RequestProfileF
 	if err != nil {
 		return nil, err
 	}
+	result.RecordingEnabled = s.cfg == nil || s.cfg.Gateway.RequestProfilingEnabled
 	if s.systemLogSink != nil {
 		h := s.systemLogSink.Health()
+		h.LastError = "" // Do not expose database diagnostic strings through profiling.
 		result.Health = &h
 	}
 	return result, nil

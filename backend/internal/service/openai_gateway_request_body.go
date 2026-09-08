@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestprofile"
 	"net/http"
 	"strings"
 
@@ -840,6 +841,9 @@ func newOpenAIRequestView(body []byte) openAIRequestView {
 
 // Decode 保留阶段一既有 full-map 行为；后续阶段会把调用点下沉到复杂分支。
 func (v openAIRequestView) Decode(c *gin.Context) (map[string]any, error) {
+	if c != nil && c.Request != nil {
+		defer requestprofile.Start(c.Request.Context(), "json_decode")()
+	}
 	return getOpenAIRequestBodyMap(c, v.body)
 }
 

@@ -313,7 +313,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	var reqBody map[string]any
 	ensureReqBody := func() (map[string]any, error) {
 		if requestView.HasPatches() {
-			patchedBody, patchErr := requestView.ApplyPatches()
+			patchedBody, patchErr := profileOpenAIPatches(ctx, requestView)
 			if patchErr != nil {
 				return nil, patchErr
 			}
@@ -716,7 +716,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 
 	if bodyModified {
 		if requestView.HasPatches() {
-			if patchedBody, patchErr := requestView.ApplyPatches(); patchErr == nil {
+			if patchedBody, patchErr := profileOpenAIPatches(ctx, requestView); patchErr == nil {
 				body = patchedBody
 				requestView = newOpenAIRequestView(body)
 				reqBody = nil
@@ -729,7 +729,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				return nil, decodeErr
 			}
 			var marshalErr error
-			body, marshalErr = marshalOpenAIUpstreamJSON(decoded)
+			body, marshalErr = profileOpenAIJSONMarshal(ctx, decoded)
 			if marshalErr != nil {
 				return nil, fmt.Errorf("serialize request body: %w", marshalErr)
 			}
@@ -786,7 +786,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		imageInputSize = imageCfg.InputSize
 	}
 	// Get access token
+	endCredential := requestprofile.Start(ctx, "credential_load")
 	token, _, err := s.GetAccessToken(ctx, account)
+	endCredential()
 	if err != nil {
 		return nil, err
 	}
@@ -1137,7 +1139,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				}
 				invalidDigests := collectOpenAIEncryptedContentDigestsRaw(lineageEntryBody)
 				if trimOpenAIEncryptedReasoningItems(decoded) {
-					body, err = marshalOpenAIUpstreamJSON(decoded)
+					body, err = profileOpenAIJSONMarshal(ctx, decoded)
 					if err != nil {
 						return nil, fmt.Errorf("serialize invalid_encrypted_content retry body: %w", err)
 					}
@@ -1393,6 +1395,7 @@ func shouldForwardOpenAIResponsesViaRawChatCompletions(account *Account) bool {
 }
 
 func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Context, account *Account, body []byte, token string, isStream bool, promptCacheKey string, isCodexCLI bool) (*http.Request, error) {
+	defer requestprofile.Start(ctx, "request_build")()
 	// Determine target URL based on account type
 	var targetURL string
 	switch account.Type {

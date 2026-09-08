@@ -1801,12 +1801,17 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 	}
 	profileCtx := ctx
 	if req.Account != nil {
-		profileCtx = requestprofile.NewAttempt(ctx, req.Account.ID)
+		profileCtx = requestprofile.AccountContext(ctx, req.Account.ID)
 	}
 	endConnect := requestprofile.Start(profileCtx, "websocket_connect")
 	conn, status, handshakeHeaders, err := p.clientDialer.Dial(profileCtx, req.WSURL, headers, req.ProxyURL)
 	endConnect()
-	requestprofile.Mark(profileCtx, "upstream_response", status)
+	if err != nil && req.Account != nil {
+		profileCtx = requestprofile.NewAttempt(ctx, req.Account.ID)
+		requestprofile.Mark(profileCtx, "upstream_error", status)
+	} else {
+		requestprofile.Mark(profileCtx, "websocket_connected", status)
+	}
 	if err != nil {
 		var handshakeErr *openAIWSHandshakeError
 		var responseBody []byte

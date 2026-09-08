@@ -16,14 +16,15 @@ import (
 const requestIDHeader = "X-Request-ID"
 
 // RequestLogger 在请求入口注入 request-scoped logger。
-func RequestLogger() gin.HandlerFunc {
+func RequestLogger() gin.HandlerFunc { return RequestLoggerWithProfiling(true) }
+func RequestLoggerWithProfiling(enabled bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.Request == nil {
 			c.Next()
 			return
 		}
 
-		if isProfiledInferenceRequest(c.Request) {
+		if enabled && isProfiledInferenceRequest(c.Request) {
 			c.Request = c.Request.WithContext(requestprofile.Attach(c.Request.Context(), time.Now()))
 		}
 		requestID, validRequestID := normalizeCorrelationID(c.GetHeader(requestIDHeader))

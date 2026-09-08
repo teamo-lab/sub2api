@@ -1,8 +1,11 @@
 package requestprofile
 
 import (
+	"context"
 	"crypto/tls"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptrace"
 	"sync"
@@ -14,6 +17,7 @@ func ObserveHTTP(req *http.Request, account int64) (*http.Request, func(*http.Re
 	if req == nil || From(req.Context()) == nil {
 		return req, func(*http.Response, error) {}
 	}
+	doneHTTP := activeHTTP(req.Context())
 	endPreparation(req.Context())
 	ctx := NewAttempt(req.Context(), account)
 	endHeaders := Start(ctx, "upstream_headers")
@@ -58,16 +62,20 @@ func ObserveHTTP(req *http.Request, account int64) (*http.Request, func(*http.Re
 		}
 		kind := "upstream_response"
 		if err != nil {
-			kind = "network_error"
+			kind = failureKind(err)
 		}
 		Mark(ctx, kind, status)
 		if resp != nil && resp.Body != nil {
-			resp.Body = &profileBody{ReadCloser: resp.Body, done: Start(ctx, "response_body")}
+			endBody := Start(ctx, "response_body")
+			resp.Body = &profileBody{ctx: ctx, ReadCloser: resp.Body, done: func() { endBody(); doneHTTP() }}
+		} else {
+			doneHTTP()
 		}
 	}
 }
 
 type profileBody struct {
+	ctx context.Context
 	io.ReadCloser
 	once sync.Once
 	done func()
@@ -76,8 +84,27 @@ type profileBody struct {
 func (b *profileBody) Read(p []byte) (int, error) {
 	n, e := b.ReadCloser.Read(p)
 	if e != nil {
-		b.once.Do(b.done)
+		b.once.Do(func() {
+			if !errors.Is(e, io.EOF) {
+				Mark(b.ctx, failureKind(e), 0)
+			}
+			b.done()
+		})
 	}
 	return n, e
 }
 func (b *profileBody) Close() error { e := b.ReadCloser.Close(); b.once.Do(b.done); return e }
+
+func failureKind(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	var timed net.Error
+	if errors.As(err, &timed) && timed.Timeout() {
+		return "timeout"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "upstream_cancelled"
+	}
+	return "network_error"
+}

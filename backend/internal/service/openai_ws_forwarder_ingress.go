@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestprofile"
 	"net/http"
 	"net/url"
 	"strings"
@@ -948,7 +949,12 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		}
 		turnStart := time.Now()
 		wroteDownstream := false
-		if err := lease.WriteJSONWithContextTimeout(ctx, json.RawMessage(payload), s.openAIWSWriteTimeout()); err != nil {
+		profileCtx := requestprofile.NewAttempt(ctx, account.ID)
+		endWrite := requestprofile.Start(profileCtx, "websocket_write")
+		writeErr := lease.WriteJSONWithContextTimeout(profileCtx, json.RawMessage(payload), s.openAIWSWriteTimeout())
+		endWrite()
+		if err := writeErr; err != nil {
+			requestprofile.Mark(profileCtx, "network_error", 0)
 			return nil, wrapOpenAIWSIngressTurnError(
 				"write_upstream",
 				fmt.Errorf("write upstream websocket request: %w", err),

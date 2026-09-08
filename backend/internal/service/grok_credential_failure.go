@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestprofile"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -93,6 +94,7 @@ type grokCredentialConditionalStateRepository interface {
 // GetRequestCredential applies the request-path credential and failover contract
 // before any upstream transport is opened.
 func (s *OpenAIGatewayService) GetRequestCredential(ctx context.Context, c *gin.Context, account *Account) (string, string, error) {
+	defer requestprofile.Start(ctx, "credential_load")()
 	return s.getRequestCredential(ctx, c, account)
 }
 

@@ -11,7 +11,7 @@ import (
 )
 
 func requestProfileWhere(f service.RequestProfileFilter) (string, []any) {
-	clauses := []string{"l.extra ? 'request_profile'", "l.component = 'http.access'", "l.message = 'http request completed'", "l.created_at >= $1", "l.created_at < $2"}
+	clauses := []string{"l.extra ? 'request_profile'", "jsonb_typeof(l.extra->'request_profile') = 'object'", "l.extra->'request_profile'->>'version' = '1'", "l.component = 'http.access'", "l.message = 'http request completed'", "l.created_at >= $1", "l.created_at < $2"}
 	args := []any{f.From, f.To}
 	add := func(expr string, v any) {
 		args = append(args, v)
@@ -45,7 +45,7 @@ func requestProfileWhere(f service.RequestProfileFilter) (string, []any) {
 		clauses = append(clauses, "EXISTS (SELECT 1 FROM jsonb_array_elements(l.extra->'request_profile'->'events') e WHERE (e->>'status')::int BETWEEN 400 AND 499)")
 	case "http_5xx":
 		clauses = append(clauses, "EXISTS (SELECT 1 FROM jsonb_array_elements(l.extra->'request_profile'->'events') e WHERE (e->>'status')::int BETWEEN 500 AND 599)")
-	case "retry", "fallback", "network_error", "client_cancelled":
+	case "retry", "fallback", "network_error", "timeout", "upstream_cancelled", "client_cancelled", "client_disconnected", "downstream_write_error", "local_reselect":
 		add("EXISTS (SELECT 1 FROM jsonb_array_elements(l.extra->'request_profile'->'events') e WHERE e->>'kind'=$%d)", f.ErrorType)
 	case "failed":
 		clauses = append(clauses, "(l.extra->>'status_code')::int >= 400")
@@ -64,7 +64,7 @@ func (r *opsRepository) QueryRequestProfiles(ctx context.Context, f service.Requ
 	base := "WITH selected AS (SELECT l.*,l.extra->'request_profile' AS p FROM ops_system_logs l WHERE " + where + ") "
 	result := &service.RequestProfileResult{Rows: []service.RequestProfileRow{}, Page: f.Page, Limit: f.Limit}
 	result.Summary.Stages = []service.RequestProfileStage{}
-	err = tx.QueryRowContext(ctx, base+`SELECT count(*),COALESCE(avg((p->>'total_us')::bigint),0),COALESCE(percentile_cont(0.9) WITHIN GROUP(ORDER BY (p->>'total_us')::bigint),0),count(*) FILTER(WHERE (p->>'dropped')::int>0),COALESCE(sum((SELECT count(*) FROM jsonb_array_elements(p->'events') e WHERE e->>'kind'='retry')),0),COALESCE(sum((SELECT count(*) FROM jsonb_array_elements(p->'events') e WHERE e->>'kind'='fallback')),0) FROM selected`, args...).Scan(&result.Summary.Count, &result.Summary.MeanUS, &result.Summary.P90US, &result.Summary.Truncated, &result.Summary.Retries, &result.Summary.Fallbacks)
+	err = tx.QueryRowContext(ctx, base+`SELECT count(*),COALESCE(avg((p->>'total_us')::bigint),0),COALESCE(percentile_cont(0.9) WITHIN GROUP(ORDER BY (p->>'total_us')::bigint),0),count(*) FILTER(WHERE (p->>'dropped')::int>0),COALESCE(sum((SELECT count(*) FROM jsonb_array_elements(p->'events') e WHERE e->>'kind'='retry')),0),COALESCE(sum((SELECT count(*) FROM jsonb_array_elements(p->'events') e WHERE e->>'kind'='fallback')),0),COALESCE(sum((SELECT count(*) FROM jsonb_array_elements(p->'events') e WHERE e->>'kind'='local_reselect')),0) FROM selected`, args...).Scan(&result.Summary.Count, &result.Summary.MeanUS, &result.Summary.P90US, &result.Summary.Truncated, &result.Summary.Retries, &result.Summary.Fallbacks, &result.Summary.LocalReselect)
 	if err != nil {
 		return nil, err
 	}

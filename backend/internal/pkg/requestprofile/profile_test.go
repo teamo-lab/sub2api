@@ -57,6 +57,7 @@ func TestAttemptsAndConcurrentSpansRemainDistinct(t *testing.T) {
 		a := NewAttempt(ctx, account)
 		done := Start(a, "upstream_headers")
 		done()
+		Mark(a, "upstream_response", 503)
 	}
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
@@ -70,7 +71,11 @@ func TestAttemptsAndConcurrentSpansRemainDistinct(t *testing.T) {
 	if len(s.Spans) != 24 || s.Attempts != 3 || !s.Spans[23].Incomplete {
 		t.Fatalf("%+v", s)
 	}
-	if s.Events[1].Kind != "retry" || s.Events[3].Kind != "fallback" {
+	kinds := map[string]int{}
+	for _, e := range s.Events {
+		kinds[e.Kind]++
+	}
+	if kinds["retry"] != 1 || kinds["fallback"] != 1 {
 		t.Fatal(s.Events)
 	}
 	for _, span := range s.Spans {
@@ -183,10 +188,13 @@ func BenchmarkRequestProfileSnapshot(b *testing.B) {
 func TestWebSocketMessagesDoNotBecomeFalseRetries(t *testing.T) {
 	ctx := Attach(context.Background(), time.Now())
 	BeginTurn(ctx, 1)
-	NewAttempt(ctx, 5)
-	NewAttempt(ctx, 5)
+	a := NewAttempt(ctx, 5)
+	Mark(a, "upstream_response", 503)
+	a = NewAttempt(ctx, 5)
+	Mark(a, "upstream_response", 200)
 	BeginTurn(ctx, 2)
-	NewAttempt(ctx, 5)
+	a = NewAttempt(ctx, 5)
+	Mark(a, "upstream_response", 503)
 	BeginTurn(ctx, 2)
 	NewAttempt(ctx, 7)
 	s := Finish(ctx, time.Now())
@@ -219,6 +227,107 @@ func TestWebSocketTurnSpanSurvivesRetryAndKeepsTurnsSeparate(t *testing.T) {
 	for _, span := range s.Spans {
 		if span.Incomplete {
 			t.Fatal("completed turn marked incomplete")
+		}
+	}
+}
+
+func TestLocalAdmissionReselectionIsNotUpstreamRetry(t *testing.T) {
+	ctx := Attach(context.Background(), time.Now())
+	LocalReselect(ctx, 1, 1, 0, 1840)
+	LocalReselect(ctx, 1, 0, 2, 1840)
+	NewAttempt(ctx, 2)
+	s := Finish(ctx, time.Now())
+	if s.Attempts != 1 {
+		t.Fatal(s)
+	}
+	for _, e := range s.Events {
+		if e.Kind == "retry" || e.Kind == "fallback" || e.Status == 429 {
+			t.Fatal("local admission became upstream error", e)
+		}
+	}
+	if s.Events[0].Origin != "local_account_admission" || s.Events[0].WaitUS != 1840000 {
+		t.Fatal(s.Events)
+	}
+}
+
+func awaitDisconnect(t *testing.T, ctx context.Context) {
+	t.Helper()
+	until := time.Now().Add(time.Second)
+	for time.Now().Before(until) {
+		r := From(ctx)
+		r.mu.Lock()
+		seen := r.disconnected != nil
+		r.mu.Unlock()
+		if seen {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("cancellation observer did not fire")
+}
+func TestUpstreamSuccessAfterClientDisconnectDoesNotBecomeDelivery(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	ctx := Attach(parent, time.Now())
+	drainCtx := context.WithoutCancel(ctx)
+	DeliverySupported(ctx)
+	Mark(ctx, "first_semantic", 0)
+	DownstreamWrite(ctx, 12, 12, nil)
+	DownstreamFlush(ctx) // heartbeat bytes are not answer output
+	cancel()
+	awaitDisconnect(t, ctx)
+	time.Sleep(3 * time.Millisecond)
+	Mark(drainCtx, "upstream_response", 200)
+	Delivery(drainCtx, true, "complete")
+	s := Finish(drainCtx, time.Now())
+	if s.ClientOutcome != "disconnected" || s.ClientDisconnectedUS == nil || s.DrainAfterDisconnectUS <= 0 || s.DownstreamCompleteUS != nil || s.DownstreamFirstOutputUS != nil {
+		t.Fatalf("false client success %+v", s)
+	}
+}
+func TestCompletedWriteBeforeDisconnectRemainsDistinctFromReceipt(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	ctx := Attach(parent, time.Now())
+	DeliverySupported(ctx)
+	Delivery(ctx, true, "complete")
+	cancel()
+	awaitDisconnect(t, ctx)
+	s := Finish(ctx, time.Now())
+	if s.ClientOutcome != "completion_written" || s.DownstreamCompleteUS == nil || s.DownstreamFirstOutputUS == nil {
+		t.Fatal(s)
+	}
+}
+func TestSuccessiveHealthyCallsAreNotInferredRetries(t *testing.T) {
+	ctx := Attach(context.Background(), time.Now())
+	a := NewAttempt(ctx, 1)
+	Mark(a, "upstream_response", 200)
+	NewAttempt(ctx, 1)
+	s := Finish(ctx, time.Now())
+	for _, e := range s.Events {
+		if e.Kind == "retry" || e.Kind == "fallback" {
+			t.Fatal(e)
+		}
+	}
+}
+
+func TestConcurrentHTTPCallsDoNotCreateFalseRetries(t *testing.T) {
+	ctx := Attach(context.Background(), time.Now())
+	req, _ := http.NewRequestWithContext(ctx, "GET", "http://localhost/", nil)
+	_, finish1 := ObserveHTTP(req, 1)
+	_, finish2 := ObserveHTTP(req, 2)
+	a := &http.Response{StatusCode: 503, Body: io.NopCloser(strings.NewReader("err"))}
+	b := &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("ok"))}
+	finish1(a, nil)
+	finish2(b, nil)
+	a.Body.Close()
+	b.Body.Close()
+	_, finish3 := ObserveHTTP(req, 2)
+	finish3(nil, context.DeadlineExceeded)
+	s := Finish(ctx, time.Now())
+	if !s.ConcurrentUpstreams {
+		t.Fatal("overlap missed")
+	}
+	for _, e := range s.Events {
+		if e.Kind == "retry" || e.Kind == "fallback" {
+			t.Fatal("parallel call mislabeled", e)
 		}
 	}
 }

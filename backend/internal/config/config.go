@@ -1014,6 +1014,8 @@ const (
 
 // GatewayConfig API网关相关配置
 type GatewayConfig struct {
+	// RequestProfilingEnabled records bounded metadata-only inference timelines.
+	RequestProfilingEnabled bool `mapstructure:"request_profiling_enabled"`
 	// 等待上游响应头的超时时间（秒），0表示无超时
 	// 注意：这不影响流式数据传输，只控制等待响应头的时间
 	ResponseHeaderTimeout int `mapstructure:"response_header_timeout"`
@@ -2500,6 +2502,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.max_account_switches", 10)
 	viper.SetDefault("gateway.max_account_switches_gemini", 3)
 	viper.SetDefault("gateway.force_codex_cli", false)
+	viper.SetDefault("gateway.request_profiling_enabled", true)
 	viper.SetDefault("gateway.disable_codex_identity_enforcement", false)
 	viper.SetDefault("gateway.disable_codex_originator_normalization", false)
 	viper.SetDefault("gateway.codex_image_generation_bridge_enabled", false)

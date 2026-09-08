@@ -14,7 +14,8 @@ import (
 )
 
 // Logger 请求日志中间件
-func Logger() gin.HandlerFunc {
+func Logger() gin.HandlerFunc { return LoggerWithProfiling(true) }
+func LoggerWithProfiling(enabled bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// 开始时间
 		startTime := time.Now()
@@ -22,11 +23,15 @@ func Logger() gin.HandlerFunc {
 		// 请求路径
 		path := c.Request.URL.Path
 		// Profile inference requests only; admin/health traffic is not a model request.
-		profiled := isProfiledInferenceRequest(c.Request)
+		profiled := enabled && isProfiledInferenceRequest(c.Request)
 		if profiled && requestprofile.From(c.Request.Context()) == nil {
 			c.Request = c.Request.WithContext(requestprofile.Attach(c.Request.Context(), startTime))
 		}
 
+		profileContext := c.Request.Context()
+		if profiled {
+			c.Writer = &requestProfileWriter{ResponseWriter: c.Writer, ctx: profileContext}
+		}
 		// 处理请求
 		c.Next()
 
@@ -87,6 +92,14 @@ func Logger() gin.HandlerFunc {
 		}
 
 		if profiled {
+			requestID, _ := profileContext.Value(ctxkey.RequestID).(string)
+			clientID, _ := c.Request.Context().Value(ctxkey.ClientRequestID).(string)
+			if requestID != "" {
+				fields = append(fields, zap.String("request_id", requestID))
+			}
+			if clientID != "" {
+				fields = append(fields, zap.String("client_request_id", clientID))
+			}
 			group := int64(0)
 			if key, ok := GetAPIKeyFromContext(c); ok && key.GroupID != nil {
 				group = *key.GroupID
@@ -98,11 +111,9 @@ func Logger() gin.HandlerFunc {
 			if strings.EqualFold(c.GetHeader("Upgrade"), "websocket") {
 				wire = "websocket_session"
 			}
-			requestprofile.Metadata(c.Request.Context(), group, model, wire)
-			if c.Request.Context().Err() != nil {
-				requestprofile.Mark(c.Request.Context(), "client_cancelled", statusCode)
-			}
-			fields = append(fields, zap.Any("request_profile", requestprofile.Finish(c.Request.Context(), endTime)))
+			requestprofile.Metadata(profileContext, group, model, wire)
+
+			fields = append(fields, zap.Any("request_profile", requestprofile.Finish(profileContext, endTime)))
 		}
 		l := logger.FromContext(c.Request.Context()).With(fields...)
 		l.Info("http request completed", zap.Time("completed_at", endTime))
@@ -111,7 +122,7 @@ func Logger() gin.HandlerFunc {
 			for _, field := range fields {
 				field.AddTo(enc)
 			}
-			enc.Fields["request_id"], _ = c.Request.Context().Value(ctxkey.RequestID).(string)
+			enc.Fields["request_id"], _ = profileContext.Value(ctxkey.RequestID).(string)
 			enc.Fields["client_request_id"], _ = c.Request.Context().Value(ctxkey.ClientRequestID).(string)
 			logger.WriteSinkEvent("info", "http.access", "http request completed", enc.Fields)
 		}

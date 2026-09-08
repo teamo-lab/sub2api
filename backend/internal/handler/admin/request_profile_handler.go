@@ -48,7 +48,7 @@ func (h *OpsHandler) GetRequestProfiles(c *gin.Context) {
 		}
 	}
 	switch f.ErrorType {
-	case "", "failed", "http_4xx", "http_5xx", "network_error", "client_cancelled", "retry", "fallback":
+	case "", "failed", "http_4xx", "http_5xx", "network_error", "timeout", "upstream_cancelled", "client_cancelled", "client_disconnected", "downstream_write_error", "retry", "fallback", "local_reselect":
 	default:
 		response.BadRequest(c, "Invalid error_type")
 		return

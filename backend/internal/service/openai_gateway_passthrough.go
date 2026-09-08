@@ -2205,13 +2205,17 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	// 返回后不会再有字节写出。
 	defer stopKeepalive()
 	// flushPending 表示已写入但未到 SSE 空行边界的脏状态；defer 兜底函数退出前的残留，断连后不再 Flush。
+	requestprofile.DeliverySupported(c.Request.Context())
 	flushPending := false
+	profileTerminal := ""
 	pendingSSEEventType := ""
 	flushPendingOutput := func() {
 		if clientDisconnected || !flushPending {
 			return
 		}
 		flusher.Flush()
+		requestprofile.Delivery(c.Request.Context(), answerOutputStarted, profileTerminal)
+		profileTerminal = ""
 		flushPending = false
 	}
 	defer flushPendingOutput()
@@ -2266,6 +2270,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		clientOutputStarted = true
 		CompleteErrorRecovery(c)
 		failureDelivered = true
+		profileTerminal = "error"
 		flushPending = true
 		terminalOrigin.seal()
 		flushPendingOutput()
@@ -2543,6 +2548,15 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				}
 				CompleteErrorRecovery(c)
 				flushPending = true
+				switch terminalEventType {
+				case "response.completed", "response.done", "[DONE]":
+					profileTerminal = "complete"
+				case "response.failed", "response.incomplete", "response.cancelled", "response.canceled", "error":
+					profileTerminal = "error"
+				}
+				if sawFailedEvent {
+					profileTerminal = "error"
+				}
 				if line == "" {
 					if responseFailedPending {
 						terminalOrigin.seal()
