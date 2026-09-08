@@ -14,6 +14,14 @@ func TestModelRollupForWindowBoundary(t *testing.T) {
 	require.Equal(t, modelRollupSpec{"ops_model_metrics_hourly", 3600}, modelRollupFor(&service.OpsDashboardFilter{StartTime: start, EndTime: start.Add(24*time.Hour + time.Second)}))
 }
 
+func TestModelHybridWindowUsesRawEdges(t *testing.T) {
+	start := time.Date(2026, 9, 7, 10, 2, 0, 0, time.UTC)
+	end := time.Date(2026, 9, 7, 11, 7, 0, 0, time.UTC)
+	step := 5 * time.Minute
+	require.Equal(t, time.Date(2026, 9, 7, 10, 5, 0, 0, time.UTC), utcCeilToStep(start, step))
+	require.Equal(t, time.Date(2026, 9, 7, 11, 0, 0, 0, time.UTC), end.Add(-5*time.Minute).Truncate(step))
+}
+
 func TestModelRollupWhereDimensions(t *testing.T) {
 	groupID := int64(7)
 	w, args := modelRollupWhere(&service.OpsDashboardFilter{Model: " gpt-5 ", Platform: "OpenAI", GroupID: &groupID}, 3)
