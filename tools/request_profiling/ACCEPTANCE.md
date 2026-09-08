@@ -1,6 +1,6 @@
 # 本地验收记录
 
-基线为 `teamo/main` 的 `c5d383f65`，独立分支 `codex/request-profiling-panel`。本地真实后端、独立 PostgreSQL 数据库、Redis 和 Vite 前端运行；未连接生产凭据、未发布生产。
+初始基线为 `teamo/main` 的 `c5d383f65`，提交前又更新到 `0c88f3166`（PR #30），独立分支 `codex/request-profiling-panel`。本地真实后端、独立 PostgreSQL 数据库、Redis 和 Vite 前端运行；未连接生产凭据、未发布生产。
 
 ## 已验证
 
