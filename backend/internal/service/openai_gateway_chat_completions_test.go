@@ -76,6 +76,7 @@ func TestHandleChatStreamingResponse_ClassifiesHTTP2ReadError(t *testing.T) {
 		"gpt-5.6-sol",
 		time.Now(),
 		0,
+		"",
 	)
 
 	require.Error(t, err)
@@ -1077,10 +1078,136 @@ func TestForwardAsChatCompletions_DoneSentinelWithoutTerminalReturnsError(t *tes
 
 	result, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "gpt-5.1")
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "missing terminal event")
+	require.Nil(t, result)
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.Equal(t, http.StatusBadGateway, failoverErr.StatusCode)
+	require.False(t, c.Writer.Written(), "[DONE] is not a successful business chunk")
+}
+
+func TestForwardAsChatCompletions_BufferedMissingTerminalFailsOver(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_chat_buffered_missing_terminal"}},
+		Body:       io.NopCloser(strings.NewReader(`data: {"type":"response.created","response":{"id":"resp_1"}}` + "\n\n")),
+	}
+	svc := &OpenAIGatewayService{}
+	account := &Account{ID: 1, Name: "openai-key", Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+
+	result, err := svc.handleChatBufferedStreamingResponse(resp, c, account, "gpt-5.6-sol", "gpt-5.6-sol", "gpt-5.6-sol", time.Now())
+
+	require.Nil(t, result)
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.Equal(t, http.StatusBadGateway, failoverErr.StatusCode)
+	require.Empty(t, rec.Body.String())
+}
+
+func TestForwardAsChatCompletions_StreamMissingTerminalAfterReasoningFailsOver(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{"model":"gpt-6-astra","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	upstreamBody := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-6-astra","status":"in_progress","output":[]}}`,
+		"",
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[]}}`,
+		"",
+		`data: {"type":"response.reasoning_summary_text.delta","output_index":0,"summary_index":0,"delta":"thinking"}`,
+		"",
+	}, "\n")
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_chat_reasoning_missing_terminal"}},
+		Body:       io.NopCloser(strings.NewReader(upstreamBody)),
+	}}
+	svc := &OpenAIGatewayService{httpUpstream: upstream}
+	account := &Account{ID: 1, Name: "openai-key", Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Concurrency: 1, Credentials: map[string]any{"api_key": "sk-test", "base_url": "https://relay.example"}}
+
+	result, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "gpt-6-astra")
+
 	require.NotNil(t, result)
-	require.Zero(t, result.Usage.InputTokens)
-	require.Zero(t, result.Usage.OutputTokens)
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.True(t, failoverErr.SafeToFailoverAfterWrite)
+	require.Contains(t, rec.Body.String(), "thinking")
+}
+
+func TestHandleChatStreamingResponse_FirstOutputTimeoutIgnoresPreamble(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	reader, writer := io.Pipe()
+	body := &firstOutputCloseTrackingBody{ReadCloser: reader, closed: make(chan struct{})}
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		defer func() { _ = writer.Close() }()
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_slow\"}}\n\n"))
+		<-body.closed
+	}()
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: body}
+	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{OpenAIFirstOutputTimeoutSeconds: 1}}}
+
+	started := time.Now()
+	result, err := svc.handleChatStreamingResponse(resp, c, &Account{ID: 1, Platform: PlatformOpenAI}, "gpt-5.6-sol", "gpt-5.6-sol", "gpt-5.6-sol", started, 0, "low")
+
+	require.NotNil(t, result)
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.Equal(t, http.StatusGatewayTimeout, failoverErr.StatusCode)
+	require.Contains(t, string(failoverErr.ResponseBody), "first_output_timeout")
+	require.Empty(t, rec.Body.String())
+	select {
+	case <-writerDone:
+	case <-time.After(time.Second):
+		t.Fatal("first-output timeout did not close the upstream body")
+	}
+}
+
+func TestHandleChatStreamingResponse_FirstOutputTimeoutAcceptsReasoning(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	reader, writer := io.Pipe()
+	body := &firstOutputCloseTrackingBody{ReadCloser: reader, closed: make(chan struct{})}
+	upstreamClosedEarly := make(chan bool, 1)
+	go func() {
+		defer func() { _ = writer.Close() }()
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_reasoning\"}}\n\n"))
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[]}}\n\n"))
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"summary_index\":0,\"delta\":\"thinking\"}\n\n"))
+		select {
+		case <-body.closed:
+			upstreamClosedEarly <- true
+		case <-time.After(1200 * time.Millisecond):
+			upstreamClosedEarly <- false
+		}
+	}()
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: body}
+	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{OpenAIFirstOutputTimeoutSeconds: 1}}}
+
+	result, err := svc.handleChatStreamingResponse(resp, c, &Account{ID: 1, Platform: PlatformOpenAI}, "gpt-5.6-sol", "gpt-5.6-sol", "gpt-5.6-sol", time.Now(), 0, "low")
+
+	require.NotNil(t, result)
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.Equal(t, http.StatusBadGateway, failoverErr.StatusCode)
+	require.True(t, failoverErr.SafeToFailoverAfterWrite)
+	require.False(t, <-upstreamClosedEarly, "reasoning output must disarm the first-output deadline")
+	require.Contains(t, rec.Body.String(), "thinking")
 }
 
 func TestForwardAsChatCompletions_UpstreamRequestIgnoresClientCancel(t *testing.T) {
