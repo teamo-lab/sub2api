@@ -2225,6 +2225,7 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 	)
 	if err != nil {
 		reqLog.Warn("openai.account_slot_quick_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+		service.MarkOpsLocalCapacityFailure(c)
 		status, errType, code, message := concurrencyErrorResponse(err, "account")
 		writeError(status, errType, code, message)
 		return nil, openAISlotAcquireFailed
@@ -2252,6 +2253,7 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 	if waitErr != nil {
 		reqLog.Warn("openai.account_wait_counter_increment_failed", zap.Int64("account_id", account.ID), zap.Error(waitErr))
 	} else if !canWait {
+		service.MarkOpsLocalCapacityFailure(c)
 		reqLog.Info("openai.account_wait_queue_full",
 			zap.Int64("account_id", account.ID),
 			zap.Int("max_waiting", selection.WaitPlan.MaxWaiting),
@@ -2513,6 +2515,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		return
 	}
 	if !userAcquired {
+		service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonUserConcurrency)
 		closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "too many concurrent requests, please retry later")
 		return
 	}
@@ -2528,6 +2531,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			return false
 		}
 		if !userAcquired {
+			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonUserConcurrency)
 			closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "too many concurrent requests, please retry later")
 			return false
 		}
@@ -2887,6 +2891,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					return service.NewOpenAIWSClientCloseError(coderws.StatusInternalError, "failed to acquire user concurrency slot", err)
 				}
 				if !userAcquired {
+					service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonUserConcurrency)
 					return service.NewOpenAIWSClientCloseError(coderws.StatusTryAgainLater, "too many concurrent requests, please retry later", nil)
 				}
 				accountReleaseFunc, accountAcquired, err := h.concurrencyHelper.TryAcquireAccountSlot(ctx, account.ID, accountMaxConcurrency)
@@ -3334,6 +3339,7 @@ func (h *OpenAIGatewayHandler) acquireImageGenerationSlot(c *gin.Context, stream
 	if acquired {
 		return release, true
 	}
+	service.MarkOpsLocalCapacityFailure(c)
 	h.handleStreamingAwareErrorWithCode(c, http.StatusTooManyRequests, "rate_limit_error", gatewayConcurrencyLimitCode, "Image generation concurrency limit exceeded, please retry later", streamStarted, false)
 	return nil, false
 }

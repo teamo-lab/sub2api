@@ -549,6 +549,8 @@ func TestOpsErrorLoggerMiddleware_StreamFailureUsesTerminalErrorOverAttemptConte
 		_, _ = c.Writer.WriteString("ror\n")
 		_, _ = c.Writer.WriteString(`data: {"type":"error","error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"input exceeds the context window"}}`)
 		_, _ = c.Writer.WriteString("\n\n")
+		// Final-attempt provenance must come from its producer, not SSE parsing.
+		service.SetOpsUpstreamError(c, http.StatusBadRequest, "input exceeds the context window", "synthetic final upstream failure")
 	})
 
 	recorder := httptest.NewRecorder()
@@ -607,6 +609,7 @@ func TestLogOpsStreamError_RecordsInBandConcurrencyLimit(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 	c.Set(opsModelKey, "test-model")
 
+	service.MarkOpsLocalCapacityFailure(c)
 	service.MarkOpsStreamError(c, "rate_limit_error",
 		"Concurrency limit exceeded for account, please retry later", http.StatusTooManyRequests)
 
@@ -619,11 +622,11 @@ func TestLogOpsStreamError_RecordsInBandConcurrencyLimit(t *testing.T) {
 	job := <-opsErrorLogQueue
 	require.NotNil(t, job.entry)
 	require.Equal(t, "rate_limit_error", job.entry.ErrorType)
-	require.Equal(t, "request", job.entry.ErrorPhase)
-	require.True(t, job.entry.IsBusinessLimited)
+	require.Equal(t, "routing", job.entry.ErrorPhase)
+	require.False(t, job.entry.IsBusinessLimited)
 	require.True(t, job.entry.Stream)
-	require.Equal(t, http.StatusOK, job.entry.StatusCode) // wire 状态码保持 200
-	require.Equal(t, "P1", job.entry.Severity)            // 用 IntendedStatus 429 分级
+	require.Equal(t, http.StatusTooManyRequests, job.entry.StatusCode) // 本机账号容量失败按逻辑 429 计入 SLA
+	require.Equal(t, "P1", job.entry.Severity)                         // 用 IntendedStatus 429 分级
 	require.Equal(t, "test-model", job.entry.Model)
 	require.Equal(t, "Concurrency limit exceeded for account, please retry later", job.entry.ErrorMessage)
 }
@@ -839,7 +842,7 @@ func TestNormalizeOpsErrorType(t *testing.T) {
 	}
 }
 
-func TestClassifyOpsNoAvailableAccountsExcludedFromSLA(t *testing.T) {
+func TestClassifyOpsNoAvailableAccountsCountForSLA(t *testing.T) {
 	const message = "No available accounts"
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
@@ -852,12 +855,12 @@ func TestClassifyOpsNoAvailableAccountsExcludedFromSLA(t *testing.T) {
 
 	require.Equal(t, "api_error", errType)
 	require.Equal(t, "routing", phase)
-	require.True(t, isBusinessLimited)
+	require.False(t, isBusinessLimited)
 	require.Equal(t, "platform", errorOwner)
 	require.Equal(t, "gateway", errorSource)
 }
 
-func TestClassifyOpsRoutingCapacityMarkerExcludesMaskedSelectionFailureFromSLA(t *testing.T) {
+func TestClassifyOpsRoutingCapacityMarkerCountsMaskedSelectionFailureForSLA(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -873,7 +876,7 @@ func TestClassifyOpsRoutingCapacityMarkerExcludesMaskedSelectionFailureFromSLA(t
 	)
 
 	require.Equal(t, "routing", phase)
-	require.True(t, isBusinessLimited)
+	require.False(t, isBusinessLimited)
 	require.Equal(t, "platform", errorOwner)
 	require.Equal(t, "gateway", errorSource)
 }
@@ -1125,6 +1128,7 @@ func TestClassifyOpsLocalBusinessLimitErrorsExcludedFromSLA(t *testing.T) {
 		status      int
 		wantErrType string
 		wantPhase   string
+		marker      string
 	}{
 		{
 			name:        "standard API key quota exhausted",
@@ -1236,6 +1240,7 @@ func TestClassifyOpsLocalBusinessLimitErrorsExcludedFromSLA(t *testing.T) {
 		},
 		{
 			name:        "local pending queue limit",
+			marker:      service.OpsClientBusinessLimitedReasonUserWaitQueue,
 			errType:     "rate_limit_error",
 			message:     "Too many pending requests, please retry later",
 			code:        "",
@@ -1245,6 +1250,7 @@ func TestClassifyOpsLocalBusinessLimitErrorsExcludedFromSLA(t *testing.T) {
 		},
 		{
 			name:        "local concurrency limit",
+			marker:      service.OpsClientBusinessLimitedReasonUserConcurrency,
 			errType:     "rate_limit_error",
 			message:     "Concurrency limit exceeded for user, please retry later",
 			code:        "",
@@ -1368,6 +1374,9 @@ func TestClassifyOpsLocalBusinessLimitErrorsExcludedFromSLA(t *testing.T) {
 			rec := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(rec)
 
+			if tt.marker != "" {
+				service.MarkOpsClientBusinessLimited(c, tt.marker)
+			}
 			errType := normalizeOpsErrorType(tt.errType, tt.code)
 			phase, isBusinessLimited, errorOwner, errorSource := classifyOpsErrorLog(c, errType, tt.message, tt.code, tt.status)
 
@@ -1440,7 +1449,7 @@ func TestClassifyOpsUnsupportedModelExcludedFromSLA(t *testing.T) {
 			gin.SetMode(gin.TestMode)
 			rec := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(rec)
-			markOpsRoutingCapacityLimited(c)
+			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalModelConfiguration)
 
 			errType := normalizeOpsErrorType("api_error", "")
 			phase, isBusinessLimited, errorOwner, errorSource := classifyOpsErrorLog(c, errType, message, "", http.StatusServiceUnavailable)

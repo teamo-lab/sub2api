@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"net/http"
@@ -289,6 +290,7 @@ func (h *ConcurrencyHelper) acquireUserSlotWithWaitTimeout(c *gin.Context, userI
 		return nil, err
 	}
 	if !canWait {
+		service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonUserWaitQueue)
 		return nil, &WaitQueueFullError{SlotType: "user"}
 	}
 	defer h.DecrementWaitCount(ctx, userID)
@@ -296,6 +298,10 @@ func (h *ConcurrencyHelper) acquireUserSlotWithWaitTimeout(c *gin.Context, userI
 	// Need to wait - handle streaming ping if needed
 	releaseFunc, err = h.waitForSlotWithPingTimeout(c, "user", userID, maxConcurrency, timeout, isStream, streamStarted, false)
 	if err != nil {
+		var limit *ConcurrencyError
+		if errors.As(err, &limit) && limit.SlotType == "user" {
+			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonUserConcurrency)
+		}
 		return nil, err
 	}
 	return h.withAPIKeySlotFromGin(c, releaseFunc), nil
@@ -336,6 +342,9 @@ func (h *ConcurrencyHelper) AcquireAccountSlotWithWait(c *gin.Context, accountID
 	// Try to acquire immediately
 	releaseFunc, acquired, err := h.TryAcquireAccountSlot(ctx, accountID, maxConcurrency)
 	if err != nil {
+		if !errors.Is(err, context.Canceled) {
+			service.MarkOpsLocalCapacityFailure(c)
+		}
 		return nil, err
 	}
 
@@ -344,7 +353,11 @@ func (h *ConcurrencyHelper) AcquireAccountSlotWithWait(c *gin.Context, accountID
 	}
 
 	// Need to wait - handle streaming ping if needed
-	return h.waitForSlotWithPing(c, "account", accountID, maxConcurrency, isStream, streamStarted)
+	releaseFunc, err = h.waitForSlotWithPing(c, "account", accountID, maxConcurrency, isStream, streamStarted)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		service.MarkOpsLocalCapacityFailure(c)
+	}
+	return releaseFunc, err
 }
 
 // waitForSlotWithPing waits for a concurrency slot, sending ping events for streaming requests.
@@ -444,7 +457,11 @@ func (h *ConcurrencyHelper) waitForSlotWithPingTimeout(c *gin.Context, slotType 
 
 // AcquireAccountSlotWithWaitTimeout acquires an account slot with a custom timeout (keeps SSE ping).
 func (h *ConcurrencyHelper) AcquireAccountSlotWithWaitTimeout(c *gin.Context, accountID int64, maxConcurrency int, timeout time.Duration, isStream bool, streamStarted *bool) (func(), error) {
-	return h.waitForSlotWithPingTimeout(c, "account", accountID, maxConcurrency, timeout, isStream, streamStarted, true)
+	release, err := h.waitForSlotWithPingTimeout(c, "account", accountID, maxConcurrency, timeout, isStream, streamStarted, true)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		service.MarkOpsLocalCapacityFailure(c)
+	}
+	return release, err
 }
 
 // nextBackoff 计算下一次退避时间
