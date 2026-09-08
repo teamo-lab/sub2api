@@ -172,6 +172,16 @@ func (s *OpsSystemLogSink) shouldIndex(event *logger.LogEvent) bool {
 	if strings.Contains(component, "audit") {
 		return true
 	}
+	// Local account admission recovery is info-level, but its bounded event
+	// chain must remain joinable to final usage. Do not index other handler info.
+	if level == "info" && (component == "handler.openai_gateway.responses" || component == "handler.openai_gateway.chat_completions") {
+		if origin, _ := event.Fields["origin"].(string); origin == "local_account_admission" {
+			switch event.Message {
+			case "openai.local_capacity_reselect_eligible", "openai.local_capacity_reselect", "openai.local_capacity_reselect_admitted":
+				return true
+			}
+		}
+	}
 	return false
 }
 
