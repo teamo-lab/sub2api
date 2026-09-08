@@ -1794,6 +1794,13 @@ func openAIStreamErrorEventShouldFailover(payload []byte, message string) bool {
 	if isOpenAITransientProcessingError(http.StatusBadRequest, message, payload) {
 		return true
 	}
+	// 部分上游的裸 error 帧只给结构化 server_error/upstream_error，文案仅为
+	// "Internal server error"，没有临时性关键词。仅补这两个瞬态标识，
+	// 并沿用 response.failed 的请求/策略排除；输出后的重放边界仍由调用方控制。
+	switch strings.ToLower(strings.TrimSpace(recoveryErrorCodeFromJSON(payload))) {
+	case "server_error", "upstream_error":
+		return openAIStreamFailedEventShouldFailover(payload, message)
+	}
 	combined := strings.ToLower(strings.TrimSpace(message + " " +
 		gjson.GetBytes(payload, "error.message").String() + " " +
 		gjson.GetBytes(payload, "response.error.message").String()))

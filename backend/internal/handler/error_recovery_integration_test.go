@@ -32,6 +32,8 @@ type recoveryUpstream struct {
 	typeOnly        bool
 	sseHTTPError    bool
 	succeedOnSecond bool
+	firstSSEPayload string
+	firstSSEPrefix  string
 }
 
 func (u *recoveryUpstream) Do(req *http.Request, _ string, id int64, _ int) (*http.Response, error) {
@@ -65,8 +67,52 @@ func (u *recoveryUpstream) Do(req *http.Request, _ string, id int64, _ int) (*ht
 		if u.sseHTTPError {
 			status = 503
 		}
+		if u.firstSSEPayload != "" {
+			b = u.firstSSEPrefix + "event: error\ndata: " + u.firstSSEPayload + "\n\n"
+		}
 	}
 	return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{ct}}, Body: io.NopCloser(bytes.NewBufferString(b))}, nil
+}
+
+func TestErrorRecoveryHandlerBareErrorBoundary(t *testing.T) {
+	for _, kind := range []string{"apikey", "oauth"} {
+		for _, tc := range []struct {
+			name, payload, prefix string
+			wantRecovery          bool
+		}{
+			{"server_code_before_output", `{"type":"error","error":{"code":"server_error","message":"Internal server error"}}`, "", true},
+			{"upstream_code_before_output", `{"type":"error","error":{"code":"upstream_error","message":"Internal server error"}}`, "", true},
+			{"server_type_before_output", `{"type":"error","error":{"type":"server_error","message":"Internal server error"}}`, "", true},
+			{"server_error_after_visible_output", `{"type":"error","error":{"code":"server_error","message":"Internal server error"}}`, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial answer\"}\n\n", false},
+			{"unknown_error", `{"type":"error","error":{"code":"unknown_error","message":"Internal server error"}}`, "", false},
+			{"invalid_request", `{"type":"error","error":{"code":"invalid_request_error","type":"server_error","message":"Bad request"}}`, "", false},
+			{"policy_error", `{"type":"error","error":{"code":"server_error","type":"content_policy_violation","message":"Blocked by content policy"}}`, "", false},
+		} {
+			t.Run(kind+"/"+tc.name, func(t *testing.T) {
+				u := &recoveryUpstream{sse: true, succeedOnSecond: true, firstSSEPayload: tc.payload, firstSSEPrefix: tc.prefix}
+				h := newOpenAIResponsesFailoverTestHandler(t, u, kind)
+				rule := &model.ErrorPassthroughRule{ID: 11, Enabled: true, Name: "bare transient", MatchMode: "all", Platforms: []string{"openai"}, ErrorCodes: []int{502}, PassthroughCode: true, PassthroughBody: true, RecoveryPolicy: &model.ErrorRecoveryPolicy{Mode: "limited", AccountTypes: []string{kind}, Models: []string{"gpt-5.1"}, UpstreamCodes: []string{"server_error", "upstream_error"}, AccountSwitches: 1, BudgetSeconds: 10}}
+				h.errorPassthroughService = service.NewErrorPassthroughService(recoveryRuleRepo{rule: rule}, nil)
+				c, w := newOpenAIResponsesFailoverTestContext(t, nil)
+				c.Request.Body = io.NopCloser(bytes.NewBufferString(`{"model":"gpt-5.1","stream":true,"input":"hello"}`))
+				h.Responses(c)
+				if tc.wantRecovery {
+					require.Equal(t, []int64{1, 2}, u.calls)
+					require.Equal(t, http.StatusOK, w.Code)
+					require.Contains(t, w.Body.String(), `"id":"resp_recovered"`)
+					require.Contains(t, w.Body.String(), `"status":"completed"`)
+					require.NotContains(t, w.Body.String(), "Internal server error")
+					return
+				}
+				require.Equal(t, []int64{1}, u.calls, "a permanent/unknown error or visible client output must not cause replay")
+				require.NotContains(t, w.Body.String(), "resp_recovered")
+				if tc.prefix != "" {
+					require.Contains(t, w.Body.String(), "partial answer")
+					require.Contains(t, w.Body.String(), "Internal server error")
+				}
+			})
+		}
+	}
 }
 
 func TestErrorRecoveryHandlerTypeOnly(t *testing.T) {
