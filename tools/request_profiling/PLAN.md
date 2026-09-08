@@ -14,7 +14,7 @@
 - [x] 独立导航“耗时分析”：整体与单请求长条、关键 retry/fallback 标记、阶段明细、可定位长尾与证据缺口，加载/空/错误/筛选交互可用。
 - [x] 请求语义和响应字节等价验证；计时单调、重叠不重复计数、重试归因、聚合分母/筛选正确性、权限与无秘密字段测试。
 - [x] 本地最新 main 配套服务运行，浏览器完整交互与截图验收；近期真实长尾数据只导入已有元数据/区间重建，标记历史证据，缺失不伪造；同时真实发起本地受控 retry/fallback 请求验证新打点。
-- [ ] 检查构建、测试、浏览器效果、修复问题后 push 并创建 teamo-lab/sub2api PR。同步协调任务，禁止自行上线。
+- [x] 检查构建、测试、浏览器效果、修复问题后 push 并创建 teamo-lab/sub2api PR。同步协调任务，禁止自行上线。
 
 ## 实现方向
 
@@ -25,3 +25,5 @@ requestprofile 独立无业务依赖包，入口 context 贯穿到公共 HTTPUps
 ## 已接收的生产对接信息（开发期间不回复或同步其他任务）
 
 协调任务发来：43 stable57cca100d，Relay=false；容量重选候选0e7b6d6来自PR29合并c5d383f65。`openai.local_capacity_reselect_*` 的 origin 为 local_account_admission，必须作为本机准入重选，不能算成上游429/重试/fallback。继续本地开发与最新main验收。最终提交PR后再统一交接。
+
+交付完成：PR https://github.com/teamo-lab/sub2api/pull/32 已创建；仅在创建后向指定任务发送一次完整上下文与验收结果。未生产上线。
