@@ -1816,6 +1816,27 @@ func (s *OpenAIGatewayService) handleOpenAIStreamTerminalAccountSideEffects(
 	if isOpenAIGPTContentAuditRejection(account, firstNonEmpty(canonicalModel...), statusCode, payload) {
 		return statusCode, false
 	}
+	// 账号不具备该模型：写"账号+模型"冷却，让调度绕开这个账号，而不是每次都
+	// 重新撞一遍（线上样本中位 45s、最长 259s 才失败）。这里显式传 404，让流内
+	// 形态复用 HTTP 路径同一套判定与冷却，不新增第二套语义。
+	// 只冷却该模型，不停用账号：账号对其它模型仍然可用。
+	if s != nil && s.rateLimitService != nil && isOpenAIStreamModelNotFoundEvent(payload) {
+		ctx := context.Background()
+		if c != nil && c.Request != nil {
+			ctx = c.Request.Context()
+		}
+		model := firstNonEmpty(canonicalModel...)
+		if model == "" {
+			model = firstNonEmpty(
+				gjson.GetBytes(payload, "model").String(),
+				gjson.GetBytes(payload, "response.model").String(),
+			)
+		}
+		if strings.TrimSpace(model) != "" {
+			s.rateLimitService.HandleUpstreamModelNotFound(ctx, account, model, http.StatusNotFound, payload)
+		}
+		return statusCode, false
+	}
 	switch statusCode {
 	case http.StatusForbidden:
 		if !openAIStream403AccountFailure(payload, message) {
