@@ -1092,6 +1092,9 @@ func OpsErrorLoggerMiddleware(ops *service.OpsService) gin.HandlerFunc {
 			releaseOpsCaptureWriter(w)
 		}()
 		c.Writer = w
+		// Publish the namespace before any streaming keepalive can commit the
+		// headers. A later account selection upgrades this to sub2api:<id>.
+		service.SetRouterUpstreamRoute(c, "sub2api:unknown")
 		c.Next()
 		w.finalizeCapture()
 

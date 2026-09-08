@@ -46,6 +46,23 @@ func TestSetOpsSelectedAccountDoesNotPublishRouteToOrdinaryCaller(t *testing.T) 
 	require.Empty(t, recorder.Header().Get(service.RouterUpstreamRouteHeader))
 }
 
+func TestOpsErrorLoggerMiddlewarePublishesUnknownSub2APIRouteBeforeHandler(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(OpsErrorLoggerMiddleware(nil))
+	router.POST("/v1/responses", func(c *gin.Context) {
+		require.Equal(t, "sub2api:unknown", c.Writer.Header().Get(service.RouterUpstreamRouteHeader))
+		c.Status(http.StatusNoContent)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	req.Header.Set(service.RouterContractHeader, service.RouterContractV2)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	require.Equal(t, "sub2api:unknown", recorder.Header().Get(service.RouterUpstreamRouteHeader))
+}
+
 func (r *ingressRejectSettingRepo) GetValue(context.Context, string) (string, error) {
 	r.getValueCalls++
 	return "", service.ErrSettingNotFound
