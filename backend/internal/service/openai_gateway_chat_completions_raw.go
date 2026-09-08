@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/relay"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
@@ -289,12 +290,37 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	pendingLines := make([]string, 0, 8)
 	refusalDetector := newOpenAIChatSilentRefusalDetector(requestBodyLen)
 	var terminal openAIRawStreamTerminalState
+	var relayGate *relay.CommitGate
+	var relayObserver relay.ChatObserver
+	var relayErr error
+	relayDone := false
+	if s.teamoRelayEnabled(c) {
+		markTeamoRelayPath(c, "chat")
+		relayGate = relay.NewCommitGate(openAIFirstOutputStageMaxBytes)
+		defer relayGate.Close()
+	}
 
 	writeLine := func(line string) {
 		if clientDisconnected {
 			return
 		}
-		if !clientOutputStarted && !refusalDetector.ShouldReleaseClientOutput() {
+		if relayGate != nil && !relayGate.Committed() {
+			if _, err := relayGate.WriteString(line + "\n"); err != nil {
+				relayErr = err
+				return
+			}
+			if !relayObserver.Ready {
+				return
+			}
+			writeStreamHeaders()
+			// Mark before writing: even a partial write closes the retry window.
+			clientOutputStarted = true
+			if err := relayGate.CommitTo(c.Writer); err != nil {
+				clientDisconnected = true
+			}
+			return
+		}
+		if relayGate == nil && !clientOutputStarted && !refusalDetector.ShouldReleaseClientOutput() {
 			pendingLines = append(pendingLines, line)
 			return
 		}
@@ -340,10 +366,47 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 				}
 			}
 		}
+		if relayGate != nil {
+			if payload, ok := extractOpenAISSEDataLine(line); ok {
+				if strings.TrimSpace(payload) == "[DONE]" {
+					relayDone = true
+				}
+				if err := relayObserver.Observe(payload); err != nil {
+					relayErr = err
+					break
+				}
+				if len(relayObserver.Failure) > 0 {
+					body := []byte(relayObserver.Failure)
+					relayErr = s.teamoRelayChatFailure(c, resp, account, requestID, body, usage, clientOutputStarted)
+					var failover *UpstreamFailoverError
+					if !errors.As(relayErr, &failover) && !clientDisconnected {
+						SetRouterOutcome(c, RouterOutcomeTerminalError)
+						writeStreamHeaders()
+						clientOutputStarted = true
+						_, writeErr := c.Writer.WriteString("data: " + payload + "\n\n")
+						clientDisconnected = writeErr != nil
+						if !clientDisconnected {
+							c.Writer.Flush()
+						}
+					}
+					break
+				}
+			}
+		}
 		line = applyOllamaCloudRawChatCompletionsSSELine(account, line)
 		line = stripEmptyChatToolCallIdentityFromSSELine(line)
 
 		writeLine(line)
+		if relayErr != nil {
+			break
+		}
+		if relayDone {
+			writeLine("")
+			if !clientDisconnected {
+				c.Writer.Flush()
+			}
+			break
+		}
 		if line == "" {
 			if !clientDisconnected && clientOutputStarted {
 				c.Writer.Flush()
@@ -374,6 +437,13 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 		}
 	}
 
+	if relayErr != nil {
+		if !clientOutputStarted && (errors.Is(relayErr, relay.ErrLimit) || errors.Is(relayErr, relay.ErrMalformedFrame) || errors.Is(relayErr, relay.ErrIncompleteTool)) {
+			return resultWithUsage(), newOpenAIRawStreamTruncatedFailoverError(c, account, requestID, relayErr)
+		}
+		return resultWithUsage(), relayErr
+	}
+
 	scanErr := scanner.Err()
 	if scanErr != nil && !errors.Is(scanErr, context.Canceled) && !errors.Is(scanErr, context.DeadlineExceeded) {
 		logger.L().Warn("openai chat_completions raw: stream read error",
@@ -391,7 +461,7 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	// 上游在任何终止信号之前结束：连接被 reset（scanErr != nil）或干净 EOF。
 	// 两者都不能再记成功——此前统一返回 nil error，把上游截断伪装成
 	// `HTTP 200 + usage 0/0`，客户端收到半截回答且 Ops 侧完全无感。
-	if !clientAborted && terminal.IsTruncated(clientOutputStarted) {
+	if !clientAborted && ((relayGate != nil && !relayObserver.Complete()) || (relayGate == nil && terminal.IsTruncated(clientOutputStarted))) {
 		cause := scanErr
 		if cause == nil {
 			cause = ErrOpenAIUpstreamStreamTruncated
@@ -406,7 +476,7 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 		)
 		if !clientOutputStarted {
 			// 响应头尚未提交：可以透明换号重试，客户端不会看到半截流。
-			return nil, newOpenAIRawStreamTruncatedFailoverError(c, account, requestID, cause)
+			return resultWithUsage(), newOpenAIRawStreamTruncatedFailoverError(c, account, requestID, cause)
 		}
 		// 已写出语义字节：无法再 failover，改为带类型的上游错误。handler 会据此
 		// 补发 SSE error 帧并把本次请求计入 SLA 失败。

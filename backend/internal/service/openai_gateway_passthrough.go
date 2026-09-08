@@ -19,6 +19,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/relay"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
@@ -2122,6 +2123,12 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	// 立刻放行（fail-open），迟到的保护不能变成饿死下游。
 	pendingLines := make([]string, 0, 8)
 	pendingBytes := 0
+	var relayGate *relay.CommitGate
+	if s.teamoRelayEnabled(c) {
+		markTeamoRelayPath(c, "responses_passthrough")
+		relayGate = relay.NewCommitGate(openAIFirstOutputStageMaxBytes)
+		defer relayGate.Close()
+	}
 
 	// ── 首个可见输出之前的下游 keepalive ──────────────────────────────────
 	//
@@ -2172,6 +2179,12 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	}
 	defer flushPendingOutput()
 	writePendingLines := func() bool {
+		if relayGate != nil && !relayGate.Committed() {
+			if err := relayGate.CommitTo(w); err != nil {
+				clientDisconnected = true
+				return false
+			}
+		}
 		for _, pending := range pendingLines {
 			if _, err := fmt.Fprintln(w, pending); err != nil {
 				clientDisconnected = true
@@ -2328,7 +2341,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				// Reasoning-only output reached the client: the upstream failed before
 				// any answer, so replay on another account instead of forwarding the
 				// terminal error (see native_sse for the same rule).
-				if outputStarted && !answerOutputReached() && !cyberHit && !clientDisconnected &&
+				if !s.teamoRelayEnabled(c) && outputStarted && !answerOutputReached() && !cyberHit && !clientDisconnected &&
 					account != nil && account.Platform == PlatformOpenAI &&
 					openAIStreamFailedEventFailoverAfterReasoning(dataBytes, eventType, failedMessage) {
 					failoverErr := s.newOpenAIStreamFailoverErrorWithModel(c, account, true, upstreamRequestID, dataBytes, failedMessage, mappedModel, resp.Header)
@@ -2434,11 +2447,17 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		}
 
 		if !clientDisconnected && !failureDelivered && !suppressCurrentEvent {
-			if !clientOutputStarted && !lineStartsClientOutput &&
+			if relayGate == nil && !clientOutputStarted && !lineStartsClientOutput &&
 				pendingBytes+len(line) > openAIPassthroughPendingMaxBytes {
 				lineStartsClientOutput = true
 			}
 			if !clientOutputStarted && !lineStartsClientOutput {
+				if relayGate != nil {
+					if _, err := relayGate.WriteString(line + "\n"); err != nil {
+						return resultWithUsage(), s.newOpenAIStreamFailoverError(c, account, true, upstreamRequestID, nil, "Relay precommit buffer limit exceeded", resp.Header)
+					}
+					continue
+				}
 				pendingLines = append(pendingLines, line)
 				pendingBytes += len(line)
 				continue
@@ -2448,7 +2467,14 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			if !clientOutputStarted {
 				stopKeepalive()
 			}
-			if !clientOutputStarted && len(pendingLines) > 0 {
+			if !clientOutputStarted && (len(pendingLines) > 0 || relayGate != nil) {
+				if relayGate != nil {
+					outcome := RouterOutcomeBusinessCommit
+					if sawFailedEvent {
+						outcome = RouterOutcomeTerminalError
+					}
+					SetRouterOutcome(c, outcome)
+				}
 				if !writePendingLines() {
 					continue
 				}
@@ -2523,7 +2549,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			return resultWithUsage(),
 				s.newOpenAIStreamFailoverError(c, account, true, upstreamRequestID, nil, "OpenAI stream ended before a terminal event")
 		}
-		if !answerOutputReached() && account != nil && account.Platform == PlatformOpenAI {
+		if !s.teamoRelayEnabled(c) && !answerOutputReached() && account != nil && account.Platform == PlatformOpenAI {
 			failoverErr := s.newOpenAIStreamFailoverError(c, account, true, upstreamRequestID, nil, "OpenAI stream ended after reasoning-only output")
 			failoverErr.SafeToFailoverAfterWrite = true
 			logOpenAIFailoverAfterReasoningOutput(ctx, account, "passthrough_sse", upstreamRequestID, "eof")

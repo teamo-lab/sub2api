@@ -14,6 +14,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
+	"github.com/Wei-Shaw/sub2api/internal/relay"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
@@ -713,6 +714,12 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 	pendingAnswerOutput := false
 	pendingSSE := make([]string, 0, 4)
 	pendingSSEBytes := 0
+	var relayGate *relay.CommitGate
+	if s.teamoRelayEnabled(c) {
+		markTeamoRelayPath(c, "responses_to_chat")
+		relayGate = relay.NewCommitGate(openAIFirstOutputStageMaxBytes)
+		defer relayGate.Close()
+	}
 	refusalDetector := newOpenAIChatSilentRefusalDetector(requestBodyLen)
 	var streamFailoverErr *UpstreamFailoverError
 	var streamNonFailoverErr error
@@ -863,7 +870,7 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 			if strings.TrimSpace(event.Type) == "error" {
 				shouldFailover = openAIStreamErrorEventShouldFailover(payloadBytes, message)
 			}
-			failoverAfterReasoning := clientOutputStarted && !answerOutputStarted && !pendingAnswerOutput && !clientDisconnected &&
+			failoverAfterReasoning := !s.teamoRelayEnabled(c) && clientOutputStarted && !answerOutputStarted && !pendingAnswerOutput && !clientDisconnected &&
 				account != nil && account.Platform == PlatformOpenAI
 			if shouldFailover && (!clientOutputStarted || failoverAfterReasoning) {
 				streamFailoverErr = s.newOpenAIStreamFailoverErrorWithModel(c, account, false, requestID, payloadBytes, message, upstreamModel, resp.Header)
@@ -928,6 +935,27 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 					)
 					continue
 				}
+				if relayGate != nil && !relayGate.Committed() {
+					if _, err := relayGate.WriteString(sse); err != nil {
+						streamFailoverErr = s.newOpenAIStreamFailoverErrorWithModel(c, account, false, requestID, nil, "Relay precommit buffer limit exceeded", upstreamModel, resp.Header)
+						return true
+					}
+					if !eventStartsClientOutput || !refusalDetector.ShouldReleaseClientOutput() {
+						continue
+					}
+					writeStreamHeaders()
+					clientOutputStarted = true
+					if err := relayGate.CommitTo(c.Writer); err != nil {
+						clientDisconnected = true
+						break
+					}
+					stopFirstOutputTimer()
+					if pendingAnswerOutput {
+						answerOutputStarted = true
+						pendingAnswerOutput = false
+					}
+					continue
+				}
 				if !clientOutputStarted &&
 					(!eventStartsClientOutput || !refusalDetector.ShouldReleaseClientOutput()) &&
 					pendingSSEBytes+len(sse) <= openAIPassthroughPendingMaxBytes {
@@ -977,7 +1005,7 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 
 	finalizeStream := func() (*OpenAIForwardResult, error) {
 		if streamFailoverErr != nil {
-			if c == nil || c.Writer == nil || !c.Writer.Written() {
+			if !s.teamoRelayEnabled(c) && (c == nil || c.Writer == nil || !c.Writer.Written()) {
 				return nil, streamFailoverErr
 			}
 			return resultWithUsage(), streamFailoverErr
@@ -990,6 +1018,12 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 				refusalDetector.ObserveChatChunk(chunk)
 				sse, err := apicompat.ChatChunkToSSE(chunk)
 				if err != nil {
+					continue
+				}
+				if relayGate != nil && !relayGate.Committed() {
+					if _, err := relayGate.WriteString(sse); err != nil {
+						return resultWithUsage(), s.newOpenAIStreamFailoverErrorWithModel(c, account, false, requestID, nil, "Relay precommit buffer limit exceeded", upstreamModel, resp.Header)
+					}
 					continue
 				}
 				if !clientOutputStarted &&
@@ -1029,6 +1063,13 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 		if !clientDisconnected && !clientOutputStarted {
 			if refusalDetector.IsSilentRefusal() {
 				return nil, newOpenAISilentRefusalFailoverError(c, account, requestID)
+			}
+			if relayGate != nil && !relayGate.Committed() {
+				writeStreamHeaders()
+				clientOutputStarted = true
+				if err := relayGate.CommitTo(c.Writer); err != nil {
+					clientDisconnected = true
+				}
 			}
 			if len(pendingSSE) > 0 {
 				writeStreamHeaders()
@@ -1073,7 +1114,7 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 		}
 	}
 	missingTerminalErr := func() (*OpenAIForwardResult, error) {
-		if !clientDisconnected && account != nil && account.Platform == PlatformOpenAI && !answerOutputStarted && !pendingAnswerOutput {
+		if !clientDisconnected && (!s.teamoRelayEnabled(c) || !clientOutputStarted) && account != nil && account.Platform == PlatformOpenAI && !answerOutputStarted && !pendingAnswerOutput {
 			failoverErr := s.newOpenAIStreamFailoverErrorWithModel(
 				c, account, false, requestID, nil,
 				"OpenAI stream ended before a terminal event", upstreamModel, resp.Header,

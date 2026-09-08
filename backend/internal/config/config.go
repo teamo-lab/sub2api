@@ -1023,6 +1023,11 @@ type GatewayConfig struct {
 	// GrokResponseHeaderTimeout bounds the pre-first-byte wait for xAI/Grok.
 	// A zero value uses the provider-safe default instead of the generic gateway timeout.
 	GrokResponseHeaderTimeout int `mapstructure:"grok_response_header_timeout"`
+	// TeamoRelayEnabled enables the in-process commit gate for authenticated groups.
+	// Disabled by default; it changes neither account policy nor protocol mode.
+	TeamoRelayEnabled bool `mapstructure:"teamo_relay_enabled"`
+	// TeamoRelayGroupIDs is an explicit server-side allowlist. Empty means no exposure.
+	TeamoRelayGroupIDs []int64 `mapstructure:"teamo_relay_group_ids"`
 	// OpenAIFirstOutputTimeoutSeconds: native HTTP Responses 首个语义输出超时（秒），0表示禁用。
 	OpenAIFirstOutputTimeoutSeconds int `mapstructure:"openai_first_output_timeout_seconds"`
 	// OpenAIHighEffortFirstOutputTimeoutSeconds: high/xhigh/max 推理的首个语义输出超时（秒）。
@@ -2484,6 +2489,8 @@ func setDefaults() {
 	viper.SetDefault("gateway.response_header_timeout", 600) // 600秒(10分钟)等待上游响应头，LLM高负载时可能排队较久
 	viper.SetDefault("gateway.openai_response_header_timeout", 0)
 	viper.SetDefault("gateway.grok_response_header_timeout", 120)
+	viper.SetDefault("gateway.teamo_relay_enabled", false)
+	viper.SetDefault("gateway.teamo_relay_group_ids", []int64{})
 	viper.SetDefault("gateway.openai_first_output_timeout_seconds", 0)
 	viper.SetDefault("gateway.openai_high_effort_first_output_timeout_seconds", 0)
 	viper.SetDefault("gateway.log_upstream_error_body", true)
@@ -3422,6 +3429,11 @@ func (c *Config) Validate() error {
 	}
 	if c.Gateway.GrokResponseHeaderTimeout < 0 || c.Gateway.GrokResponseHeaderTimeout > 1800 {
 		return fmt.Errorf("gateway.grok_response_header_timeout must be between 0-1800 seconds")
+	}
+	for _, groupID := range c.Gateway.TeamoRelayGroupIDs {
+		if groupID <= 0 {
+			return fmt.Errorf("gateway.teamo_relay_group_ids must contain positive group IDs")
+		}
 	}
 	if c.Gateway.OpenAIFirstOutputTimeoutSeconds < 0 || c.Gateway.OpenAIFirstOutputTimeoutSeconds > 600 ||
 		(c.Gateway.OpenAIFirstOutputTimeoutSeconds > 0 && c.Gateway.OpenAIFirstOutputTimeoutSeconds < 30) {

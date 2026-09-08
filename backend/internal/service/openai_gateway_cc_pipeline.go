@@ -52,6 +52,9 @@ func (s *OpenAIGatewayService) newStreamHeaderWriter(c *gin.Context, upstream ht
 			return
 		}
 		headersWritten = true
+		if s.teamoRelayEnabled(c) {
+			SetRouterOutcome(c, RouterOutcomeBusinessCommit)
+		}
 		if s.responseHeaderFilter != nil {
 			responseheaders.WriteFilteredHeaders(c.Writer.Header(), upstream, s.responseHeaderFilter)
 		}
@@ -261,11 +264,15 @@ type ccStreamScanState struct {
 func (s *OpenAIGatewayService) scanCCStream(
 	c *gin.Context,
 	resp *http.Response,
+	account *Account,
 	logPrefix string,
 	requestID string,
 	startTime time.Time,
 	emit func(*apicompat.ChatCompletionsChunk),
 ) ccStreamScanState {
+	if s.teamoRelayEnabled(c) {
+		return s.scanCCStreamWithRelay(c, resp, account, requestID, startTime, emit)
+	}
 	var st ccStreamScanState
 
 	scanner := s.newUpstreamSSEScanner(resp.Body)

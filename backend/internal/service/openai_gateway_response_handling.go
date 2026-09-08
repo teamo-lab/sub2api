@@ -17,6 +17,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
+	"github.com/Wei-Shaw/sub2api/internal/relay"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -127,9 +128,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	ttftMode := s.openAITTFTMode(ctx)
 	firstOutputProgressObserved := false
 	bufferedWriter := bufio.NewWriterSize(w, 4*1024)
-	var firstOutputStage *openAIFirstOutputStage
+	var firstOutputStage openAIStreamStage
 	if stageFirstOutput {
-		firstOutputStage = newDefaultOpenAIFirstOutputStage()
+		firstOutputStage = s.newOpenAIStreamStage(c)
 		defer func() {
 			if err := firstOutputStage.Close(); err != nil {
 				logger.LegacyPrintf("service.openai_gateway", "OpenAI first-output staging cleanup failed: account=%d model=%s error=%v", account.ID, originalModel, err)
@@ -137,19 +138,19 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		}()
 	}
 	writePendingString := func(value string) (int, error) {
-		if firstOutputStage != nil && !firstOutputStage.closed {
+		if firstOutputStage != nil && !firstOutputStage.Closed() {
 			return firstOutputStage.WriteString(value)
 		}
 		return bufferedWriter.WriteString(value)
 	}
 	pendingBytes := func() int64 {
-		if firstOutputStage != nil && !firstOutputStage.closed {
+		if firstOutputStage != nil && !firstOutputStage.Closed() {
 			return firstOutputStage.Buffered()
 		}
 		return int64(bufferedWriter.Buffered())
 	}
 	flushBuffered := func() error {
-		if firstOutputStage != nil && !firstOutputStage.closed {
+		if firstOutputStage != nil && !firstOutputStage.Closed() {
 			if err := firstOutputStage.CommitTo(w); err != nil {
 				return err
 			}
@@ -277,9 +278,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	eventStartsTTFTOutput := false
 	eventShouldFlush := false
 	handlePendingWriteError := func(err error) {
-		if firstOutputStage != nil && !firstOutputStage.closed {
+		if firstOutputStage != nil && !firstOutputStage.Closed() {
 			message := "OpenAI first-output staging failed"
-			if errors.Is(err, errOpenAIFirstOutputStageLimit) {
+			if errors.Is(err, errOpenAIFirstOutputStageLimit) || errors.Is(err, relay.ErrLimit) {
 				message = "OpenAI first-output staging limit exceeded"
 			}
 			logger.LegacyPrintf("service.openai_gateway", "%s: account=%d model=%s error=%v", message, account.ID, originalModel, err)
@@ -414,7 +415,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				"OpenAI stream ended before a terminal event",
 			)
 		}
-		if !sawTerminalEvent && !answerOutputReached() && !clientDisconnected && account != nil && account.Platform == PlatformOpenAI {
+		if !s.teamoRelayEnabled(c) && !sawTerminalEvent && !answerOutputReached() && !clientDisconnected && account != nil && account.Platform == PlatformOpenAI {
 			// Only reasoning reached the client before the upstream dropped the
 			// stream: replay on another account rather than surfacing a truncated
 			// stream with no answer.
@@ -582,7 +583,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				// upstream failed (typically capacity shedding) before any answer.
 				// Replaying on another account is safe for the client, so treat it
 				// like a pre-output failure instead of forwarding the terminal error.
-				failoverAfterReasoning := outputStarted && !answerOutputReached() && !cyberHit && !clientDisconnected &&
+				failoverAfterReasoning := !s.teamoRelayEnabled(c) && outputStarted && !answerOutputReached() && !cyberHit && !clientDisconnected &&
 					account != nil && account.Platform == PlatformOpenAI &&
 					openAIStreamFailedEventFailoverAfterReasoning(dataBytes, eventType, failedMessage)
 				if failoverAfterReasoning {
