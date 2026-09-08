@@ -35,6 +35,16 @@ executor identity、RPC、持久容量对账或 receipt outbox。当前 Go 接�
 记录带原有请求关联信息和规范化的 `router_trace_id`。不写 prompt、凭据或正文。
 这些日志是执行路径证据，HTTP 200 不是成功证明；SLA 仍以 TR 最终客户端结果为准。
 
+蓝绿 staging 支持候选槽独立配置：本机审计发布包装器读取
+`SUB2API_RELEASE_RELAY_ENABLED=true|false|inherit` 和
+`SUB2API_RELEASE_RELAY_GROUP_IDS=<已核实的正整数ID列表>|inherit`，传递到 stage helper。
+省略时继承稳定槽运行容器的配置；新启用但未指定任何分组会被拒绝。
+stage helper 生成临时 Compose environment overlay，只重建已确认 0% / 无活动流的候选槽，
+保留原始 Compose、公共 runtime.env、稳定槽和 worker。容器启动后必须读回开关和分组一致，
+否则不能记录为 staging 成功。临时 overlay 随命令退出清理，结果报告包含配置摘要。
+配置读回只能证明变量传递，应用模块的实际生效仍须由路径日志和请求验收证明。
+这些参数沿用既有 lease、备份、版本/digest、NAT 和跨机真实 Key 门禁。
+
 实验必须按入口分流归属统计，不能排除未走到流处理器的排队/连接失败。
 关联缺失、重复 trace ID、跨槽重试以及跨资源组重试需要显式核对，不能将无法归属的请求
 当作正常对照或成功实验请求。仅靠最终一次 Sub request ID 不足以覆盖中间失败尝试。
@@ -61,5 +71,6 @@ executor identity、RPC、持久容量对账或 receipt outbox。当前 Go 接�
 - 已完成真实 HTTP 的读取停顿、客户端取消及关闭连接测试；隔离本机 PostgreSQL/Redis/Sub
   的 Responses 与 Chat 上游场景验证了成功、组内恢复、部分工具、提交后失败、30秒无输出超时
   和实际用量/余额一致性。这是受控上游的开发验收，仍需生产真实渠道验证。
-- 分槽配置发布、TR 端到端关联覆盖率、真实供应商计费及生产验收尚未完成。
+- 候选槽配置隔离已完成本地隔离测试；实际发布、TR 端到端关联覆盖率、真实供应商计费
+  及生产验收尚未完成。
 - 当前 Draft PR #20 未合并、未部署、未开 10% / 5% 实验，没有线上收益结论。
