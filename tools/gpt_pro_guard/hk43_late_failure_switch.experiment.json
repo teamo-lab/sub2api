@@ -11,6 +11,7 @@
     "openai_late_failure_switch_group_ids": [3]
   },
   "minimum_first_forward_seconds": 60,
+  "single_upstream_dispatch_required": true,
   "minimum_also_at_least_rule_budget": true,
   "allowed_recoverable_statuses": [502, 503, 504],
   "modify_global_recovery_rules": false,

@@ -14,7 +14,7 @@ import (
 )
 
 func TestOpenAILateFailureSwitchScopeAndFloor(t *testing.T) {
-	for _, name := range []string{"allowed_502", "allowed_503", "allowed_504", "off", "missing_enabled", "string_enabled", "missing_groups", "empty_groups", "string_group", "fractional_group", "nonpositive_group", "wrong_group", "wrong_account", "other_account_enabled", "other_group_enabled", "wrong_platform", "oauth", "unauthenticated", "body_header_spoof", "not_first", "no_handler_switch", "no_rule_switch", "no_retry", "return_mode", "default_mode", "short", "60s_boundary", "budget_floor", "budget_boundary", "429", "400", "500", "committed", "written_answer", "certified_reasoning_only", "canceled_original", "canceled_current"} {
+	for _, name := range []string{"allowed_502", "allowed_503", "allowed_504", "off", "missing_enabled", "string_enabled", "missing_groups", "empty_groups", "string_group", "fractional_group", "nonpositive_group", "wrong_group", "wrong_account", "other_account_enabled", "other_group_enabled", "wrong_platform", "oauth", "unauthenticated", "body_header_spoof", "not_first", "unknown_attempts", "multiple_attempts", "no_handler_switch", "no_rule_switch", "no_retry", "return_mode", "default_mode", "short", "60s_boundary", "budget_floor", "budget_boundary", "429", "400", "500", "committed", "written_answer", "certified_reasoning_only", "canceled_original", "canceled_current"} {
 		t.Run(name, func(t *testing.T) {
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
 			c.Request = httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{"group_id":3,"account_id":22}`))
@@ -24,7 +24,7 @@ func TestOpenAILateFailureSwitchScopeAndFloor(t *testing.T) {
 			a := &Account{ID: 22, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Extra: map[string]any{openAILateFailureSwitchEnabledKey: true, openAILateFailureSwitchGroupsKey: []int64{3}}}
 			failure := &UpstreamFailoverError{StatusCode: 502}
 			p := &model.ErrorRecoveryPolicy{Mode: "limited", SameAccountRetries: 1, AccountSwitches: 3, BudgetSeconds: 30}
-			attempt := &ErrorRecoveryAttempt{First: true, Elapsed: time.Minute, OriginalContext: context.Background(), HandlerCanSwitch: true, WrittenSizeBeforeForward: OpenAICompactKeepaliveAdjustedWrittenSize(c)}
+			attempt := &ErrorRecoveryAttempt{First: true, Elapsed: time.Minute, UpstreamAttempts: 1, OriginalContext: context.Background(), HandlerCanSwitch: true, WrittenSizeBeforeForward: OpenAICompactKeepaliveAdjustedWrittenSize(c)}
 			want := false
 			switch name {
 			case "allowed_502", "60s_boundary":
@@ -71,6 +71,11 @@ func TestOpenAILateFailureSwitchScopeAndFloor(t *testing.T) {
 				c.Set("api_key", nil)
 			case "not_first":
 				attempt.First = false
+			case "unknown_attempts":
+				attempt.UpstreamAttempts = 0
+			case "multiple_attempts":
+				attempt.UpstreamAttempts = 2
+				attempt.Elapsed = 70 * time.Second
 			case "no_handler_switch":
 				attempt.HandlerCanSwitch = false
 			case "no_rule_switch":
@@ -125,7 +130,7 @@ func TestOpenAILateFailureSwitchReusesBudgetAndOnlySkipsOnce(t *testing.T) {
 		a.Extra = map[string]any{openAILateFailureSwitchEnabledKey: true, openAILateFailureSwitchGroupsKey: []int64{3}}
 		gid := int64(3)
 		c.Set("api_key", &APIKey{ID: 901, GroupID: &gid})
-		attempt := ErrorRecoveryAttempt{First: true, Elapsed: 5 * time.Minute, OriginalContext: c.Request.Context(), HandlerCanSwitch: true, WrittenSizeBeforeForward: OpenAICompactKeepaliveAdjustedWrittenSize(c)}
+		attempt := ErrorRecoveryAttempt{First: true, Elapsed: 5 * time.Minute, UpstreamAttempts: 1, OriginalContext: c.Request.Context(), HandlerCanSwitch: true, WrittenSizeBeforeForward: OpenAICompactKeepaliveAdjustedWrittenSize(c)}
 		require.Equal(t, ErrorRecoverySwitch, ApplyErrorRecoveryAfterAttempt(c, a, "gpt", failure, attempt))
 		s := recoveryState(c)
 		deadline, timer, policy := s.deadline, s.timer, s.rule.RecoveryPolicy

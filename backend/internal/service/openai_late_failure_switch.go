@@ -13,6 +13,9 @@ import (
 const (
 	openAILateFailureSwitchEnabledKey = "openai_late_failure_switch_enabled"
 	openAILateFailureSwitchGroupsKey  = "openai_late_failure_switch_group_ids"
+	openAILateFailureSwitchComponent  = "service.openai.error_recovery"
+	openAILateFailureSwitchOrigin     = "late_upstream_failure"
+	openAILateFailureSwitchEvent      = "openai.late_failure_retry_skipped"
 	// The first HK43 experiment enables only account22/group3 in its manifest.
 	// Application identity comes from selected Account.extra + authenticated
 	// key group, never from database numbers that could alias on another host.
@@ -21,17 +24,19 @@ const (
 
 // ErrorRecoveryAttempt contains server-observed facts from the entry handler.
 // It is supplied only after the existing no-answer / safe-replay checks pass.
-// Local admission probes do not count as Forward attempts.
+// Elapsed starts at the central upstream dispatch, not outer Forward entry.
+// Local admission probes do not count; internal HTTP dispatches do count.
 type ErrorRecoveryAttempt struct {
 	First                    bool
 	Elapsed                  time.Duration
+	UpstreamAttempts         int
 	OriginalContext          context.Context
 	HandlerCanSwitch         bool
 	WrittenSizeBeforeForward int
 }
 
 func openAILateFailureSwitchAllowed(c *gin.Context, account *Account, failure *UpstreamFailoverError, p *model.ErrorRecoveryPolicy, attempt *ErrorRecoveryAttempt) bool {
-	if attempt == nil || !attempt.First || !attempt.HandlerCanSwitch || attempt.OriginalContext == nil || attempt.OriginalContext.Err() != nil ||
+	if attempt == nil || !attempt.First || attempt.UpstreamAttempts != 1 || !attempt.HandlerCanSwitch || attempt.OriginalContext == nil || attempt.OriginalContext.Err() != nil ||
 		c == nil || c.Request == nil || c.Writer == nil || c.Request.Context().Err() != nil || IsResponseCommitted(c) ||
 		account == nil || account.Platform != PlatformOpenAI || account.Type != AccountTypeAPIKey ||
 		failure == nil || p == nil || p.Mode != "limited" || p.SameAccountRetries <= 0 || p.AccountSwitches <= 0 {
