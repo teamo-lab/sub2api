@@ -18,7 +18,12 @@ import (
 )
 
 // Forward forwards request to OpenAI API
-func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
+func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (out *OpenAIForwardResult, forwardErr error) {
+	defer func() {
+		if budgetErr := finishOpenAIEncryptedSemanticRetry(c); budgetErr != nil {
+			out, forwardErr = nil, budgetErr
+		}
+	}()
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)
 	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
@@ -1031,6 +1036,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	rejectedFieldRetryState := openAIResponsesRejectedFieldRetryStateForRequest(c, body)
 	for {
 		initializeOpenAIEncryptedSemanticRetry(c, account, body)
+		ctx = openAIEncryptedSemanticRetryContext(c, ctx)
 		// Build upstream request
 		upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
 		var headerGuard *openAIFirstOutputHeaderGuard

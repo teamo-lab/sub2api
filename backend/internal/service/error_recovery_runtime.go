@@ -190,6 +190,7 @@ func RecoveryBudgetExpired(c *gin.Context) bool {
 
 // Semantic output ends recovery. Keep the successful stream alive beyond budget.
 func CompleteErrorRecovery(c *gin.Context) {
+	completeOpenAIEncryptedSemanticRetry(c)
 	s := recoveryState(c)
 	if s == nil {
 		return

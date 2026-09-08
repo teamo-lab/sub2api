@@ -364,6 +364,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	var imageOutputSizes []string
 	for {
 		initializeOpenAIEncryptedSemanticRetry(c, account, body)
+		ctx = openAIEncryptedSemanticRetryContext(c, ctx)
 		actualModel := strings.TrimSpace(gjson.GetBytes(body, "model").String())
 		if actualModel == "" {
 			actualModel = reqModel
