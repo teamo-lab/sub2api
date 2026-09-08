@@ -182,6 +182,12 @@ func (s *OpsSystemLogSink) shouldIndex(event *logger.LogEvent) bool {
 			}
 		}
 	}
+	// Only this server-generated recovery decision joins the request outcome.
+	// Do not index unrelated recovery info or a matching name from another source.
+	if level == "info" && component == openAILateFailureSwitchComponent && event.Message == openAILateFailureSwitchEvent {
+		origin, _ := event.Fields["origin"].(string)
+		return origin == openAILateFailureSwitchOrigin
+	}
 	return false
 }
 

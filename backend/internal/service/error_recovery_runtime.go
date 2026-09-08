@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/Wei-Shaw/sub2api/internal/model"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
+	"go.uber.org/zap"
 	"strings"
 	"sync"
 	"time"
@@ -130,10 +132,22 @@ func (s *ErrorPassthroughService) matchRecoveryRule(account *Account, requestedM
 // ApplyErrorRecovery is called only where replay is still safe, before default
 // retry/switch handling. The first matching rule owns one immutable request budget.
 func ApplyErrorRecovery(c *gin.Context, account *Account, requestedModel string, failure *UpstreamFailoverError) ErrorRecoveryAction {
+	return applyErrorRecovery(c, account, requestedModel, failure, nil)
+}
+
+// ApplyErrorRecoveryAfterAttempt uses the same rule, timer and switch counter as
+// ApplyErrorRecovery. The optional HK43 experiment can only skip the first
+// account's retry; it never changes the cached policy or starts a second budget.
+func ApplyErrorRecoveryAfterAttempt(c *gin.Context, account *Account, requestedModel string, failure *UpstreamFailoverError, attempt ErrorRecoveryAttempt) ErrorRecoveryAction {
+	return applyErrorRecovery(c, account, requestedModel, failure, &attempt)
+}
+
+func applyErrorRecovery(c *gin.Context, account *Account, requestedModel string, failure *UpstreamFailoverError, attempt *ErrorRecoveryAttempt) ErrorRecoveryAction {
 	if c == nil || c.Request == nil || account == nil || failure == nil {
 		return ErrorRecoveryDefault
 	}
 	s := recoveryState(c)
+	firstFailure := s == nil
 	if s == nil {
 		svc := getBoundErrorPassthroughService(c)
 		rule := svc.matchRecoveryRule(account, requestedModel, failure)
@@ -166,7 +180,8 @@ func ApplyErrorRecovery(c *gin.Context, account *Account, requestedModel string,
 		return ErrorRecoveryStop
 	}
 	p := s.rule.RecoveryPolicy
-	if s.retries[account.ID] < p.SameAccountRetries {
+	skipRetry := firstFailure && s.switches < p.AccountSwitches && openAILateFailureSwitchAllowed(c, account, failure, p, attempt)
+	if !skipRetry && s.retries[account.ID] < p.SameAccountRetries {
 		s.retries[account.ID]++
 		delay := 500 * time.Millisecond
 		for i := 1; i < s.retries[account.ID] && delay < 8*time.Second; i++ {
@@ -185,6 +200,20 @@ func ApplyErrorRecovery(c *gin.Context, account *Account, requestedModel string,
 		return ErrorRecoveryStop
 	}
 	s.switches++
+	if skipRetry {
+		value, _ := c.Get("api_key")
+		key := value.(*APIKey) // verified by openAILateFailureSwitchAllowed
+		logger.FromContext(c.Request.Context()).Info(openAILateFailureSwitchEvent,
+			zap.String("component", openAILateFailureSwitchComponent), zap.String("origin", openAILateFailureSwitchOrigin),
+			zap.Int64("user_id", key.UserID), zap.Int64("api_key_id", key.ID),
+			zap.String("platform", account.Platform), zap.String("model", requestedModel),
+			zap.Int64("account_id", account.ID), zap.Int64("group_id", openAILateFailureSwitchGroup(c)),
+			zap.Int64("rule_id", s.rule.ID), zap.Int("upstream_status", failure.StatusCode),
+			zap.Int("upstream_attempt_count", attempt.UpstreamAttempts),
+			zap.Int64("attempt_elapsed_ms", attempt.Elapsed.Milliseconds()),
+			zap.Int64("minimum_wait_ms", openAILateFailureSwitchMinimum(p).Milliseconds()),
+			zap.Int("switch_count", s.switches), zap.Int("budget_seconds", p.BudgetSeconds))
+	}
 	return ErrorRecoverySwitch
 }
 func RecoveryBudgetExpired(c *gin.Context) bool {
