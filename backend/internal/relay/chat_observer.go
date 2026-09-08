@@ -8,6 +8,7 @@ import (
 
 var ErrMalformedFrame = errors.New("invalid Chat Completions stream frame")
 var ErrIncompleteTool = errors.New("Chat Completions stream ended with an unfinished tool call")
+var ErrEmptyResponse = errors.New("Chat Completions stream ended without output or usage")
 
 // ChatObserver reads execution facts only. It neither converts protocols nor
 // classifies supplier error codes for retry. Usage alone is not a terminal: some
@@ -19,6 +20,8 @@ type ChatObserver struct {
 	failed       bool
 	pendingTools map[int]bool
 	openChoices  map[int]bool
+	hasOutput    bool
+	hasUsage     bool
 }
 
 func (o *ChatObserver) Observe(payload string) error {
@@ -30,6 +33,10 @@ func (o *ChatObserver) Observe(payload string) error {
 		if len(o.pendingTools) != 0 {
 			o.failed = true
 			return ErrIncompleteTool
+		}
+		if !o.hasOutput && !o.hasUsage {
+			o.failed = true
+			return ErrEmptyResponse
 		}
 		o.Terminal = true
 		o.Ready = true
@@ -65,6 +72,14 @@ func (o *ChatObserver) Observe(payload string) error {
 	if frame.Keepalive || frame.KeepaliveAlt {
 		return nil
 	}
+	var usage struct {
+		Prompt     int `json:"prompt_tokens"`
+		Completion int `json:"completion_tokens"`
+		Total      int `json:"total_tokens"`
+	}
+	if presentJSON(frame.Usage) && json.Unmarshal(frame.Usage, &usage) == nil && (usage.Prompt > 0 || usage.Completion > 0 || usage.Total > 0) {
+		o.hasUsage = true
+	}
 	if frame.Type == "error" || presentJSON(frame.Error) {
 		o.failed = true
 		o.Failure = append(json.RawMessage(nil), payload...)
@@ -87,9 +102,11 @@ func (o *ChatObserver) Observe(payload string) error {
 		// Once reasoning is sent it is also a commit, regardless of visibility
 		// in a particular client UI. Never restart another response behind it.
 		if delta.Content != "" || delta.ReasoningContent != "" || delta.Reasoning != "" || delta.Refusal != "" {
+			o.hasOutput = true
 			o.Ready = true
 		}
 		if len(delta.ToolCalls) > 0 || presentJSON(delta.FunctionCall) {
+			o.hasOutput = true
 			if o.pendingTools == nil {
 				o.pendingTools = make(map[int]bool)
 			}
@@ -99,16 +116,19 @@ func (o *ChatObserver) Observe(payload string) error {
 			o.openChoices[choice.Index] = false
 			delete(o.pendingTools, choice.Index)
 			o.Terminal = true
-			if len(o.pendingTools) == 0 {
+			if len(o.pendingTools) == 0 && (o.hasOutput || o.hasUsage) {
 				o.Ready = true
 			}
 		}
+	}
+	if o.Complete() {
+		o.Ready = true
 	}
 	return nil
 }
 
 func (o *ChatObserver) Complete() bool {
-	if !o.Terminal || o.failed || len(o.pendingTools) != 0 {
+	if !o.Terminal || o.failed || len(o.pendingTools) != 0 || (!o.hasOutput && !o.hasUsage) {
 		return false
 	}
 	for _, open := range o.openChoices {

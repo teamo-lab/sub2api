@@ -27,7 +27,7 @@ const (
 // trusted from public clients; the caller must already be an authenticated
 // internal Gateway request before using this helper.
 func RouterContractV2Requested(c *gin.Context) bool {
-	if c == nil {
+	if c == nil || c.Request == nil {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(c.GetHeader(RouterContractHeader)), RouterContractV2)

@@ -8,6 +8,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestSetRouterOutcomeWithoutRequest(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	require.False(t, RouterContractV2Requested(c))
+	require.NotPanics(t, func() { SetRouterOutcome(c, RouterOutcomeRetryableAbort) })
+	require.Empty(t, c.Writer.Header().Get(RouterOutcomeHeader))
+}
+
 func TestSetRouterOutcomeIsOptIn(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, tc := range []struct {

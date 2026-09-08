@@ -1,7 +1,6 @@
 package service
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +14,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/relay"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
 )
 
@@ -23,7 +23,7 @@ import (
 // adapters to leak response.created/message_start and pin a failing attempt.
 func (s *OpenAIGatewayService) scanCCStreamWithRelay(
 	c *gin.Context, resp *http.Response, account *Account, requestID string,
-	startTime time.Time, emit func(*apicompat.ChatCompletionsChunk),
+	startTime time.Time, reasoningEffort *string, emit func(*apicompat.ChatCompletionsChunk),
 ) ccStreamScanState {
 	markTeamoRelayPath(c, "chat_to_client_adapter")
 	var st ccStreamScanState
@@ -92,8 +92,12 @@ func (s *OpenAIGatewayService) scanCCStreamWithRelay(
 		}
 		return st.Err == nil
 	}
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 64*1024), openAIFirstOutputStageMaxBytes+openAIFirstOutputScannerFramingAllowance)
+	effort := ""
+	if reasoningEffort != nil {
+		effort = *reasoningEffort
+	}
+	scanner := s.newTeamoRelayScanner(c, resp, gate.Committed, startTime, effort)
+	defer scanner.Close()
 	var parser openAICompatSSEFrameParser
 	stopped := false
 	frameBytes := 0
@@ -130,7 +134,60 @@ func (s *OpenAIGatewayService) scanCCStreamWithRelay(
 			st.Err = newOpenAIRawStreamTruncatedFailoverError(c, account, requestID, st.Err)
 		}
 	}
+	st.Committed = gate.Committed()
 	return st
+}
+
+type teamoRelayStreamFailure struct {
+	status    int
+	errorType string
+	message   string
+	body      []byte
+}
+
+func (e *teamoRelayStreamFailure) Error() string { return "upstream response failed: " + e.message }
+
+// Finish an adapter-owned failure in that adapter's protocol and response ID.
+// Leaving this to the HTTP handler after emitting response.created would mint a
+// second response ID. A precommit failover still returns without writing bytes.
+func (s *OpenAIGatewayService) writeTeamoRelayAdapterFailure(c *gin.Context, scan ccStreamScanState, responseID, model string, anthropic bool) bool {
+	if !s.teamoRelayEnabled(c) || scan.Err == nil || c.Request.Context().Err() != nil {
+		return false
+	}
+	var failover *UpstreamFailoverError
+	if errors.As(scan.Err, &failover) {
+		return false
+	}
+	status, errorType, message := http.StatusBadGateway, "upstream_error", "Upstream stream interrupted"
+	var source []byte
+	var failure *teamoRelayStreamFailure
+	if errors.As(scan.Err, &failure) {
+		status, errorType, message, source = failure.status, failure.errorType, failure.message, failure.body
+	}
+	SetRouterOutcome(c, RouterOutcomeTerminalError)
+	if !c.Writer.Written() && !scan.Committed {
+		if anthropic {
+			writeAnthropicError(c, status, errorType, message)
+		} else {
+			writeOpenAIResponsesFallbackError(c, status, errorType, message)
+		}
+		MarkResponseCommitted(c)
+		return false
+	}
+	var err error
+	if anthropic {
+		payload, _ := json.Marshal(gin.H{"type": "error", "error": gin.H{"type": errorType, "message": message}})
+		_, err = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", payload)
+	} else {
+		_, err = io.WriteString(c.Writer, buildOpenAIResponseFailedSSE(responseID, model, source, message))
+	}
+	// Even a failed write must not be followed by a second attempt to synthesize
+	// a terminal on the same broken connection.
+	MarkResponseCommitted(c)
+	if err == nil {
+		c.Writer.Flush()
+	}
+	return err != nil
 }
 
 // Retry policy and account side effects deliberately remain in Sub. A failed
@@ -151,9 +208,18 @@ func (s *OpenAIGatewayService) teamoRelayChatFailure(c *gin.Context, resp *http.
 	if !committed && !cyberHit && c.Request.Context().Err() == nil && openAIStreamFailedEventShouldFailover(body, message) {
 		return s.newOpenAIStreamFailoverErrorWithModel(c, account, false, requestID, body, message, c.GetString(OpsUpstreamModelKey), resp.Header)
 	}
-	if account != nil {
-		applyOpenAIStreamFailedErrorPassthroughRule(c, account.Platform, body, message)
+	status, errorType := openAIStreamFailedEventSemanticStatus(body, message), strings.TrimSpace(gjson.GetBytes(body, "error.type").String())
+	if status < 400 {
+		status = http.StatusBadGateway
 	}
-	s.recordOpenAIStreamUpstreamError(c, account, false, requestID, "http_error", body, message)
-	return fmt.Errorf("upstream Chat Completions stream failed: %s", message)
+	if errorType == "" {
+		errorType = "upstream_error"
+	}
+	if account != nil {
+		if code, kind, msg, matched := applyOpenAIStreamFailedErrorPassthroughRule(c, account.Platform, body, message); matched {
+			status, errorType, message = code, kind, msg
+		}
+	}
+	message = s.recordOpenAIStreamUpstreamError(c, account, false, requestID, "http_error", body, message)
+	return &teamoRelayStreamFailure{status: status, errorType: errorType, message: message, body: append([]byte(nil), body...)}
 }

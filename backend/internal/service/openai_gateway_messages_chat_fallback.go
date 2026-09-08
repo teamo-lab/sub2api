@@ -217,10 +217,13 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 		}
 	}
 
-	scan := s.scanCCStream(c, resp, account, "openai messages chat fallback", requestID, startTime, emitChunk)
+	scan := s.scanCCStream(c, resp, account, "openai messages chat fallback", requestID, startTime, reasoningEffort, emitChunk)
 	usage := scan.Usage
 
 	if scan.Err != nil {
+		if !clientDisconnected && s.writeTeamoRelayAdapterFailure(c, scan, "", originalModel, true) {
+			clientDisconnected = true
+		}
 		// Broken upstream read: skip finalization so no synthetic message_stop
 		// masks the truncation, and surface the error to flag usage incomplete
 		// (mirrors forwardResponsesViaRawChatCompletions).

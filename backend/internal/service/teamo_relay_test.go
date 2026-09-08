@@ -13,6 +13,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/relay"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 func TestTeamoRelayRequiresServerSwitchAndAuthenticatedGroup(t *testing.T) {
@@ -138,6 +139,8 @@ func TestTeamoRelayChatAcrossAdapters(t *testing.T) {
 		{"partial_tool_error", []string{role, partialTool, failure}, true, true, true, 0},
 		{"partial_tool_done", []string{role, partialTool, "[DONE]"}, true, true, true, 0},
 		{"role_eof", []string{role}, true, true, true, 0},
+		{"empty_done", []string{role, "[DONE]"}, true, true, true, 0},
+		{"empty_finish_done", []string{role, done, "[DONE]"}, true, true, true, 0},
 		{"role_usage_error", []string{role, usage, failure}, true, true, true, 12},
 		{"output_error", []string{role, text, failure}, false, true, false, 0},
 		{"output_usage_eof", []string{role, text, usage}, false, true, false, 12},
@@ -188,6 +191,23 @@ func TestTeamoRelayChatAcrossAdapters(t *testing.T) {
 				if tc.name == "success" {
 					require.Contains(t, rec.Body.String(), "hello")
 				}
+				if adapter == "responses" && tc.name == "output_error" {
+					ids := map[string]struct{}{}
+					for _, line := range strings.Split(rec.Body.String(), "\n") {
+						if data, ok := strings.CutPrefix(line, "data: "); ok {
+							if id := gjson.Get(data, "response.id").String(); id != "" {
+								ids[id] = struct{}{}
+							}
+						}
+					}
+					require.Len(t, ids, 1, "failure must terminate the same response ID")
+					require.True(t, IsResponseCommitted(c), "outer handler must not append another terminal")
+				}
+				if tc.name == "policy" {
+					require.Equal(t, http.StatusBadRequest, rec.Code)
+					require.True(t, IsResponseCommitted(c))
+				}
+
 			})
 		}
 	}

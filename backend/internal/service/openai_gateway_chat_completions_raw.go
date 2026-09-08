@@ -281,7 +281,7 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	}
 	requestID := resp.Header.Get("x-request-id")
 	writeStreamHeaders := s.newStreamHeaderWriter(c, resp.Header)
-	scanner := s.newUpstreamSSEScanner(resp.Body)
+	var scanner teamoLineScanner = s.newUpstreamSSEScanner(resp.Body)
 
 	var usage OpenAIUsage
 	var firstTokenMs *int
@@ -298,6 +298,13 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 		markTeamoRelayPath(c, "chat")
 		relayGate = relay.NewCommitGate(openAIFirstOutputStageMaxBytes)
 		defer relayGate.Close()
+		effort := ""
+		if reasoningEffort != nil {
+			effort = *reasoningEffort
+		}
+		relayScanner := s.newTeamoRelayScanner(c, resp, func() bool { return clientOutputStarted }, startTime, effort)
+		defer relayScanner.Close()
+		scanner = relayScanner
 	}
 
 	writeLine := func(line string) {
@@ -381,6 +388,13 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 					var failover *UpstreamFailoverError
 					if !errors.As(relayErr, &failover) && !clientDisconnected {
 						SetRouterOutcome(c, RouterOutcomeTerminalError)
+						var terminalFailure *teamoRelayStreamFailure
+						if !clientOutputStarted && !c.Writer.Written() && errors.As(relayErr, &terminalFailure) {
+							writeChatCompletionsError(c, terminalFailure.status, terminalFailure.errorType, terminalFailure.message)
+							MarkResponseCommitted(c)
+							clientOutputStarted = true
+							break
+						}
 						writeStreamHeaders()
 						clientOutputStarted = true
 						_, writeErr := c.Writer.WriteString("data: " + payload + "\n\n")
@@ -434,11 +448,12 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 			Stream:                        true,
 			Duration:                      time.Since(startTime),
 			FirstTokenMs:                  firstTokenMs,
+			ClientDisconnect:              relayGate != nil && (clientDisconnected || c.Request.Context().Err() != nil),
 		}
 	}
 
 	if relayErr != nil {
-		if !clientOutputStarted && (errors.Is(relayErr, relay.ErrLimit) || errors.Is(relayErr, relay.ErrMalformedFrame) || errors.Is(relayErr, relay.ErrIncompleteTool)) {
+		if !clientOutputStarted && (errors.Is(relayErr, relay.ErrLimit) || errors.Is(relayErr, relay.ErrMalformedFrame) || errors.Is(relayErr, relay.ErrIncompleteTool) || errors.Is(relayErr, relay.ErrEmptyResponse)) {
 			return resultWithUsage(), newOpenAIRawStreamTruncatedFailoverError(c, account, requestID, relayErr)
 		}
 		return resultWithUsage(), relayErr
@@ -476,6 +491,9 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 		)
 		if !clientOutputStarted {
 			// 响应头尚未提交：可以透明换号重试，客户端不会看到半截流。
+			if relayGate == nil {
+				return nil, newOpenAIRawStreamTruncatedFailoverError(c, account, requestID, cause)
+			}
 			return resultWithUsage(), newOpenAIRawStreamTruncatedFailoverError(c, account, requestID, cause)
 		}
 		// 已写出语义字节：无法再 failover，改为带类型的上游错误。handler 会据此
