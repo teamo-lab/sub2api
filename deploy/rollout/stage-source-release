@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+release_id="${1:-}"
+version="${2:-}"
+commit="${3:-}"
+archive="${4:-}"
+official_mode="${5:-false}"
+build_date="${6:-}"
+expected_binary_sha256="${7:-}"
+allow_existing_nat_entry="${8:-false}"
+relay_enabled="${9-inherit}"
+relay_groups="${10-inherit}"
+reference_mode="${11-fleet_binary}"
+root="${SUB2API_DEPLOY_ROOT:-/opt/sub2api/deploy}"
+if [[ -f "$root/rollout/site.env" ]]; then set -a; source "$root/rollout/site.env"; set +a; fi
+backups="${SUB2API_BACKUP_DIR:-/opt/sub2api/backups}"
+controller="$root/bin/sub2api-rollout"
+stage_image="$root/bin/sub2api-stage-image-release"
+postgres="${SUB2API_POSTGRES_CONTAINER:-sub2api-postgres}"
+redis="${SUB2API_REDIS_CONTAINER:-sub2api-redis}"
+
+fail() {
+  jq -n --arg code "$1" --arg message "$2" '{ok:false,error_code:$code,message:$message}'
+  exit "${3:-4}"
+}
+
+[[ "$release_id" =~ ^[A-Za-z0-9._:+@/-]{1,128}$ ]] || fail invalid_release_id 'Release ID is invalid.' 2
+[[ "$version" =~ ^[A-Za-z0-9._:+@/-]{1,128}$ ]] || fail invalid_version 'Version is invalid.' 2
+[[ "$commit" =~ ^[0-9a-f]{40}$ ]] || fail invalid_commit 'Commit must be a full Git SHA.' 2
+[[ "$archive" == "$root/rollout/runtime/incoming-$release_id.tar.gz" && -s "$archive" ]] || fail invalid_archive 'Release archive is missing or outside the incoming path.' 2
+[[ "$official_mode" == true || "$official_mode" == false ]] || fail invalid_official_mode 'Official mode must be true or false.' 2
+[[ -z "$expected_binary_sha256" || "$expected_binary_sha256" =~ ^[0-9a-f]{64}$ ]] || fail invalid_binary_sha256 'Expected binary SHA256 must be 64 hex characters.' 2
+[[ "$allow_existing_nat_entry" == true || "$allow_existing_nat_entry" == false ]] || fail invalid_nat_entry_option 'Existing NAT entry must be explicitly approved.' 2
+[[ "$reference_mode" == fleet_binary || "$reference_mode" == single_host_image ]] || fail invalid_reference_mode 'Use fleet_binary or single_host_image.' 2
+[[ "$reference_mode" != single_host_image || "$official_mode" == false ]] || fail invalid_reference_mode 'Single-host image validation requires the custom source build.' 2
+[[ "$allow_existing_nat_entry" != true || -n "$expected_binary_sha256" || "$reference_mode" == single_host_image ]] || fail expected_binary_required 'Existing NAT staging requires the validated fleet binary SHA256.' 2
+[[ "$relay_enabled" == inherit || "$relay_enabled" == true || "$relay_enabled" == false ]] \
+  || fail invalid_relay_enabled 'Relay enabled must be inherit, true, or false.' 2
+[[ "$relay_groups" == inherit || -z "$relay_groups" || "$relay_groups" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] \
+  || fail invalid_relay_groups 'Relay groups must be a comma-separated list of positive IDs.' 2
+[[ -x "$controller" && -x "$stage_image" ]] || fail controller_missing 'Rollout controller or image stage helper is unavailable.' 3
+
+status="$($controller status --json)"
+phase="$(jq -r .phase <<<"$status")"
+[[ "$phase" == complete || "$phase" == rolled_back ]] \
+  || fail rollout_busy 'The previous rollout is neither complete nor rolled back.' 4
+candidate="$(jq -r .candidate_slot <<<"$status")"
+[[ "$candidate" =~ ^(blue|green)$ ]] || fail invalid_candidate 'Candidate slot is invalid.' 4
+[[ "$(jq -r --arg slot "$candidate" '.[$slot].health' <<<"$status")" == healthy ]] || fail candidate_unhealthy 'Candidate slot is not healthy.' 6
+[[ "$(jq -r --arg slot "$candidate" '.[$slot].weight' <<<"$status")" == 0 ]] || fail candidate_weight_invalid 'Candidate slot must be at zero weight.' 4
+[[ "$(jq -r --arg slot "$candidate" '.[$slot].active_streams' <<<"$status")" == 0 ]] || fail candidate_has_streams 'Candidate still has active streams.' 4
+"$root/rollout/dependency-client" check >/dev/null || fail dependencies_unhealthy 'PostgreSQL or Redis health check failed.'
+final_proxy_health="$(docker inspect --format '{{.State.Health.Status}}' sub2api-haproxy-final 2>/dev/null || true)"
+bootstrap_proxy_health="$(docker inspect --format '{{.State.Health.Status}}' sub2api-haproxy 2>/dev/null || true)"
+legacy_health="$(docker inspect --format '{{.State.Health.Status}}' "${SUB2API_LEGACY_CONTAINER:-sub2api}" 2>/dev/null || true)"
+if [[ "$final_proxy_health" != healthy && !( "$bootstrap_proxy_health" == healthy && "$legacy_health" == healthy ) ]]; then
+  [[ "$allow_existing_nat_entry" == true ]] || fail haproxy_unhealthy 'Neither the final entry nor the legacy plus bootstrap proxy topology is healthy.' 6
+  python3 "$root/bin/sub2api-validate-nat-entry" "$root" "${SUB2API_PUBLIC_PORT:-80}" "${ROLLOUT_ENTRY_PORT:-18080}" "${SUB2API_LEGACY_CONTAINER:-sub2api}" >/dev/null \
+    || fail nat_entry_not_ready 'Existing NAT entry failed strict read-only validation; no topology changes made.' 6
+fi
+
+available_kb="$(df -Pk "$root" | awk 'NR==2 {print $4}')"
+build_cache_pruned=false
+if [[ "$available_kb" =~ ^[0-9]+$ && "$available_kb" -lt 5242880 ]]; then
+  # Release builds and mandatory PostgreSQL backups need bounded headroom. Only
+  # prune inactive Docker builder cache; never remove images, containers,
+  # volumes, deployment state, or backups.
+  docker builder prune --force >/dev/null 2>&1 \
+    || fail build_cache_prune_failed 'Unable to prune inactive Docker build cache.' 6
+  build_cache_pruned=true
+  available_kb="$(df -Pk "$root" | awk 'NR==2 {print $4}')"
+fi
+[[ "$available_kb" =~ ^[0-9]+$ && "$available_kb" -ge 5242880 ]] || fail insufficient_disk 'At least 5 GiB free disk is required.' 4
+available_mem_kb="$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)"
+[[ "$available_mem_kb" =~ ^[0-9]+$ && "$available_mem_kb" -ge 2097152 ]] || fail insufficient_memory 'At least 2 GiB available memory is required.' 4
+
+install -d -o root -g root -m 0700 "$backups" "$root/rollout/builds"
+backup="$backups/pre-release-$release_id.dump"
+"$root/rollout/dependency-client" backup "$backup" >/dev/null || fail backup_failed 'PostgreSQL backup failed; files preserved.'
+
+build_dir="$root/rollout/builds/$release_id"
+[[ ! -e "$build_dir" ]] || fail release_already_built 'Release build directory already exists.' 4
+install -d -o root -g root -m 0700 "$build_dir"
+tar -xzf "$archive" -C "$build_dir"
+rm -f -- "$archive"
+
+image_tag="sub2api-local:$release_id"
+if ! docker build --platform linux/amd64 \
+  --build-arg "VERSION=$version" \
+  --build-arg "COMMIT=$commit" \
+  --build-arg "DATE=$build_date" \
+  --build-arg GOPROXY=https://goproxy.cn,direct \
+  --build-arg GOSUMDB=sum.golang.google.cn \
+  -t "$image_tag" "$build_dir" >"$build_dir/build.log" 2>&1; then
+  fail image_build_failed 'Docker image build failed before an immutable image was produced.' 6
+fi
+digest="$(docker image inspect --format '{{.Id}}' "$image_tag")"
+[[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || fail image_digest_invalid 'Built image does not have an immutable digest.' 6
+
+# Bind the binary reference to this immutable image before touching a slot.
+# This runs sha256sum, never the application or a database-connected process.
+# The image is built above from the exact committed source archive.
+image_binary_sha256="$(docker run --rm --network none --read-only --entrypoint sha256sum "$digest" /app/sub2api | awk '{print $1}')"
+[[ "$image_binary_sha256" =~ ^[0-9a-f]{64}$ ]] || fail image_binary_reference_invalid 'Cannot establish the immutable image binary hash before staging.' 6
+if [[ -n "$expected_binary_sha256" && "$image_binary_sha256" != "$expected_binary_sha256" ]]; then
+  fail binary_sha256_mismatch 'Built image differs from the validated fleet binary; candidate was not changed.' 6
+fi
+
+stage_result="$(SUB2API_ALLOW_OFFICIAL_NO_IDENTITY_HEADER="$official_mode" "$stage_image" "$release_id" "$version" "$digest" "stage-$release_id" "$relay_enabled" "$relay_groups")"
+observed_binary_sha256="$(docker exec "sub2api-$candidate" sha256sum /app/sub2api | awk '{print $1}')"
+if [[ "$observed_binary_sha256" != "$image_binary_sha256" ]]; then
+  fail binary_sha256_mismatch 'Candidate remains at zero weight: running binary differs from its immutable image.' 6
+fi
+jq -n --arg version "$version" --arg digest "$digest" --arg backup "$backup" \
+  --arg binary_sha256 "$observed_binary_sha256" --arg binary_reference "$reference_mode" --arg source_commit "$commit" --argjson build_cache_pruned "$build_cache_pruned" --argjson stage "$stage_result" \
+  '{ok:true,version:$version,digest:$digest,binary_sha256:$binary_sha256,binary_reference:$binary_reference,source_commit:$source_commit,backup_created:true,build_cache_pruned:$build_cache_pruned,stage:$stage} + $stage'
