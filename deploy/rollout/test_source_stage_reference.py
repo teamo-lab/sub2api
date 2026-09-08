@@ -74,7 +74,10 @@ import json,os,sys
 from pathlib import Path
 r=Path(os.environ['SUB2API_DEPLOY_ROOT'])
 with (r/'actions').open('a') as f:f.write(json.dumps(['stage']+sys.argv[1:])+'\\n')
-print(json.dumps({'ok':True,'phase':'staged','candidate_slot':'blue'}))
+result={'ok':True,'phase':'staged','candidate_slot':'blue'}
+if os.getenv('TEST_EMPTY_STAGE_REFERENCES'):
+ result.update(source_commit='',binary_sha256='')
+print(json.dumps(result))
 ''')
 
     def executable(self, name, text):
@@ -110,6 +113,16 @@ print(json.dumps({'ok':True,'phase':'staged','candidate_slot':'blue'}))
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(json.loads(result.stdout)['error_code'], 'expected_binary_required')
         self.assertEqual(actions, [])
+
+    def test_stage_metadata_cannot_erase_verified_references(self):
+        self.env['TEST_EMPTY_STAGE_REFERENCES'] = '1'
+        result, _ = self.run_stage()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        output = json.loads(result.stdout)
+        self.assertEqual(output['source_commit'], 'c' * 40)
+        self.assertEqual(output['binary_sha256'], HASH)
+        self.assertEqual(output['stage']['source_commit'], '')
+        self.assertEqual(output['stage']['binary_sha256'], '')
 
     def test_fleet_mismatch_stops_before_slot_changes(self):
         result, actions = self.run_stage('fleet_binary', 'd' * 64)
