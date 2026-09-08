@@ -52,6 +52,9 @@ func (s *OpenAIGatewayService) newStreamHeaderWriter(c *gin.Context, upstream ht
 			return
 		}
 		headersWritten = true
+		if s.teamoRelayEnabled(c) {
+			SetRouterOutcome(c, RouterOutcomeBusinessCommit)
+		}
 		if s.responseHeaderFilter != nil {
 			responseheaders.WriteFilteredHeaders(c.Writer.Header(), upstream, s.responseHeaderFilter)
 		}
@@ -252,6 +255,9 @@ type ccStreamScanState struct {
 	// 非 nil 时调用方必须跳过 finalize 并返回 usage-incomplete 错误，避免
 	// 把上游截断伪装成正常收尾。
 	Err error
+	// Committed is set by the in-process relay before a held prefix enters an
+	// adapter. It must not be inferred from headers/keepalive bytes alone.
+	Committed bool
 }
 
 // scanCCStream 驱动两条 CC 回退路径共享的 SSE 读循环：提取 data 行、在 [DONE]
@@ -261,11 +267,16 @@ type ccStreamScanState struct {
 func (s *OpenAIGatewayService) scanCCStream(
 	c *gin.Context,
 	resp *http.Response,
+	account *Account,
 	logPrefix string,
 	requestID string,
 	startTime time.Time,
+	reasoningEffort *string,
 	emit func(*apicompat.ChatCompletionsChunk),
 ) ccStreamScanState {
+	if s.teamoRelayEnabled(c) {
+		return s.scanCCStreamWithRelay(c, resp, account, requestID, startTime, reasoningEffort, emit)
+	}
 	var st ccStreamScanState
 
 	scanner := s.newUpstreamSSEScanner(resp.Body)
