@@ -25,11 +25,33 @@ go build ./internal/service ./internal/handler
 
 这些测试证明机制与边界，不等同于候选镜像/网络路径验收，更不能推导生产收益。
 
+本轮执行结果：service/handler 相关回归通过（5.905s / 5.743s）；同组 race 通过（7.288s / 7.110s）；错误身份解析和流式错误信封的补充 race 通过（3.080s）；两个包 `go build` 通过。
+
 ## 现有 probe 的适用范围
 
 1. `/Users/zhangyiming/.codex/skills/sub2api-rollout/scripts/sub2api-live-content-audit-probe.py`：已有的候选槽直连骨架。它读取槽的容器 IP 和 image，创建独占测试 group、只向私有 mock 发请求的 API-key account、测试 user/key，并在 `finally` 清理。当前实际场景只有 403 内容审计，断言不 retry、不改测试账号状态。**原样执行不能验收 PR #23/#24。**它仍会在生产依赖中创建和删除测试记录，因此不是零写入工具；当前其他 task 持有 lease 时不得执行。
 2. `tools/gpt_pro_guard/hk43_native_error_probe.py`：从已有错误日志提取脱敏错误身份和数量，是只读取证工具，没有向候选发请求、没有验证恢复或预算，不能作为功能 gate。
 3. `sub2api-release paired`：验证 HTTP 200、`response.completed` 和配对延迟，无法强制上游产生指定错误，不能替代下表的故障场景。
+
+## 本轮新增的专用 probe
+
+`tools/gpt_pro_guard/hk43_gpt_candidate_probe.py` 已准备好四类候选场景：type-only 503 有限尝试耗尽、首输出前裸 SSE server_error 切换成功、密文同号修复（普通及 passthrough 两条路径）、首输出后不可再切换。它读取现有全局规则推导次数和预算；规则缺失、同优先级歧义或预算无法完成精确验收时直接失败，不改全局规则。生产账号配置在数据库内转为哈希后比较，只输出变化账号 ID；credential、提示词、原始响应和全局规则正文不落账本。
+
+账号创建会自动触发 `probe_ping` 工具能力探测。mock 单独成功应答并统计这些探测，不把它们混入恢复尝试次数。测试账号只加入独占测试组。删除前按创建账本 ID 和随机名称再次核对，只允许删除本次 fixture；不提供修改生产账号或全局规则的路径。创建结果不确定时保留 pending_creation 账本，gate 判为失败。
+
+本地 `python3 -m unittest test_hk43_gpt_candidate_probe -v` 的 10 个安全/预期测试通过。**尚未执行任何云端 fixture 或候选功能请求**。以下命令仅供持有 lease 的发布 owner 在已经核对候选 image 和 binary 后调用；脚本的 `--release-owner` 是审计记录，不能替代外层 fleet lease 校验：
+
+```sh
+python3 tools/gpt_pro_guard/hk43_gpt_candidate_probe.py \
+  --slot blue \
+  --expect-image sha256:REPLACE_WITH_VERIFIED_IMAGE_ID \
+  --expect-binary-sha256 REPLACE_WITH_VERIFIED_BINARY_SHA256 \
+  --release-owner REPLACE_WITH_CURRENT_LEASE_OWNER \
+  --model gpt-6-astra \
+  --execute-isolated-fixtures
+```
+
+账本输出到 `/opt/sub2api/deploy/rollout/runtime/gpt-candidate-<随机值>.json`。`ok=true` 同时要求全部场景通过、现有全局规则未变、原生产账号配置未变、所有已确认创建的 fixture 清理完成且没有创建结果不确定的记录。它只覆盖上述四类场景；下表的取消、opaque 状态及首输出后长流边界仍由本地回归保证，在对实际二进制完成相应场景前不能声称候选全部矩阵通过。
 
 ## 候选二进制验收方案
 
