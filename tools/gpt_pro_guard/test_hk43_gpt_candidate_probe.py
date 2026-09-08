@@ -3,7 +3,7 @@
 import copy
 import unittest
 
-from hk43_gpt_candidate_probe import BARE_ERROR, TYPE_ONLY, CandidateProbe, GateError, Scenario, parse_events, select_rule
+from hk43_gpt_candidate_probe import BARE_ERROR, TYPE_ONLY, CandidateProbe, GateError, Scenario, build_ops_evidence_query, parse_events, select_rule, validate_ops_evidence
 
 
 def rule(**overrides):
@@ -96,6 +96,53 @@ class WriteSafetyTests(unittest.TestCase):
         for method, path in [("PUT", "/api/v1/admin/accounts/22"), ("POST", "/api/v1/admin/error-passthrough-rules"), ("DELETE", "/api/v1/admin/accounts/22"), ("DELETE", "/api/v1/admin/groups/900")]:
             with self.assertRaises(GateError):
                 probe.api(method, path)
+
+
+class OpsEvidenceTests(unittest.TestCase):
+    def evidence(self, status=503):
+        return {"rows": [{"status_code": status, "upstream_status_code": 502,
+                         "is_business_limited": False, "error_phase": "upstream", "error_owner": "provider",
+                         "error_source": "upstream_http", "account_ordinal": 0,
+                         "matches_response_request": True,
+                         "upstream_events": [{"account_ordinal": 0, "upstream_status": 502, "kind": "http_error", "stage": None}]}]}
+
+    def test_visible_failure_uses_client_status_and_proven_provider_source(self):
+        result = validate_ops_evidence("already_output", self.evidence(), 1)
+        self.assertEqual(result["counted_client_failures"], 1)
+
+    def test_recovered_row_with_upstream_502_is_not_client_failure(self):
+        result = validate_ops_evidence("bare_sse_fallback", self.evidence(status=200), 2)
+        self.assertEqual(result["counted_client_failures"], 0)
+        self.assertEqual(result["recovered_rows"], 1)
+
+    def test_wrong_origin_exclusion_duplicate_or_other_request_fails(self):
+        for field, value in (("is_business_limited", True), ("error_owner", "client"),
+                             ("matches_response_request", False), ("upstream_status_code", None),
+                             ("account_ordinal", 1), ("upstream_events", [])):
+            with self.subTest(field=field):
+                evidence = self.evidence()
+                evidence["rows"][0][field] = value
+                with self.assertRaises(GateError):
+                    validate_ops_evidence("already_output", evidence, 1)
+        for evidence in ({"rows": []}, {"rows": self.evidence()["rows"] * 2}):
+            with self.assertRaises(GateError):
+                validate_ops_evidence("already_output", evidence, 1)
+
+    def test_query_is_read_only_bounded_and_fixture_scoped(self):
+        query = build_ops_evidence_query(901, 902, [903, 904], "11111111-2222-4333-8444-555555555555")
+        self.assertIn("BEGIN READ ONLY", query)
+        self.assertIn("api_key_id=901 AND group_id=902", query)
+        self.assertIn("LIMIT 8", query)
+        self.assertIn("matches_response_request", query)
+        for forbidden in ("error_body", "request_body", "request_headers", "credentials", "account_name"):
+            self.assertNotIn(forbidden, query)
+
+    def test_query_rejects_missing_or_injected_request_and_ids(self):
+        for request in ("", "not-a-uuid", "x'; DELETE FROM accounts; --"):
+            with self.assertRaises(GateError):
+                build_ops_evidence_query(1, 2, [3], request)
+        with self.assertRaises(GateError):
+            build_ops_evidence_query("1 OR true", 2, [3], "11111111-2222-4333-8444-555555555555")
 
 
 if __name__ == "__main__":

@@ -100,6 +100,57 @@ def parse_events(body):
     return [event for event in events if isinstance(event, dict)]
 
 
+def validate_ops_evidence(kind, evidence, expected_attempts):
+    """Final client status owns SLA; an upstream error on a 2xx row recovered."""
+    rows = evidence.get("rows") or []
+    check(len(rows) == 1, "ops_final_row_count_mismatch")
+    row = rows[0]
+    check(row.get("matches_response_request") is True, "ops_request_correlation_mismatch")
+    check(row.get("error_phase") == "upstream" and row.get("error_owner") == "provider"
+          and row.get("error_source") == "upstream_http", "ops_provider_origin_missing")
+    check(row.get("account_ordinal") == 0, "ops_source_account_mismatch")
+    check(row.get("is_business_limited") is False, "ops_failure_incorrectly_excluded")
+    status = row.get("status_code") or 0
+    events = row.get("upstream_events") or []
+    check(all(event.get("account_ordinal") == 0 and event.get("upstream_status") == 502
+              for event in events), "ops_attempt_source_mismatch")
+    if kind == "already_output":
+        check(status >= 400 and row.get("upstream_status_code") == 502, "ops_visible_failure_not_counted")
+        check(len(events) == 1, "ops_terminal_event_count_mismatch")
+    elif kind == "bare_sse_fallback":
+        check(200 <= status < 300, "ops_successful_fallback_counted_as_failure")
+        check(len(events) == expected_attempts - 1, "ops_recovered_attempt_count_mismatch")
+    else:
+        raise GateError("unsupported_ops_evidence_case")
+    return {"counted_client_failures": int(status >= 400), "recovered_rows": int(200 <= status < 300)}
+
+
+def build_ops_evidence_query(key_id, group_id, account_ids, client_request_id):
+    check(type(key_id) is int and key_id > 0 and type(group_id) is int and group_id > 0, "invalid_fixture_scope")
+    check(account_ids and all(type(identifier) is int and identifier > 0 for identifier in account_ids), "invalid_fixture_accounts")
+    try:
+        request_id = str(uuid.UUID(client_request_id))
+    except (ValueError, TypeError, AttributeError):
+        raise GateError("response_request_id_missing_or_invalid") from None
+    check(request_id == client_request_id.lower(), "response_request_id_not_canonical")
+    def ordinal(expression):
+        return "CASE " + expression + " " + " ".join("WHEN " + str(identifier) + " THEN " + str(index)
+                                                       for index, identifier in enumerate(account_ids)) + " ELSE NULL END"
+    # Query every row for this single-use fixture key/group. The request match is
+    # returned as a boolean, so a duplicate row under another ID cannot pass.
+    return """BEGIN READ ONLY; SET LOCAL statement_timeout='2s';
+SELECT json_build_object('rows',coalesce(json_agg(x),'[]')) FROM (
+SELECT status_code,upstream_status_code,is_business_limited,error_phase,error_owner,error_source,
+       """ + ordinal("account_id") + """ AS account_ordinal,
+       client_request_id='""" + request_id + """' AS matches_response_request,
+       (SELECT coalesce(json_agg(json_build_object('account_ordinal',""" + ordinal("(event->>'account_id')::bigint") + """,
+           'upstream_status',(event->>'upstream_status_code')::integer,
+           'kind',event->>'kind','stage',event->>'stage')),'[]')
+        FROM jsonb_array_elements(CASE WHEN jsonb_typeof(upstream_errors)='array' THEN upstream_errors ELSE '[]'::jsonb END) event)
+        AS upstream_events
+FROM ops_error_logs WHERE api_key_id=""" + str(key_id) + " AND group_id=" + str(group_id) + " ORDER BY id LIMIT 8) x; COMMIT;"
+
+
 class Scenario:
     def __init__(self, kind):
         self.kind = kind
@@ -153,6 +204,7 @@ class CandidateProbe:
         self.token = None
         self.mock = None
         self.scenarios = {}
+        self.ops_requests = []
         self.production_before = None
         self.rules_before = None
         self.persist()
@@ -165,9 +217,9 @@ class CandidateProbe:
             json.dump(self.ledger, file, ensure_ascii=False, indent=2)
         os.replace(temporary, self.path)
 
-    def command(self, *argv):
+    def command(self, *argv, timeout=25):
         try:
-            return subprocess.check_output(argv, stderr=subprocess.DEVNULL, timeout=25).decode().strip()
+            return subprocess.check_output(argv, stderr=subprocess.DEVNULL, timeout=timeout).decode().strip()
         except (subprocess.SubprocessError, OSError):
             raise GateError("local_dependency_command_failed") from None
 
@@ -223,13 +275,16 @@ class CandidateProbe:
         self.base = "http://" + networks[0]["IPAddress"] + ":8080"
         self.gateway = networks[0]["Gateway"]
         self.ledger.update({"image": info["Image"], "binary_sha256": binary})
+        env = dict(value.split("=", 1) for value in info["Config"]["Env"] if "=" in value)
+        if self.args.require_relay_disabled:
+            check(env.get("GATEWAY_TEAMO_RELAY_ENABLED", "").lower() == "false", "relay_not_explicitly_disabled")
+            self.ledger["relay_explicitly_disabled"] = True
         key = self.command(str(ROOT / "rollout/dependency-client"), "psql", "-X", "-Atq", "-c", "SELECT value FROM settings WHERE key='admin_api_key';")
         if key.startswith('"'):
             key = json.loads(key)
         if key:
             self.admin_headers = {"x-api-key": key}
         else:
-            env = dict(value.split("=", 1) for value in info["Config"]["Env"] if "=" in value)
             check(env.get("ADMIN_EMAIL") and env.get("ADMIN_PASSWORD"), "admin_auth_unavailable")
             auth = self.api("POST", "/api/v1/auth/login", {"email": env["ADMIN_EMAIL"], "password": env["ADMIN_PASSWORD"]})
             check(auth.get("access_token"), "admin_auth_requires_verification")
@@ -283,12 +338,15 @@ class CandidateProbe:
     def run_cases(self):
         cases = [("type_only_exhausted", self.type_rule["account_switches"] + 1), ("bare_sse_fallback", 2), ("encrypted_normal", 1), ("encrypted_passthrough", 1), ("already_output", 2)]
         groups = {}
+        account_ids = {}
         for kind, count in cases:
             group = self.create("groups", {"name": self.tag + "-" + kind, "description": "Isolated candidate recovery verification", "platform": "openai", "rate_multiplier": 1, "is_exclusive": True, "subscription_type": "standard", "disable_chat_completions": False})
             groups[kind] = group["id"]
+            account_ids[kind] = []
             self.scenarios[kind] = Scenario(kind)
             for ordinal in range(count):
-                self.create("accounts", {"name": self.tag + "-" + kind + "-" + str(ordinal), "notes": self.tag, "platform": "openai", "type": "apikey", "credentials": {"api_key": "mock-only-" + secrets.token_hex(16), "base_url": "http://" + self.gateway + ":" + str(self.mock.server_address[1]) + "/" + kind + "/" + str(ordinal), "pool_mode": True, "pool_mode_retry_count": 0, "model_mapping": {self.args.model: self.args.model}}, "extra": {"openai_responses_mode": "auto", "use_responses_api": True, "openai_passthrough": kind == "encrypted_passthrough"}, "concurrency": 1, "priority": ordinal + 1, "group_ids": [group["id"]], "expires_at": int(time.time()) + 900})
+                account = self.create("accounts", {"name": self.tag + "-" + kind + "-" + str(ordinal), "notes": self.tag, "platform": "openai", "type": "apikey", "credentials": {"api_key": "mock-only-" + secrets.token_hex(16), "base_url": "http://" + self.gateway + ":" + str(self.mock.server_address[1]) + "/" + kind + "/" + str(ordinal), "pool_mode": True, "pool_mode_retry_count": 0, "model_mapping": {self.args.model: self.args.model}}, "extra": {"openai_responses_mode": "auto", "use_responses_api": True, "openai_passthrough": kind == "encrypted_passthrough"}, "concurrency": 1, "priority": ordinal + 1, "group_ids": [group["id"]], "expires_at": int(time.time()) + 900})
+                account_ids[kind].append(account["id"])
         self.create_user(list(groups.values()))
         for kind, _ in cases:
             key = self.create("keys", {"name": self.tag + "-" + kind, "group_id": groups[kind], "expires_in_days": 1, "quota": 1}, user=True)
@@ -302,8 +360,10 @@ class CandidateProbe:
             try:
                 with urllib.request.urlopen(request, timeout=135) as response:
                     status, body = response.status, response.read(131072)
+                    client_request_id = response.headers.get("X-Client-Request-ID", "")
             except urllib.error.HTTPError as error:
                 status, body = error.code, error.read(131072)
+                client_request_id = error.headers.get("X-Client-Request-ID", "")
             except Exception:
                 raise GateError("candidate_request_incomplete") from None
             elapsed = time.monotonic() - started
@@ -312,6 +372,10 @@ class CandidateProbe:
             deltas = sum(event.get("type") == "response.output_text.delta" for event in events)
             result = {"case": kind, "http": status, "attempts": list(scenario.calls), "capability_probes": scenario.capability_probes, "elapsed_seconds": round(elapsed, 3), "completed_events": completed, "delta_events": deltas, "ok": False}
             self.ledger["results"].append(result)
+            if kind in ("already_output", "bare_sse_fallback"):
+                scope = {"case": kind, "key_id": key["id"], "group_id": groups[kind], "account_ids": account_ids[kind],
+                         "request_id": client_request_id, "expected_attempts": len(scenario.calls), "result": result}
+                self.ops_requests.append(scope)
             self.persist()
             if kind == "type_only_exhausted":
                 expected = [ordinal for ordinal in range(self.type_rule["account_switches"] + 1) for _ in range(self.type_rule["same_account_retries"] + 1)]
@@ -330,8 +394,48 @@ class CandidateProbe:
             else:
                 check(scenario.calls == [0] and deltas == 1 and not completed, "visible_output_replayed_or_succeeded")
                 check(b"synthetic partial answer" in body and (b"server_error" in body or b"response.failed" in body), "visible_output_error_missing")
+            if kind in ("already_output", "bare_sse_fallback"):
+                self.wait_ops_evidence(scope)
             result["ok"] = True
             self.persist()
+
+    def read_ops_evidence(self, scope):
+        query = build_ops_evidence_query(scope["key_id"], scope["group_id"], scope["account_ids"], scope["request_id"])
+        return json.loads(self.command(str(ROOT / "rollout/dependency-client"), "psql", "-X", "-v", "ON_ERROR_STOP=1", "-Atq", "-c", query, timeout=5))
+
+    def wait_ops_evidence(self, scope):
+        started, last_hash, stable_since = time.monotonic(), None, None
+        while time.monotonic() - started < 30:
+            evidence = self.read_ops_evidence(scope)
+            scope["result"]["ops_evidence"] = evidence
+            self.persist()
+            if evidence.get("rows"):
+                summary = validate_ops_evidence(scope["case"], evidence, scope["expected_attempts"])
+                current_hash = fingerprint(evidence)
+                if current_hash != last_hash:
+                    last_hash, stable_since = current_hash, time.monotonic()
+                if time.monotonic() - stable_since >= 5:
+                    scope["result"]["ops_validation"] = {**summary, "stable_seconds": 5, "wait_seconds": round(time.monotonic() - started, 3), "evidence_sha256": current_hash}
+                    self.persist()
+                    return
+            else:
+                last_hash, stable_since = None, None
+            time.sleep(1)
+        raise GateError("ops_evidence_not_persisted_or_stable")
+
+    def final_ops_evidence(self):
+        # Capture and validate while the fixture key/group/accounts still exist.
+        failures = []
+        for scope in self.ops_requests:
+            try:
+                evidence = self.read_ops_evidence(scope)
+                scope["result"]["ops_final_evidence"] = evidence
+                validate_ops_evidence(scope["case"], evidence, scope["expected_attempts"])
+            except Exception:
+                failures.append(scope["case"])
+        self.ledger["ops_final_validation_failed_cases"] = failures
+        self.persist()
+        return not failures
 
     def cleanup(self):
         for fixture in sorted(self.ledger["fixtures"], key=lambda row: {"keys": 0, "accounts": 1, "users": 2, "groups": 3}[row["kind"]]):
@@ -362,6 +466,7 @@ class CandidateProbe:
         except Exception as error:
             self.ledger["error"] = str(error) if isinstance(error, GateError) else "unexpected_probe_failure"
         finally:
+            evidence_ok = self.final_ops_evidence()
             self.cleanup()
             if self.rules_before is not None:
                 try:
@@ -376,7 +481,7 @@ class CandidateProbe:
                     self.ledger["changed_production_ids"] = [int(key) for key in self.production_before if self.production_before[key] != after.get(key)]
                 except Exception:
                     self.ledger["production_accounts_unchanged"] = False
-            passed = passed and not self.ledger["cleanup_errors"] and not self.ledger.get("pending_creation") and self.ledger.get("global_rules_unchanged") and self.ledger.get("production_accounts_unchanged")
+            passed = passed and evidence_ok and not self.ledger["cleanup_errors"] and not self.ledger.get("pending_creation") and self.ledger.get("global_rules_unchanged") and self.ledger.get("production_accounts_unchanged")
             self.ledger.update({"ok": bool(passed), "status": "passed" if passed else "failed", "completed_at": int(time.time())})
             self.persist()
             print(canonical(self.ledger))
@@ -390,6 +495,7 @@ def main():
     parser.add_argument("--expect-binary-sha256", required=True)
     parser.add_argument("--model", choices=("gpt-5.6-sol", "gpt-6-astra"), default="gpt-6-astra")
     parser.add_argument("--release-owner", required=True, help="Owner already holding the fleet lease; checked by the audited caller")
+    parser.add_argument("--require-relay-disabled", action="store_true", help="Fail before fixtures unless the candidate environment explicitly disables Relay")
     parser.add_argument("--execute-isolated-fixtures", action="store_true", help="Required acknowledgement that temporary fixture records will be created")
     args = parser.parse_args()
     if not args.execute_isolated_fixtures:
