@@ -12,27 +12,6 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// alignModelDashboardPresetWindow makes preset model queries address complete
-// rollup buckets. Explicit custom windows retain their exact boundaries and
-// safely fall back to raw when they are not aligned.
-func alignModelDashboardPresetWindow(c *gin.Context, start, end time.Time) (time.Time, time.Time) {
-	if c == nil || strings.TrimSpace(c.Query("model")) == "" ||
-		strings.TrimSpace(c.Query("start_time")) != "" || strings.TrimSpace(c.Query("end_time")) != "" {
-		return start, end
-	}
-	duration := end.Sub(start)
-	resolution := 5 * time.Minute
-	if duration > 24*time.Hour {
-		resolution = time.Hour
-	}
-	// Match the aggregator's safe-delay boundary so preset requests do not ask
-	// for the still-open bucket and unnecessarily fall back to raw logs.
-	alignedEnd := end.UTC().Add(-opsDashboardModelRollupSafeDelay).Truncate(resolution)
-	return alignedEnd.Add(-duration), alignedEnd
-}
-
-const opsDashboardModelRollupSafeDelay = 5 * time.Minute
-
 // GetDashboardModels returns the model catalog for the active dashboard window.
 func (h *OpsHandler) GetDashboardModels(c *gin.Context) {
 	if h.opsService == nil {
@@ -82,8 +61,6 @@ func (h *OpsHandler) GetDashboardOverview(c *gin.Context) {
 		response.BadRequest(c, err.Error())
 		return
 	}
-	startTime, endTime = alignModelDashboardPresetWindow(c, startTime, endTime)
-
 	filter := &service.OpsDashboardFilter{
 		StartTime: startTime,
 		EndTime:   endTime,
@@ -125,8 +102,6 @@ func (h *OpsHandler) GetDashboardThroughputTrend(c *gin.Context) {
 		response.BadRequest(c, err.Error())
 		return
 	}
-	startTime, endTime = alignModelDashboardPresetWindow(c, startTime, endTime)
-
 	filter := &service.OpsDashboardFilter{
 		StartTime: startTime,
 		EndTime:   endTime,
@@ -169,8 +144,6 @@ func (h *OpsHandler) GetDashboardLatencyHistogram(c *gin.Context) {
 		response.BadRequest(c, err.Error())
 		return
 	}
-	startTime, endTime = alignModelDashboardPresetWindow(c, startTime, endTime)
-
 	filter := &service.OpsDashboardFilter{
 		StartTime: startTime,
 		EndTime:   endTime,
@@ -212,8 +185,6 @@ func (h *OpsHandler) GetDashboardErrorTrend(c *gin.Context) {
 		response.BadRequest(c, err.Error())
 		return
 	}
-	startTime, endTime = alignModelDashboardPresetWindow(c, startTime, endTime)
-
 	filter := &service.OpsDashboardFilter{
 		StartTime: startTime,
 		EndTime:   endTime,
@@ -256,8 +227,6 @@ func (h *OpsHandler) GetDashboardErrorDistribution(c *gin.Context) {
 		response.BadRequest(c, err.Error())
 		return
 	}
-	startTime, endTime = alignModelDashboardPresetWindow(c, startTime, endTime)
-
 	filter := &service.OpsDashboardFilter{
 		StartTime: startTime,
 		EndTime:   endTime,
