@@ -1,0 +1,19 @@
+{
+  "experiment_id": "hk43-harness-late-failure-switch",
+  "state": "prepared_not_enabled",
+  "target_id": "hk43",
+  "instance_id": "ins-4r9sd5og",
+  "public_ip": "43.159.0.162",
+  "account_id": 22,
+  "authenticated_group_ids": [3],
+  "initial_extra": {
+    "openai_late_failure_switch_enabled": false,
+    "openai_late_failure_switch_group_ids": [3]
+  },
+  "minimum_first_forward_seconds": 60,
+  "minimum_also_at_least_rule_budget": true,
+  "allowed_recoverable_statuses": [502, 503, 504],
+  "modify_global_recovery_rules": false,
+  "model_requests_sent_by_manifest": false,
+  "automatic_account_writes": false
+}
