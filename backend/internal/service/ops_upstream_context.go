@@ -449,8 +449,18 @@ func appendOpsUpstreamError(c *gin.Context, ev OpsUpstreamErrorEvent) {
 	evCopy := ev
 	existing = append(existing, &evCopy)
 	c.Set(OpsUpstreamErrorsKey, existing)
+	MarkRouterUpstreamAttemptFailed(c, evCopy.AccountID, evCopy.UpstreamStatusCode, firstRouterAttemptErrorType(evCopy), evCopy.AtUnixMs)
 
 	checkSkipMonitoringForUpstreamEvent(c, &evCopy)
+}
+
+func firstRouterAttemptErrorType(ev OpsUpstreamErrorEvent) string {
+	for _, value := range []string{ev.Reason, ev.Kind, ev.Stage} {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return "upstream_error"
 }
 
 // opsUpstreamProxyAttribution derives both attribution fields from one
