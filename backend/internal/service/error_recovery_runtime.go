@@ -197,6 +197,29 @@ func RecoveryBudgetExpired(c *gin.Context) bool {
 	return !s.output && !time.Now().Before(s.deadline)
 }
 
+// ReserveErrorRecoveryAccountSwitch shares an existing request's switch budget
+// with a local admission reselect. It never creates a recovery state, renews its
+// deadline, replaces its upstream failure, or spends a same-account retry.
+func ReserveErrorRecoveryAccountSwitch(c *gin.Context) bool {
+	if c == nil || c.Request == nil || c.Request.Context().Err() != nil {
+		return false
+	}
+	s := recoveryState(c)
+	if s == nil {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.rule == nil || s.rule.RecoveryPolicy == nil || s.rule.RecoveryPolicy.Mode != "limited" || s.output || !time.Now().Before(s.deadline) || s.parent.Err() != nil {
+		return false
+	}
+	if s.switches >= s.rule.RecoveryPolicy.AccountSwitches {
+		return false
+	}
+	s.switches++
+	return true
+}
+
 // Semantic output ends recovery. Keep the successful stream alive beyond budget.
 func CompleteErrorRecovery(c *gin.Context) {
 	completeOpenAIEncryptedSemanticRetry(c)
