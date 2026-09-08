@@ -82,6 +82,146 @@ func TestOpsSystemLogSink_ShouldIndex(t *testing.T) {
 	}
 }
 
+func TestOpsSystemLogSink_LocalCapacityInfoAllowlist(t *testing.T) {
+	sink := &OpsSystemLogSink{}
+	for _, component := range []string{"handler.openai_gateway.responses", "handler.openai_gateway.chat_completions"} {
+		for _, message := range []string{"openai.local_capacity_reselect_eligible", "openai.local_capacity_reselect", "openai.local_capacity_reselect_admitted"} {
+			for _, fromField := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/field_%t", component, message, fromField), func(t *testing.T) {
+					event := &logger.LogEvent{Level: "info", Component: component, Message: message, Fields: map[string]any{"origin": "local_account_admission"}}
+					if fromField {
+						event.Component = "unrelated.zap.logger.name"
+						event.Fields["component"] = component
+					}
+					if !sink.shouldIndex(event) {
+						t.Fatal("exact local admission info event must reach the database sink")
+					}
+					event.Fields[logger.OpsSystemLogSkipField] = true
+					if sink.shouldIndex(event) {
+						t.Fatal("explicit Ops skip must override the local admission allowlist")
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestOpsSystemLogSink_LocalCapacityInfoDoesNotBroadenOtherEvents(t *testing.T) {
+	sink := &OpsSystemLogSink{}
+	tests := []struct {
+		name   string
+		mutate func(*logger.LogEvent)
+	}{
+		{"wrong component", func(e *logger.LogEvent) { e.Component = "handler.other" }},
+		{"component prefix", func(e *logger.LogEvent) { e.Component = "prefix.handler.openai_gateway.responses" }},
+		{"component suffix", func(e *logger.LogEvent) { e.Component += ".other" }},
+		{"field component overrides matching logger", func(e *logger.LogEvent) { e.Fields["component"] = "handler.other" }},
+		{"other event", func(e *logger.LogEvent) { e.Message = "openai.account_selected" }},
+		{"event prefix", func(e *logger.LogEvent) { e.Message = "prefix." + e.Message }},
+		{"event suffix", func(e *logger.LogEvent) { e.Message += ".extra" }},
+		{"event trailing whitespace", func(e *logger.LogEvent) { e.Message += " " }},
+		{"ordinary info", func(e *logger.LogEvent) { e.Message = "ordinary informational event" }},
+		{"debug event", func(e *logger.LogEvent) { e.Level = "debug" }},
+		{"missing origin", func(e *logger.LogEvent) { delete(e.Fields, "origin") }},
+		{"wrong origin", func(e *logger.LogEvent) { e.Fields["origin"] = "upstream" }},
+		{"origin whitespace", func(e *logger.LogEvent) { e.Fields["origin"] = " local_account_admission " }},
+		{"origin number", func(e *logger.LogEvent) { e.Fields["origin"] = 1 }},
+		{"origin boolean", func(e *logger.LogEvent) { e.Fields["origin"] = true }},
+		{"origin stringer", func(e *logger.LogEvent) { e.Fields["origin"] = stringerValue("local_account_admission") }},
+		{"origin array", func(e *logger.LogEvent) { e.Fields["origin"] = []string{"local_account_admission"} }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			event := &logger.LogEvent{Level: "info", Component: "handler.openai_gateway.responses", Message: "openai.local_capacity_reselect", Fields: map[string]any{"origin": "local_account_admission"}}
+			test.mutate(event)
+			if sink.shouldIndex(event) {
+				t.Fatal("unrelated event must not be admitted by the local-capacity info exception")
+			}
+		})
+	}
+	for _, level := range []string{"info", "warn", "error"} {
+		event := &logger.LogEvent{Level: level, Component: "handler.openai_gateway.responses", Message: "openai.local_capacity_reselect", Fields: map[string]any{"origin": "local_account_admission", logger.OpsSystemLogSkipField: true}}
+		if sink.shouldIndex(event) {
+			t.Fatalf("explicit skip must remain first for level %s", level)
+		}
+	}
+}
+
+func TestOpsSystemLogSink_LocalCapacityInfoPersistsThroughQueueAndFlush(t *testing.T) {
+	var captured []*OpsInsertSystemLogInput
+	repo := &opsRepoMock{BatchInsertSystemLogsFn: func(ctx context.Context, inputs []*OpsInsertSystemLogInput) (int64, error) {
+		if ctx.Err() != nil {
+			return 0, ctx.Err()
+		}
+		captured = append(captured, inputs...)
+		return int64(len(inputs)), nil
+	}}
+	sink := NewOpsSystemLogSink(repo)
+	t.Cleanup(sink.Stop)
+	messages := []string{"openai.local_capacity_reselect_eligible", "openai.local_capacity_reselect", "openai.local_capacity_reselect_admitted"}
+	for _, component := range []string{"handler.openai_gateway.responses", "handler.openai_gateway.chat_completions"} {
+		for _, fromField := range []bool{false, true} {
+			for index, message := range messages {
+				fields := map[string]any{"origin": "local_account_admission", "request_id": "synthetic-capacity-request", "client_request_id": "synthetic-capacity-client",
+					"user_id": int64(9001), "api_key_id": int64(9002), "group_id": int64(9003), "account_id": int64(9004), "source_account_id": int64(9004),
+					"platform": "openai", "model": "gpt-5.6-terra", "reason_code": "gateway_concurrency_limit", "original_wait_ms": int64(1600)}
+				if index == 1 {
+					fields["wait_ms"] = int64(1600)
+					fields["local_reselect_count"] = 1
+				}
+				if index == 2 {
+					fields["selected_account_id"] = int64(9005)
+					fields["local_reselect_count"] = 1
+				}
+				event := &logger.LogEvent{Time: time.Now().UTC(), Level: "info", Component: component, Message: message, Fields: fields}
+				if fromField {
+					event.Component = "unrelated.zap.logger.name"
+					fields["component"] = component
+				}
+				sink.WriteLogEvent(event)
+			}
+		}
+	}
+	if got := len(sink.queue); got != 12 {
+		t.Fatalf("queue contains %d local admission events, want 12", got)
+	}
+	// Drain through the real worker and conversion to the repository input. Stop
+	// joins that worker, so assertions below do not race its captured batch.
+	sink.Start()
+	sink.Stop()
+	if len(captured) != 12 {
+		t.Fatalf("persisted call contains %d events, want 12", len(captured))
+	}
+	for index, item := range captured {
+		wantComponent := "handler.openai_gateway.responses"
+		if index >= 6 {
+			wantComponent = "handler.openai_gateway.chat_completions"
+		}
+		if item.Component != wantComponent || item.Level != "info" || item.Message != messages[index%3] {
+			t.Fatalf("unexpected indexed event identity at %d: %+v", index, item)
+		}
+		if item.RequestID != "synthetic-capacity-request" || item.ClientRequestID != "synthetic-capacity-client" {
+			t.Fatalf("request IDs lost at %d", index)
+		}
+		if item.UserID == nil || *item.UserID != 9001 || item.APIKeyID == nil || *item.APIKeyID != 9002 || item.AccountID == nil || *item.AccountID != 9004 {
+			t.Fatalf("indexed identity IDs lost at %d", index)
+		}
+		var extra map[string]any
+		if err := json.Unmarshal([]byte(item.ExtraJSON), &extra); err != nil {
+			t.Fatal(err)
+		}
+		if extra["origin"] != "local_account_admission" || extra["group_id"] != float64(9003) || extra["source_account_id"] != float64(9004) || extra["reason_code"] != "gateway_concurrency_limit" {
+			t.Fatalf("local origin fields lost at %d: %s", index, item.ExtraJSON)
+		}
+		if index%3 == 2 && extra["selected_account_id"] != float64(9005) {
+			t.Fatalf("admitted backup ID lost: %s", item.ExtraJSON)
+		}
+	}
+	if sink.Health().WrittenCount != 12 {
+		t.Fatalf("written count = %d, want 12", sink.Health().WrittenCount)
+	}
+}
+
 func TestOpsSystemLogSink_WriteLogEvent_ShouldDropWhenQueueFull(t *testing.T) {
 	sink := &OpsSystemLogSink{
 		queue: make(chan *logger.LogEvent, 1),
