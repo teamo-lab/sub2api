@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestprofile"
 	"net/http"
 	"time"
 
@@ -348,6 +349,7 @@ func failoverClientGone(c *gin.Context) bool {
 
 // sleepWithContext 等待指定时长，返回 false 表示 context 已取消。
 func sleepWithContext(ctx context.Context, d time.Duration) bool {
+	defer requestprofile.Start(ctx, "retry_backoff")()
 	if d <= 0 {
 		return true
 	}

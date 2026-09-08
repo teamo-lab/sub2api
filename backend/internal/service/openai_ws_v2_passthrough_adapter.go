@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestprofile"
 	"net/http"
 	"net/url"
 	"strings"
@@ -876,7 +877,11 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			return fmt.Errorf("refresh ws authentication headers: %w", err)
 		}
 		dialCtx, cancelDial := context.WithTimeout(ctx, s.openAIWSDialTimeout())
-		upstreamConn, statusCode, handshakeHeaders, err = dialer.Dial(dialCtx, wsURL, headers, proxyURL)
+		profileCtx := requestprofile.NewAttempt(dialCtx, account.ID)
+		endConnect := requestprofile.Start(profileCtx, "websocket_connect")
+		upstreamConn, statusCode, handshakeHeaders, err = dialer.Dial(profileCtx, wsURL, headers, proxyURL)
+		endConnect()
+		requestprofile.Mark(profileCtx, "upstream_response", statusCode)
 		cancelDial()
 		if err == nil {
 			break

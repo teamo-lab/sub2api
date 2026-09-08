@@ -1,6 +1,8 @@
 package middleware
 
 import (
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestprofile"
+	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
@@ -8,6 +10,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // Logger 请求日志中间件
@@ -18,6 +21,11 @@ func Logger() gin.HandlerFunc {
 
 		// 请求路径
 		path := c.Request.URL.Path
+		// Profile inference requests only; admin/health traffic is not a model request.
+		profiled := isProfiledInferenceRequest(c.Request)
+		if profiled && requestprofile.From(c.Request.Context()) == nil {
+			c.Request = c.Request.WithContext(requestprofile.Attach(c.Request.Context(), startTime))
+		}
 
 		// 处理请求
 		c.Next()
@@ -78,8 +86,35 @@ func Logger() gin.HandlerFunc {
 			fields = append(fields, zap.String("model", model))
 		}
 
+		if profiled {
+			group := int64(0)
+			if key, ok := GetAPIKeyFromContext(c); ok && key.GroupID != nil {
+				group = *key.GroupID
+			}
+			wire := "http"
+			if strings.Contains(c.Writer.Header().Get("Content-Type"), "text/event-stream") {
+				wire = "sse"
+			}
+			if strings.EqualFold(c.GetHeader("Upgrade"), "websocket") {
+				wire = "websocket_session"
+			}
+			requestprofile.Metadata(c.Request.Context(), group, model, wire)
+			if c.Request.Context().Err() != nil {
+				requestprofile.Mark(c.Request.Context(), "client_cancelled", statusCode)
+			}
+			fields = append(fields, zap.Any("request_profile", requestprofile.Finish(c.Request.Context(), endTime)))
+		}
 		l := logger.FromContext(c.Request.Context()).With(fields...)
 		l.Info("http request completed", zap.Time("completed_at", endTime))
+		if profiled && !l.Core().Enabled(zap.InfoLevel) {
+			enc := zapcore.NewMapObjectEncoder()
+			for _, field := range fields {
+				field.AddTo(enc)
+			}
+			enc.Fields["request_id"], _ = c.Request.Context().Value(ctxkey.RequestID).(string)
+			enc.Fields["client_request_id"], _ = c.Request.Context().Value(ctxkey.ClientRequestID).(string)
+			logger.WriteSinkEvent("info", "http.access", "http request completed", enc.Fields)
+		}
 
 		if len(c.Errors) > 0 {
 			l.Warn("http request contains gin errors", zap.String("errors", c.Errors.String()))

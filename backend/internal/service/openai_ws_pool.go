@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestprofile"
 	"math"
 	"net/http"
 	"sort"
@@ -1798,7 +1799,14 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 			return nil, err
 		}
 	}
-	conn, status, handshakeHeaders, err := p.clientDialer.Dial(ctx, req.WSURL, headers, req.ProxyURL)
+	profileCtx := ctx
+	if req.Account != nil {
+		profileCtx = requestprofile.NewAttempt(ctx, req.Account.ID)
+	}
+	endConnect := requestprofile.Start(profileCtx, "websocket_connect")
+	conn, status, handshakeHeaders, err := p.clientDialer.Dial(profileCtx, req.WSURL, headers, req.ProxyURL)
+	endConnect()
+	requestprofile.Mark(profileCtx, "upstream_response", status)
 	if err != nil {
 		var handshakeErr *openAIWSHandshakeError
 		var responseBody []byte

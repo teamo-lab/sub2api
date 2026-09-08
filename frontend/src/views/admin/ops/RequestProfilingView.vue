@@ -1,0 +1,63 @@
+<template>
+ <AppLayout><div class="space-y-6 pb-12">
+  <header class="flex flex-wrap justify-between gap-4"><div><h1 class="text-2xl font-semibold">耗时分析</h1><p class="mt-2 text-sm text-slate-500">从 Sub2API 入口到请求结束，追踪每次尝试与时间去向。</p></div><button class="btn btn-primary" :disabled="loading" @click="load(true)">{{ loading?'加载中…':'刷新数据' }}</button></header>
+  <section class="card grid gap-4 p-5 sm:grid-cols-2 lg:grid-cols-4" aria-label="分析筛选">
+   <label class="text-sm">时间范围<select v-model="minutes" class="input mt-1 w-full" @change="load(true)"><option :value="5">近 5 分钟</option><option :value="30">近 30 分钟</option><option :value="60">近 1 小时</option><option :value="360">近 6 小时</option><option :value="1440">近 24 小时</option></select></label>
+   <label class="text-sm">模型<input v-model="model" class="input mt-1 w-full" placeholder="全部模型" @change="load(true)" @keyup.enter="load(true)" /></label>
+   <label class="text-sm">分组 ID<input v-model="group" class="input mt-1 w-full" type="number" min="1" placeholder="全部分组" @change="load(true)" /></label>
+   <label class="text-sm">渠道账号 ID<input v-model="account" class="input mt-1 w-full" type="number" min="1" placeholder="包含任一次尝试" @change="load(true)" /></label>
+   <label class="text-sm">错误 / 重试类型<select v-model="errorType" class="input mt-1 w-full" @change="load(true)"><option value="">全部请求</option><option value="retry">同账号重试</option><option value="fallback">账号切换</option><option value="http_4xx">上游 4xx</option><option value="http_5xx">上游 5xx</option><option value="network_error">网络错误</option><option value="failed">最终 HTTP 失败</option><option value="client_cancelled">客户端取消</option></select></label>
+   <label class="text-sm">协议<select v-model="protocol" class="input mt-1 w-full" @change="load(true)"><option value="sse">SSE</option><option value="http">非流式 HTTP</option><option value="websocket_session">WebSocket 会话</option></select></label>
+   <label class="text-sm">证据来源<select v-model="evidence" class="input mt-1 w-full" @change="load(true)"><option value="measured">当前实测轨迹</option><option value="historical">历史日志重建</option></select></label>
+   <label class="text-sm">请求 ID<input v-model="requestId" class="input mt-1 w-full" placeholder="request_id 或 client request ID" @change="load(true)" @keyup.enter="load(true)" /></label>
+  </section>
+  <div v-if="error" role="alert" class="rounded-xl bg-red-50 p-4 text-red-700">{{ error }} <button class="ml-3 underline" @click="load()">重试加载</button></div>
+  <p v-if="loading && !data" class="p-6 text-sm text-slate-500" role="status">正在读取匹配请求与耗时分布…</p>
+  <template v-if="data && !error">
+   <div class="grid grid-cols-2 gap-4 lg:grid-cols-4"><div v-for="card in cards" :key="card.label" class="card p-5"><p class="text-sm text-slate-500">{{ card.label }}</p><p class="mt-2 text-2xl font-semibold tabular-nums">{{ card.value }}</p></div></div>
+   <p class="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">当前分母为窗口内已落盘的完成请求；未打点的历史请求不计入，未归因时间保留。<span v-if="data.summary.truncated"> {{ data.summary.truncated }} 条轨迹达到记录上限。</span><span v-if="data.health"> 日志队列 {{ data.health.queue_depth }}，累计丢弃 {{ data.health.dropped_count }}、写入失败 {{ data.health.write_failed_count }}。</span></p>
+   <section v-if="data.summary.count" class="card p-5"><h2 class="font-semibold">聚合耗时组成</h2><p class="mt-1 text-sm text-slate-500">阶段总耗时 ÷ {{ data.summary.count }} 条匹配请求。平均组成不表示执行顺序，P90 单独计算。</p>
+    <ProfileTimeline :segments="aggregate" :total="data.summary.mean_us" label="聚合平均耗时组成" @select="selectedAggregate=$event" />
+    <p v-if="selectedAggregate" class="mt-3 text-sm text-slate-600">{{ stageNames[selectedAggregate.name]||selectedAggregate.name }} · 每请求平均 {{ duration(selectedAggregate.duration_us) }}</p>
+    <div class="mt-4 flex flex-wrap gap-4 text-xs"><span v-for="s in data.summary.stages" :key="s.name"><i class="mr-1 inline-block h-2 w-2 rounded" :style="{backgroundColor:stageColor(s.name)}" />{{ stageNames[s.name]||s.name }} {{ duration(s.mean_us) }}</span></div>
+   </section>
+   <section class="card overflow-hidden"><div class="flex justify-between border-b border-slate-100 p-5 dark:border-slate-700"><h2 class="font-semibold">请求长尾 · 总耗时从高到低</h2><span class="text-sm text-slate-500">{{ data.summary.count }} 条</span></div>
+    <div v-if="!data.rows.length" class="p-12 text-center text-slate-500"><p class="font-medium">当前筛选下没有已记录的轨迹</p><p class="mt-2 text-sm">扩大时间范围或清空筛选；新请求结束并写入日志后才会出现。</p></div>
+    <button v-for="r in data.rows" :key="r.id" class="block w-full border-b border-slate-100 px-5 py-4 text-left hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800" :class="selected?.id===r.id?'bg-indigo-50 dark:bg-indigo-950':''" @click="selectRow(r)">
+     <div class="flex flex-wrap justify-between gap-2"><div><strong>{{ r.profile.model||'未知模型' }}</strong><span class="ml-3 text-xs text-slate-500">{{ r.group_name||`分组 #${r.profile.group_id||'未知'}` }} · {{ r.account_name||`账号 #${r.account_id}` }} · {{ r.profile.protocol }}</span></div><strong>{{ duration(r.profile.total_us) }}</strong></div>
+     <div class="mt-2 flex flex-wrap gap-3 text-xs text-slate-500"><span>{{ new Date(r.created_at).toLocaleString() }}</span><code>{{ r.client_request_id||r.request_id }}</code><span>HTTP {{ r.status }} · {{ r.profile.evidence==='historical'?'尝试次数未记录':`${r.profile.attempts} 次尝试` }}</span><b v-if="r.profile.events.some(e=>e.kind==='fallback')" class="text-rose-600">◆ 账号切换</b><b v-if="r.profile.events.some(e=>e.kind==='retry')" class="text-amber-600">◆ 重试</b></div>
+    </button>
+    <div class="flex justify-between p-4"><button class="btn btn-secondary" :disabled="page<=1||loading" @click="page--;load()">上一页</button><span class="text-sm">第 {{ page }} 页</span><button class="btn btn-secondary" :disabled="page*50>=data.summary.count||loading" @click="page++;load()">下一页</button></div>
+   </section>
+   <section v-if="selected" ref="detailRef" class="card scroll-mt-24 p-5" aria-label="请求详情"><div class="flex justify-between gap-4"><div><h2 class="font-semibold">请求详情 · {{ selected.profile.model }}</h2><code class="mt-2 block break-all text-xs text-slate-500">{{ selected.client_request_id||selected.request_id }}</code><code v-if="selected.client_request_id && selected.request_id!==selected.client_request_id" class="mt-1 block break-all text-xs text-slate-400">服务端 ID：{{ selected.request_id }}</code></div><span class="text-sm">正文 {{ ((selected.profile.body_bytes||0)/1e6).toFixed(2) }} MB</span></div>
+    <p v-if="selected.profile.protocol==='websocket_session'" class="mt-3 text-sm text-amber-700">这是完整 WebSocket 连接轨迹，不代表单次 response 耗时。</p>
+    <p v-if="selected.profile.evidence==='historical'" class="mt-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">历史日志重建，非函数级实测。{{ selected.profile.notes?.join('；') }}</p>
+    <div class="mt-4 flex flex-wrap items-center gap-3 text-sm"><button class="btn btn-secondary" :aria-pressed="!zoomFirst" @click="zoomFirst=false">完整请求</button><button class="btn btn-secondary" :disabled="firstSemantic===null" :aria-pressed="zoomFirst" @click="zoomFirst=true">放大首输出前</button><span v-if="firstSemantic!==null" class="text-slate-500">入口到首输出 {{ duration(firstSemantic) }}</span></div>
+    <ProfileTimeline :segments="detailSegments" :total="detailTotal" :events="selected.profile.events.filter(e=>e.at_us<=detailTotal)" @select="selectedSegment=$event" />
+    <div v-if="selectedSegment" class="mt-3 rounded-lg bg-indigo-50 p-3 text-sm text-indigo-800">{{ stageNames[selectedSegment.name]||selectedSegment.name }} · {{ duration(selectedSegment.duration_us) }} · 从 {{ duration(selectedSegment.start_us) }} 开始<span v-if="selectedSegment.attempt"> · 尝试 {{ selectedSegment.attempt }} / 账号 #{{ selectedSegment.account_id }}</span></div>
+    <div class="mt-5 grid gap-6 lg:grid-cols-2"><div><h3 class="mb-3 text-sm font-semibold">阶段明细（子阶段可能重叠）</h3><div class="max-h-80 overflow-auto"><div v-for="s in selected.profile.spans" :key="s.id" class="flex justify-between gap-3 border-b border-slate-100 py-2 text-xs dark:border-slate-700"><span>{{ stageNames[s.name]||s.name }}<span v-if="s.turn"> · 第 {{ s.turn }} 轮</span><span v-if="s.attempt"> · #{{ s.attempt }}</span><span v-if="s.incomplete" class="text-amber-600"> · 未闭合</span></span><span class="text-right"><b class="block">{{ duration(s.end_us-s.start_us) }}</b><span class="text-slate-400">{{ duration(s.start_us) }} → {{ duration(s.end_us) }}</span></span></div></div></div><div><h3 class="mb-3 text-sm font-semibold">关键节点</h3><ol class="max-h-80 space-y-2 overflow-auto"><li v-for="(e,i) in selected.profile.events" :key="i" class="rounded-lg p-2 text-xs" :class="e.kind==='fallback'?'bg-rose-50 text-rose-800':e.kind==='retry'?'bg-amber-50 text-amber-800':'bg-slate-50 text-slate-600 dark:bg-slate-800 dark:text-slate-300'"><b>{{ eventNames[e.kind]||e.kind }}</b> · {{ duration(e.at_us) }}<span v-if="e.turn"> · 第 {{ e.turn }} 轮</span><span v-if="e.attempt"> · 尝试 {{ e.attempt }}</span><span v-if="e.account_id"> · 账号 #{{ e.account_id }}</span><span v-if="e.status"> · {{ e.status }}</span></li></ol></div></div>
+   </section>
+  </template>
+ </div></AppLayout>
+</template>
+<script setup lang="ts">
+import {ref,computed,onMounted,onBeforeUnmount,nextTick} from 'vue'
+import AppLayout from '@/components/layout/AppLayout.vue'
+import ProfileTimeline from '@/components/request-profiling/ProfileTimeline.vue'
+import {getRequestProfiles,duration,stageColor,stageNames,eventNames,type ProfileResult,type ProfileRow,type ProfileSegment} from '@/api/admin/requestProfiles'
+const data=ref<ProfileResult|null>(null),loading=ref(false),error=ref(''),selected=ref<ProfileRow|null>(null),selectedSegment=ref<ProfileSegment|null>(null)
+const evidence=ref('measured')
+const minutes=ref(60),model=ref(''),group=ref(''),account=ref(''),protocol=ref('sse'),errorType=ref(''),requestId=ref(''),page=ref(1)
+const detailRef=ref<HTMLElement|null>(null),zoomFirst=ref(false),selectedAggregate=ref<ProfileSegment|null>(null)
+const firstSemantic=computed(()=>selected.value?.profile.events.find(e=>e.kind==='first_semantic')?.at_us??null)
+const detailTotal=computed(()=>zoomFirst.value&&firstSemantic.value!==null?firstSemantic.value:selected.value?.profile.total_us||0)
+const detailSegments=computed(()=>(selected.value?.profile.segments||[]).filter(s=>s.start_us<detailTotal.value).map(s=>({...s,duration_us:Math.min(s.duration_us,detailTotal.value-s.start_us)})))
+async function selectRow(row:ProfileRow){selected.value=row;selectedSegment.value=null;zoomFirst.value=false;await nextTick();detailRef.value?.scrollIntoView({behavior:'smooth',block:'start'})}
+let controller:AbortController|undefined
+let windowEnd=new Date()
+const aggregate=computed(()=>{let offset=0;return (data.value?.summary.stages||[]).map(s=>{const result={name:s.name,start_us:offset,duration_us:s.mean_us};offset+=s.mean_us;return result})})
+const cards=computed(()=>{const s=data.value!.summary;return [{label:'已记录请求',value:s.count.toLocaleString()},{label:'平均完整耗时',value:s.count?duration(s.mean_us):'—'},{label:'完整耗时 P90',value:s.count?duration(s.p90_us):'—'},{label:'重试 / 账号切换',value:`${s.retries} / ${s.fallbacks}`}]})
+async function load(reset=false){controller?.abort();controller=new AbortController();const active=controller;if(reset){page.value=1;windowEnd=new Date();data.value=null;selected.value=null};loading.value=true;error.value='';const params:Record<string,string|number>={from:new Date(windowEnd.getTime()-minutes.value*60000).toISOString(),to:windowEnd.toISOString(),page:page.value,limit:50};for(const [k,v] of Object.entries({model:model.value,group_id:group.value,account_id:account.value,protocol:protocol.value,error_type:errorType.value,request_id:requestId.value,evidence:evidence.value})){if(v)params[k]=v}
+ try{const result=await getRequestProfiles(params,active.signal);if(active!==controller)return;data.value=result;selected.value=result.rows[0]||null;selectedSegment.value=null;selectedAggregate.value=null;zoomFirst.value=false}catch(e){if(active.signal.aborted)return;error.value=e instanceof Error?e.message:'加载失败，请重试'}finally{if(active===controller)loading.value=false}}
+onMounted(()=>load(true));onBeforeUnmount(()=>controller?.abort())
+</script>

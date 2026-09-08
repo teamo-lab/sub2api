@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestprofile"
 	"io"
 	"net/http"
 	"sort"
@@ -2483,6 +2484,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			if firstTokenMs == nil && openAIStreamDataStartsTTFT(trimmedData, eventType, forceFlushFailedEvent, ttftMode) {
 				ms := int(time.Since(startTime).Milliseconds())
 				firstTokenMs = &ms
+				requestprofile.Mark(c.Request.Context(), "first_semantic", 0)
 			}
 			s.parseSSEUsageBytesWithType(dataBytes, eventType, usage)
 		}

@@ -2,7 +2,9 @@ package middleware
 
 import (
 	"context"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestprofile"
 	"strings"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -21,6 +23,9 @@ func RequestLogger() gin.HandlerFunc {
 			return
 		}
 
+		if isProfiledInferenceRequest(c.Request) {
+			c.Request = c.Request.WithContext(requestprofile.Attach(c.Request.Context(), time.Now()))
+		}
 		requestID, validRequestID := normalizeCorrelationID(c.GetHeader(requestIDHeader))
 		if !validRequestID {
 			requestID = uuid.NewString()
