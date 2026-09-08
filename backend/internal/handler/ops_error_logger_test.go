@@ -21,6 +21,19 @@ type ingressRejectSettingRepo struct {
 	getValueCalls int
 }
 
+func TestSetOpsSelectedAccountPublishesNamespacedRoute(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	setOpsSelectedAccount(c, 12, service.PlatformOpenAI)
+
+	require.Equal(t, "sub2api:12", recorder.Header().Get(teamoUpstreamRouteHeader))
+	require.Equal(t, int64(12), c.MustGet(opsAccountIDKey))
+	require.Equal(t, int64(12), c.Request.Context().Value(ctxkey.AccountID))
+}
+
 func (r *ingressRejectSettingRepo) GetValue(context.Context, string) (string, error) {
 	r.getValueCalls++
 	return "", service.ErrSettingNotFound

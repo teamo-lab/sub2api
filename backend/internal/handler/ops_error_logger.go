@@ -29,6 +29,7 @@ const (
 	opsModelKey                  = "ops_model"
 	opsStreamKey                 = "ops_stream"
 	opsAccountIDKey              = "ops_account_id"
+	teamoUpstreamRouteHeader     = "X-Teamo-Upstream-Route"
 	opsRoutingCapacityLimitedKey = "ops_routing_capacity_limited"
 	opsDedicatedErrorRecordedKey = "ops_dedicated_error_recorded"
 
@@ -468,6 +469,10 @@ func setOpsSelectedAccount(c *gin.Context, accountID int64, platform ...string) 
 	if c == nil || accountID <= 0 {
 		return
 	}
+	// TeamoRouter keeps Router channel ids and Sub2API account ids in separate
+	// namespaces. The x-teamo-* prefix is internal and stripped by the Router
+	// before the response reaches the public client.
+	c.Header(teamoUpstreamRouteHeader, "sub2api:"+strconv.FormatInt(accountID, 10))
 	service.ClearOpsUpstreamModel(c)
 	c.Set(opsAccountIDKey, accountID)
 	if c.Request != nil {
