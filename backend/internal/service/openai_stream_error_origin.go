@@ -49,7 +49,17 @@ func (o *openAIStreamErrorOrigin) seal() {
 		return
 	}
 	o.sealed = true
-	o.skip = currentOpsFailureSkipMonitoring(o.c)
+	// A previous recovered attempt may have been excluded. Only this terminal's
+	// own native body and semantic status decide its monitoring eligibility.
+	platform := PlatformOpenAI
+	if o.account != nil {
+		platform = o.account.Platform
+	}
+	if rules := getBoundErrorPassthroughService(o.c); rules != nil {
+		body := openAIStreamFailedEventPassthroughBody(o.payload, o.message)
+		rule := rules.MatchRule(platform, openAIStreamFailedEventSemanticStatus(o.payload, o.message), body)
+		o.skip = rule != nil && rule.SkipMonitoring
+	}
 }
 
 func (o *openAIStreamErrorOrigin) commit() {

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/model"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -14,6 +15,9 @@ func TestOpenAIStreamErrorOriginSnapshotsFirstRuleDecision(t *testing.T) {
 		t.Run(map[bool]string{false: "counted_first", true: "excluded_first"}[skipped], func(t *testing.T) {
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
 			svc := &OpenAIGatewayService{cfg: &config.Config{}}
+			rules := &ErrorPassthroughService{}
+			rules.setLocalCache([]*model.ErrorPassthroughRule{{ID: 1, Enabled: true, Platforms: []string{PlatformOpenAI}, MatchMode: "all", ErrorCodes: []int{502}, SkipMonitoring: skipped}})
+			BindErrorPassthroughService(c, rules)
 			origin := svc.newOpenAIStreamErrorOrigin(c, &Account{ID: 1, Platform: PlatformOpenAI}, false, "synthetic")
 			c.Set(OpsSkipPassthroughKey, skipped)
 			origin.stage([]byte(originFirstFailure), "first upstream capacity failure")
@@ -33,6 +37,29 @@ func TestOpenAIStreamErrorOriginSnapshotsFirstRuleDecision(t *testing.T) {
 			require.Equal(t, skipped, c.GetBool(OpsSkipPassthroughKey))
 		})
 	}
+}
+
+func TestOpenAIStreamErrorOriginDoesNotInheritPriorAttemptExclusion(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	svc := &OpenAIGatewayService{cfg: &config.Config{}}
+	c.Set(OpsSkipPassthroughKey, true)
+	c.Set(OpsUpstreamErrorsKey, []*OpsUpstreamErrorEvent{{AccountID: 1, UpstreamStatusCode: 503, SkipMonitoring: true}})
+	policy := &ErrorPassthroughService{}
+	policy.setLocalCache([]*model.ErrorPassthroughRule{{ID: 1, Enabled: true, Platforms: []string{PlatformOpenAI}, MatchMode: "all", ErrorCodes: []int{503}, SkipMonitoring: true}})
+	BindErrorPassthroughService(c, policy)
+	origin := svc.newOpenAIStreamErrorOrigin(c, &Account{ID: 2, Platform: PlatformOpenAI}, false, "synthetic")
+	origin.stage([]byte(originFirstFailure), "first upstream capacity failure")
+	origin.observeWrite(10, 10, nil)
+	origin.seal()
+	origin.commit()
+	origin.record()
+	value, ok := c.Get(OpsUpstreamErrorsKey)
+	require.True(t, ok)
+	events := value.([]*OpsUpstreamErrorEvent)
+	require.Len(t, events, 2)
+	require.True(t, events[0].SkipMonitoring)
+	require.False(t, events[1].SkipMonitoring)
+	require.False(t, c.GetBool(OpsSkipPassthroughKey))
 }
 
 func TestOpenAIStreamErrorOriginCanReplaceSuppressedBareErrorBeforeSeal(t *testing.T) {

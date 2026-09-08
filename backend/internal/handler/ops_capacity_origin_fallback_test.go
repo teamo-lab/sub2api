@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -40,6 +41,32 @@ func (s *opsCapacityFallbackCache) DecrementAccountWaitCount(context.Context, in
 type opsCapacityFallbackUpstream struct {
 	recoveryUpstream
 	firstStatus int
+}
+
+type opsCapacityProviderHandoffRules struct {
+	service.ErrorPassthroughRepository
+	rules []*model.ErrorPassthroughRule
+}
+
+func (r opsCapacityProviderHandoffRules) List(context.Context) ([]*model.ErrorPassthroughRule, error) {
+	return r.rules, nil
+}
+
+type opsCapacityProviderHandoffUpstream struct {
+	recoveryUpstream
+}
+
+func (u *opsCapacityProviderHandoffUpstream) Do(req *http.Request, proxy string, id int64, concurrency int) (*http.Response, error) {
+	if id != 2 {
+		return u.recoveryUpstream.Do(req, proxy, id, concurrency)
+	}
+	u.calls = append(u.calls, id)
+	body := "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial B answer\"}\n\n" +
+		"event: error\ndata: {\"type\":\"error\",\"error\":{\"code\":\"upstream_error\",\"type\":\"upstream_error\",\"message\":\"provider B failed after visible output\"}}\n\n"
+	return &http.Response{
+		StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body: io.NopCloser(bytes.NewBufferString(body)),
+	}, nil
 }
 
 func (u *opsCapacityFallbackUpstream) Do(req *http.Request, proxy string, id int64, concurrency int) (*http.Response, error) {
@@ -326,4 +353,72 @@ func TestOpsCapacityOriginFallback_SkippedHistoricalFailureCannotHideLocalQueueF
 			}
 		})
 	}
+}
+
+func TestOpsCapacityOriginFallback_SkippedProviderACannotHideProviderBAfterOutput(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupOpsErrorLogTestQueue(t, 4)
+	t.Cleanup(func() { resetOpsErrorLoggerStateForTest(t) })
+	repo := &ingressRejectOpsRepo{}
+	ops := service.NewOpsService(repo, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	upstream := &opsCapacityProviderHandoffUpstream{}
+	h := newOpenAIResponsesFailoverTestHandler(t, upstream, service.AccountTypeAPIKey)
+	rules := opsCapacityProviderHandoffRules{rules: []*model.ErrorPassthroughRule{
+		{
+			ID: 92, Enabled: true, Name: "reviewed-provider-A-503-exclusion", MatchMode: "all",
+			Platforms: []string{service.PlatformOpenAI}, ErrorCodes: []int{http.StatusServiceUnavailable},
+			PassthroughCode: true, PassthroughBody: true, SkipMonitoring: true,
+		},
+		{
+			ID: 93, Enabled: true, Name: "bounded-A-to-B-recovery", MatchMode: "all",
+			Platforms: []string{service.PlatformOpenAI}, ErrorCodes: []int{http.StatusServiceUnavailable},
+			PassthroughCode: true, PassthroughBody: true, SkipMonitoring: false,
+			RecoveryPolicy: &model.ErrorRecoveryPolicy{
+				Mode: "limited", AccountTypes: []string{service.AccountTypeAPIKey}, Models: []string{"gpt-5.1"},
+				UpstreamCodes: []string{"server_is_overloaded"}, AccountSwitches: 1, BudgetSeconds: 10,
+			},
+		},
+	}}
+	h.errorPassthroughService = service.NewErrorPassthroughService(rules, nil)
+	router := opsCapacityFallbackRouter(ops, func(c *gin.Context) {
+		h.Responses(c)
+		rawEvents, ok := c.Get(service.OpsUpstreamErrorsKey)
+		require.True(t, ok)
+		events, ok := rawEvents.([]*service.OpsUpstreamErrorEvent)
+		require.True(t, ok)
+		require.Len(t, events, 2)
+		require.Equal(t, int64(1), events[0].AccountID)
+		require.True(t, events[0].SkipMonitoring, "A's actual 503 rule must mark only A's history")
+		require.Equal(t, int64(2), events[1].AccountID)
+		require.False(t, events[1].SkipMonitoring, "B's 502 has no exclusion rule and cannot inherit A's skip")
+	})
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, opsCapacityFallbackRequest(true))
+	require.Equal(t, []int64{1, 2}, upstream.calls, "B's partial output prohibits further retry or fallback")
+	require.Equal(t, http.StatusOK, recorder.Code, "partial SSE output already committed wire status")
+	require.Contains(t, recorder.Body.String(), "partial B answer")
+	require.Contains(t, recorder.Body.String(), "provider B failed after visible output")
+	require.NotContains(t, recorder.Body.String(), "Our servers are currently overloaded")
+	entry := opsCapacityFallbackPersistOne(t, repo)
+	require.NotNil(t, entry.AccountID)
+	require.Equal(t, int64(2), *entry.AccountID)
+	require.Equal(t, http.StatusBadGateway, entry.StatusCode)
+	require.False(t, entry.IsBusinessLimited)
+	require.Equal(t, "upstream", entry.ErrorPhase)
+	require.Equal(t, "provider", entry.ErrorOwner)
+	require.Equal(t, "upstream_http", entry.ErrorSource)
+	require.NotNil(t, entry.UpstreamStatusCode)
+	require.Equal(t, http.StatusBadGateway, *entry.UpstreamStatusCode)
+	require.NotNil(t, entry.UpstreamErrorMessage)
+	require.Contains(t, *entry.UpstreamErrorMessage, "provider B failed after visible output")
+	require.NotNil(t, entry.UpstreamErrorsJSON)
+	events, err := service.ParseOpsUpstreamErrors(*entry.UpstreamErrorsJSON)
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+	require.Equal(t, int64(1), events[0].AccountID)
+	require.Equal(t, http.StatusServiceUnavailable, events[0].UpstreamStatusCode)
+	require.Contains(t, events[0].Message, "overloaded")
+	require.Equal(t, int64(2), events[1].AccountID)
+	require.Equal(t, http.StatusBadGateway, events[1].UpstreamStatusCode)
+	require.Contains(t, events[1].Message, "provider B failed after visible output")
 }
