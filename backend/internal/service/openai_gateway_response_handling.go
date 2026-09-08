@@ -154,8 +154,13 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	}
 	flushBuffered := func() error {
 		if nativeRelayHold {
-			if !relayCommitStarted.Load() && c.Request.Context().Err() != nil {
-				return c.Request.Context().Err()
+			if !relayCommitStarted.Load() {
+				if err := c.Request.Context().Err(); err != nil {
+					return err
+				}
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 			}
 			// A failed/short write may still have delivered bytes. Never reopen
 			// the replay window based on the writer's byte count afterward.
@@ -290,18 +295,27 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	eventStartsClientOutput := false
 	eventStartsTTFTOutput := false
 	eventShouldFlush := false
+	relayContextErr := func() error {
+		if err := c.Request.Context().Err(); err != nil {
+			return err
+		}
+		return ctx.Err()
+	}
 	canRelayReplay := func() bool {
-		return !relayCommitStarted.Load() && !relayReplayUnsafe && !clientDisconnected && c.Request.Context().Err() == nil
+		return !relayCommitStarted.Load() && !relayReplayUnsafe && !clientDisconnected && relayContextErr() == nil
 	}
 	if nativeRelayHold {
 		// Before delivery, cancellation must unblock a silent body read. After
 		// delivery the existing usage-drain behavior remains unchanged.
-		stopCancel := context.AfterFunc(c.Request.Context(), func() {
+		closeBeforeDelivery := func() {
 			if !relayCommitStarted.Load() {
 				_ = resp.Body.Close()
 			}
-		})
+		}
+		stopCancel := context.AfterFunc(c.Request.Context(), closeBeforeDelivery)
+		stopBudget := context.AfterFunc(ctx, closeBeforeDelivery)
 		defer stopCancel()
+		defer stopBudget()
 	}
 	handlePendingWriteError := func(err error) {
 		if firstOutputStage != nil && !firstOutputStage.Closed() {
@@ -420,8 +434,8 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		lastDownstreamWriteAt = time.Now()
 	}
 	finalizeStream := func() (*openaiStreamingResult, error) {
-		if nativeRelayHold && !relayCommitStarted.Load() && c.Request.Context().Err() != nil {
-			return resultWithUsage(), fmt.Errorf("stream usage incomplete: %w", c.Request.Context().Err())
+		if nativeRelayHold && !relayCommitStarted.Load() && relayContextErr() != nil {
+			return resultWithUsage(), fmt.Errorf("stream usage incomplete: %w", relayContextErr())
 		}
 		if stageFirstOutput && eventInProgress {
 			// EOF dispatches the final SSE event even without a trailing blank line.
@@ -485,8 +499,8 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		if scanErr == nil {
 			return nil, nil, false
 		}
-		if nativeRelayHold && !relayCommitStarted.Load() && c.Request.Context().Err() != nil {
-			return resultWithUsage(), fmt.Errorf("stream usage incomplete: %w", c.Request.Context().Err()), true
+		if nativeRelayHold && !relayCommitStarted.Load() && relayContextErr() != nil {
+			return resultWithUsage(), fmt.Errorf("stream usage incomplete: %w", relayContextErr()), true
 		}
 		if errors.Is(scanErr, errOpenAIFirstOutputScannerLimit) && !firstOutputProgressObserved && (!nativeRelayHold || canRelayReplay()) {
 			logger.LegacyPrintf("service.openai_gateway", "SSE token exceeded guarded first-output limit: account=%d limit=%d error=%v", account.ID, openAIFirstOutputStageMaxBytes+openAIFirstOutputScannerFramingAllowance, scanErr)
@@ -619,7 +633,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 					})
 				}
 				outputStarted := openAIStreamClientOutputStarted(c, clientOutputStarted)
-				if !outputStarted && !cyberHit {
+				if !outputStarted && !cyberHit && (!nativeRelayHold || canRelayReplay()) {
 					if retrySignal := newOpenAIEncryptedSemanticRetrySignal(c, dataBytes); retrySignal != nil {
 						sawFailedEvent = true
 						streamEarlyErr = retrySignal
