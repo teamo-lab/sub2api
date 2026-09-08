@@ -58,7 +58,8 @@ stage helper 生成临时 Compose environment overlay，只重建已确认 0% / 
 4. 至少观察 60 分钟和 12 个完整五分钟桶，每个受测模型每组至少 1,000 请求；报告
    差值和 95% 区间，样本与统计把握不足继续观察。不能用定向冒烟代替真实流量效果验收。
 5. 第一阶段通过后，才推进 TR 跨资源组控制的后续发布和最终 5% 端到端实验。
-   最终目标仍是 P90 至少下降 30%，SLA 与请求级 cache 无损。
+   最新目标以 SLA 收益为主：通过合规 retry/fallback 恢复提交前失败，提高客户端最终成功率；
+   端到端 TTFT P90 和请求级 cache 持平即可，原 P90 至少下降 30% 不再作为门禁。
 
 新版本和旧稳定槽若包含不同的非 Relay 补丁，需先处理版本差异和对照设计。
 2026-09-08 的只读检查发现 43 处于 `chat-fallback-sla` 回滚后状态；该补丁已在 main。
@@ -113,3 +114,29 @@ panic/崩溃/丢日志产生的不完整尝试必须保留 unknown；特别是�
 
 该适配不更改现有 NAT 规则、稳定槽、单例worker或流量比例；真实Key/协议、默认off与on、
 计费、采集覆盖和后验门禁仍需完成。只有本地隔离 host 工具测试通过不代表已部署。
+
+## 同镜像 Relay off/on 配置实验
+
+完成共同代码、Relay 关闭的基线发布后，可通过经审查同步的本机包装器使用专用入口：
+
+```text
+sub2api-release stage-relay-config <release-id> <stable-version> <stable-image-digest> <source-commit> <binary-sha256> <group-ids>
+```
+
+调用仍须持有匹配 owner/release ID 的 fleet lease，显式设置与 `SUB2API_CLOUD_HOST` 相同的
+`SUB2API_SINGLE_HOST_RELEASE_TARGET`；已有 NAT 入口还须明确允许并通过原 strict validator。
+包装器只给 `stage-image-release` 传递 `relay-off-on` 模式，不调用 `attest-identical`、canary 或 promote。
+没有显式模式时，同镜像 staging 继续被拒绝。
+
+专用模式只允许相同 immutable image、实际 binary SHA256、嵌入的 source commit 与版本。
+稳定槽必须 Relay 关闭，候选必须显式开启；两边非空 group 名单必须完全一致。不同镜像、
+版本、源码、分组或无实际 off→on 变化均拒绝。候选仍须健康、0%且无活动流，稳定槽保持100%；
+NAT、依赖、资源余量与 PostgreSQL 备份检查完成后才重建候选。真实生产原Key/协议门禁继续执行。
+
+结果提供两槽基础 environment SHA256 快照，只剔除 slot、release ID 和本次 Relay 开关差异，
+不输出环境变量值或凭据。此快照不是完整配置等价证明；发布验收还要核对现有配置文件、
+协议和分组运行面。快照不一致时候选保持0%，不能开流，先定位并通过正式配置流程处理差异。
+
+同镜像不等于相同行为，不能据此使用 identical-image attestation 缩短真实流量验收。
+off/on 对照仍按前述60分钟、12个完整桶、每模型每组至少1,000请求和覆盖率要求，报告
+被恢复的提交前失败及最终 SLA；TTFT P90、请求级 cache 均须持平或改善。
