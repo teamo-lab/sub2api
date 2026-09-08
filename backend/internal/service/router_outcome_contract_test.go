@@ -26,10 +26,10 @@ func TestRouterUpstreamAttemptsPreserveFallbackOrder(t *testing.T) {
 	var attempts []RouterUpstreamAttempt
 	require.NoError(t, json.Unmarshal([]byte(recorder.Header().Get(RouterAttemptsHeader)), &attempts))
 	require.Len(t, attempts, 2)
-	require.Equal(t, int64(-12), attempts[0].AccountID)
+	require.Equal(t, int64(12), attempts[0].AccountID)
 	require.Equal(t, "failed", attempts[0].Result)
 	require.Equal(t, http.StatusTooManyRequests, attempts[0].Status)
-	require.Equal(t, int64(-57), attempts[1].AccountID)
+	require.Equal(t, int64(57), attempts[1].AccountID)
 	require.Equal(t, "pending", attempts[1].Result)
 }
 

@@ -67,7 +67,8 @@ func SetRouterOutcome(c *gin.Context, outcome RouterOutcome) {
 
 // BeginRouterUpstreamAttempts publishes the explicit unknown sentinel before
 // a streaming keepalive can commit the response headers. A selected account
-// replaces it with a negative account id.
+// replaces it with Sub2API's original positive account id. Router converts it
+// to the negative analytics id only when persisting the flattened attempt.
 func BeginRouterUpstreamAttempts(c *gin.Context) {
 	if !RouterContractV2Requested(c) {
 		return
@@ -81,7 +82,7 @@ func BeginRouterUpstreamAttempts(c *gin.Context) {
 }
 
 // RecordRouterUpstreamAccount starts one physical Sub2API account attempt.
-// Negative ids keep this flat list disjoint from Router channel ids.
+// The protocol keeps Sub2API's original positive account id.
 func RecordRouterUpstreamAccount(c *gin.Context, accountID int64) {
 	if accountID <= 0 || !RouterContractV2Requested(c) {
 		return
@@ -98,12 +99,12 @@ func RecordRouterUpstreamAccount(c *gin.Context, accountID int64) {
 	last := len(state.attempts) - 1
 	if last >= 0 && state.attempts[last].Result == "pending" {
 		if state.attempts[last].AccountID == 0 {
-			state.attempts[last].AccountID = -accountID
+			state.attempts[last].AccountID = accountID
 			state.attempts[last].StartedAtMs = nowMs
 			publishRouterUpstreamAttempts(c, state)
 			return
 		}
-		if state.attempts[last].AccountID == -accountID {
+		if state.attempts[last].AccountID == accountID {
 			return
 		}
 		state.attempts[last].Result = "failed"
@@ -114,7 +115,7 @@ func RecordRouterUpstreamAccount(c *gin.Context, accountID int64) {
 		return
 	}
 	state.attempts = append(state.attempts, RouterUpstreamAttempt{
-		AccountID:   -accountID,
+		AccountID:   accountID,
 		StartedAtMs: nowMs,
 		Result:      "pending",
 	})
@@ -141,14 +142,14 @@ func MarkRouterUpstreamAttemptFailed(c *gin.Context, accountID int64, status int
 		if state.attempts[i].Result != "pending" {
 			continue
 		}
-		if accountID <= 0 || state.attempts[i].AccountID == -accountID {
+		if accountID <= 0 || state.attempts[i].AccountID == accountID {
 			index = i
 			break
 		}
 	}
 	if index < 0 && accountID > 0 && len(state.attempts) < maxRouterAttempts {
 		state.attempts = append(state.attempts, RouterUpstreamAttempt{
-			AccountID: -accountID,
+			AccountID: accountID,
 			Result:    "pending",
 		})
 		index = len(state.attempts) - 1
