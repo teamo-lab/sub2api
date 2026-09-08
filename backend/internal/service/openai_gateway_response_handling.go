@@ -573,6 +573,11 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				}
 				outputStarted := openAIStreamClientOutputStarted(c, clientOutputStarted)
 				if !outputStarted && !cyberHit {
+					if retrySignal := newOpenAIEncryptedSemanticRetrySignal(c, dataBytes); retrySignal != nil {
+						sawFailedEvent = true
+						streamEarlyErr = retrySignal
+						return
+					}
 					if compactErr := newOpenAICompactFallbackSignal(c, dataBytes, failedMessage); compactErr != nil {
 						sawFailedEvent = true
 						streamEarlyErr = compactErr
