@@ -1913,12 +1913,16 @@ func (s *OpenAIGatewayService) recordOpenAIStreamUpstreamError(
 	kind string,
 	payload []byte,
 	message string,
+	final ...openAIStreamFinalError,
 ) string {
 	message = sanitizeUpstreamErrorMessage(strings.TrimSpace(message))
 	if message == "" {
 		message = "OpenAI upstream response failed"
 	}
 	statusCode := openAIStreamFailureStatus(payload, message)
+	if len(final) > 0 {
+		statusCode = final[0].status
+	}
 	detail := ""
 	if len(payload) > 0 && s != nil && s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
 		maxBytes := s.cfg.Gateway.LogUpstreamErrorBodyMaxBytes
@@ -1944,6 +1948,10 @@ func (s *OpenAIGatewayService) recordOpenAIStreamUpstreamError(
 			event.Platform = account.Platform
 			event.AccountID = account.ID
 			event.AccountName = account.Name
+		}
+		if len(final) > 0 {
+			event.SkipMonitoring = final[0].skip
+			event.SkipMonitoringFixed = true
 		}
 		appendOpsUpstreamError(c, event)
 	}
@@ -2144,6 +2152,8 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	var bareErrorPayload []byte
 	bareErrorAccountSideEffectsPending := false
 	upstreamRequestID := strings.TrimSpace(resp.Header.Get("x-request-id"))
+	terminalOrigin := s.newOpenAIStreamErrorOrigin(c, account, true, upstreamRequestID)
+	defer terminalOrigin.record()
 	// pendingLines 在首个可见输出前保留前导事件，确保无输出失败仍可安全 failover。
 	// 工具调用参数帧也扣在这里直到 item 完成；pendingBytes 超出上限即放弃保护
 	// 立刻放行（fail-open），迟到的保护不能变成饿死下游。
@@ -2212,7 +2222,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			}
 		}
 		for _, pending := range pendingLines {
-			if _, err := fmt.Fprintln(w, pending); err != nil {
+			n, err := fmt.Fprintln(w, pending)
+			terminalOrigin.observeWrite(n, len(pending)+1, err)
+			if err != nil {
 				clientDisconnected = true
 				logger.LegacyPrintf("service.openai_gateway", "[OpenAI passthrough] Client disconnected during streaming, continue draining upstream for usage: account=%d", account.ID)
 				return false
@@ -2243,7 +2255,10 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		if clientDisconnected || !writePendingLines() {
 			return
 		}
-		if _, err := fmt.Fprint(w, buildOpenAIResponseFailedSSE(responseID, originalModel, bareErrorPayload, failedMessage)); err != nil {
+		frame := buildOpenAIResponseFailedSSE(responseID, originalModel, bareErrorPayload, failedMessage)
+		n, err := fmt.Fprint(w, frame)
+		terminalOrigin.observeWrite(n, len(frame), err)
+		if err != nil {
 			clientDisconnected = true
 			return
 		}
@@ -2251,7 +2266,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		CompleteErrorRecovery(c)
 		failureDelivered = true
 		flushPending = true
+		terminalOrigin.seal()
 		flushPendingOutput()
+		terminalOrigin.commit()
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
@@ -2419,6 +2436,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 					}
 				}
 				forceFlushFailedEvent = true
+				if !cyberHit {
+					terminalOrigin.stage(dataBytes, failedMessage)
+				}
 				sawFailedEvent = true
 			}
 			if trimmedData == "[DONE]" {
@@ -2508,7 +2528,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 					continue
 				}
 			}
-			if _, err := fmt.Fprintln(w, line); err != nil {
+			n, err := fmt.Fprintln(w, line)
+			terminalOrigin.observeWrite(n, len(line)+1, err)
+			if err != nil {
 				clientDisconnected = true
 				logger.LegacyPrintf("service.openai_gateway", "[OpenAI passthrough] Client disconnected during streaming, continue draining upstream for usage: account=%d", account.ID)
 			} else {
@@ -2520,7 +2542,13 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				CompleteErrorRecovery(c)
 				flushPending = true
 				if line == "" {
+					if responseFailedPending {
+						terminalOrigin.seal()
+					}
 					flushPendingOutput()
+					if responseFailedPending {
+						terminalOrigin.commit()
+					}
 				}
 			}
 		}

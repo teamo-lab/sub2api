@@ -269,6 +269,8 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	var streamEarlyErr error
 	terminalFailurePending := false
 	failureDelivered := false
+	terminalOrigin := s.newOpenAIStreamErrorOrigin(c, account, false, upstreamRequestID)
+	defer terminalOrigin.record()
 	suppressCurrentEvent := false
 	var bareErrorPayload []byte
 	bareErrorAccountSideEffectsPending := false
@@ -299,6 +301,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		shouldFlush := eventShouldFlush || (queueDrained && clientOutputStarted)
 		eventInProgress = false
 		if !clientDisconnected {
+			if terminalFailurePending {
+				terminalOrigin.seal()
+			}
 			if completedProgressEvent {
 				applyAttemptResponseHeaders()
 			}
@@ -400,6 +405,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				handlePendingWriteError(err)
 			} else {
 				failureDelivered = true
+				terminalOrigin.seal()
 			}
 		}
 		if sawTerminalEvent && !sawFailedEvent {
@@ -424,7 +430,13 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			logOpenAIFailoverAfterReasoningOutput(ctx, account, "native_sse", upstreamRequestID, "eof")
 			return resultWithUsage(), failoverErr
 		}
+		if terminalFailurePending && !clientDisconnected {
+			terminalOrigin.seal()
+		}
 		flushPending("Client disconnected during final flush, returning collected usage")
+		if sawFailedEvent && !clientDisconnected && pendingBytes() == 0 {
+			terminalOrigin.commit()
+		}
 		if !sawTerminalEvent {
 			if openAIStreamClientOutputStarted(c, clientOutputStarted) && !clientDisconnected {
 				s.recordOpenAIProxyStreamDisconnect(account, errors.New("stream ended before terminal event"), upstreamRequestID)
@@ -643,6 +655,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 					}
 				}
 				forceFlushFailedEvent = true
+				if !cyberHit {
+					terminalOrigin.stage(dataBytes, failedMessage)
+				}
 				sawFailedEvent = true
 				terminalFailurePending = !codexFailureTerminal || eventType == "response.failed"
 			}
@@ -797,6 +812,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if terminalFailurePending && streamEarlyErr == nil {
 				terminalFailurePending = false
 				failureDelivered = true
+				if !clientDisconnected && pendingBytes() == 0 {
+					terminalOrigin.commit()
+				}
 			}
 			return
 		}
@@ -825,6 +843,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				handlePendingWriteError(err)
 			} else {
 				eventInProgress = line != ""
+				if line == "" && terminalFailurePending {
+					terminalOrigin.seal()
+				}
 				if shouldFlush {
 					if err := flushBuffered(); err != nil {
 						clientDisconnected = true
@@ -839,6 +860,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if line == "" && terminalFailurePending && streamEarlyErr == nil {
 				terminalFailurePending = false
 				failureDelivered = true
+				if !clientDisconnected && pendingBytes() == 0 {
+					terminalOrigin.commit()
+				}
 			}
 		}
 	}

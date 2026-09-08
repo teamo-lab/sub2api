@@ -60,6 +60,9 @@ const (
 	OpsClientBusinessLimitedReasonLocalFeatureGate        = "local_feature_gate"
 	OpsClientBusinessLimitedReasonLocalPolicyDenied       = "local_policy_denied"
 	OpsClientBusinessLimitedReasonLocalModelConfiguration = "local_model_configuration"
+	OpsClientBusinessLimitedReasonUserConcurrency         = "local_user_concurrency"
+	OpsClientBusinessLimitedReasonUserWaitQueue           = "local_user_wait_queue"
+	OpsLocalCapacityFailureKey                            = "ops_local_capacity_failure"
 )
 
 func MarkResponseCommitted(c *gin.Context) { c.Set(ResponseCommittedKey, true) }
@@ -108,6 +111,19 @@ func MarkOpsClientBusinessLimited(c *gin.Context, reason string) {
 	if reason = strings.TrimSpace(reason); reason != "" {
 		c.Set(OpsClientBusinessLimitedReasonKey, reason)
 	}
+}
+
+// MarkOpsLocalCapacityFailure identifies a terminal gateway/account admission
+// rejection after selection. Prior provider attempts remain useful history, but
+// they are not the source of this final local failure.
+func MarkOpsLocalCapacityFailure(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	c.Set(OpsLocalCapacityFailureKey, true)
+	c.Set(OpsSkipPassthroughKey, false)
+	c.Set(OpsClientBusinessLimitedKey, false)
+	c.Set(OpsClientBusinessLimitedReasonKey, "")
 }
 
 func HasOpsClientBusinessLimited(c *gin.Context) bool {
@@ -164,6 +180,10 @@ type OpsStreamError struct {
 	UpstreamMessage string
 	UpstreamDetail  string
 	UpstreamErrors  []*OpsUpstreamErrorEvent
+	// Customer admission belongs to this turn, not the final connection state.
+	ClientBusinessLimited       bool
+	ClientBusinessLimitedReason string
+	LocalCapacityFailure        bool
 }
 
 const maxOpsStreamErrorsPerRequest = 64
@@ -180,6 +200,9 @@ func BeginOpsStreamTurn(c *gin.Context, turn int) {
 	c.Set(OpsUpstreamStatusCodeKey, 0)
 	c.Set(OpsUpstreamErrorMessageKey, "")
 	c.Set(OpsUpstreamErrorDetailKey, "")
+	c.Set(OpsClientBusinessLimitedKey, false)
+	c.Set(OpsClientBusinessLimitedReasonKey, "")
+	c.Set(OpsLocalCapacityFailureKey, false)
 }
 
 // MarkOpsStreamError 记录一次就地 SSE 错误，供 ops 日志采集。
@@ -215,6 +238,9 @@ func markOpsStreamError(c *gin.Context, streamErr OpsStreamError) {
 	streamErr.Message = strings.TrimSpace(streamErr.Message)
 	streamErr.SkipMonitoring = currentOpsFailureSkipMonitoring(c)
 	snapshotOpsStreamErrorContext(c, &streamErr)
+	if streamErr.LocalCapacityFailure {
+		streamErr.CountTowardsSLA = true
+	}
 	if GetOpenAIClientTransport(c) == OpenAIClientTransportWS {
 		if value, ok := c.Get(OpsStreamTurnKey); ok {
 			streamErr.Turn, _ = value.(int)
@@ -244,6 +270,9 @@ func snapshotOpsStreamErrorContext(c *gin.Context, streamErr *OpsStreamError) {
 	if c == nil || streamErr == nil {
 		return
 	}
+	streamErr.ClientBusinessLimited = HasOpsClientBusinessLimited(c)
+	streamErr.ClientBusinessLimitedReason = OpsClientBusinessLimitedReason(c)
+	streamErr.LocalCapacityFailure = c.GetBool(OpsLocalCapacityFailureKey)
 	if c.Request != nil {
 		if accountID, ok := c.Request.Context().Value(ctxkey.AccountID).(int64); ok && accountID > 0 {
 			streamErr.AccountID = accountID
@@ -287,6 +316,9 @@ func snapshotOpsStreamErrorContext(c *gin.Context, streamErr *OpsStreamError) {
 func currentOpsFailureSkipMonitoring(c *gin.Context) bool {
 	if c == nil {
 		return false
+	}
+	if c.GetBool(OpsLocalCapacityFailureKey) {
+		return c.GetBool(OpsSkipPassthroughKey)
 	}
 	if value, ok := c.Get(OpsSkipPassthroughKey); ok {
 		if skip, _ := value.(bool); skip {
@@ -344,6 +376,7 @@ func setOpsUpstreamError(c *gin.Context, upstreamStatusCode int, upstreamMessage
 	if c == nil {
 		return
 	}
+	c.Set(OpsLocalCapacityFailureKey, false)
 	if upstreamStatusCode > 0 {
 		c.Set(OpsUpstreamStatusCodeKey, upstreamStatusCode)
 	}
@@ -407,6 +440,9 @@ type OpsUpstreamErrorEvent struct {
 	// the final client-visible failure; recovered attempts remain provider-health
 	// telemetry and do not count as failed requests.
 	SkipMonitoring bool `json:"-"`
+	// A delivered terminal keeps the rule decision sealed before its flush;
+	// later drained frames or rule-cache changes cannot reclassify it.
+	SkipMonitoringFixed bool `json:"-"`
 }
 
 const (
@@ -543,6 +579,9 @@ func normalizeOpsUpstreamProxyAttribution(ev *OpsUpstreamErrorEvent) {
 // request error is hidden; an intermediate recovered attempt cannot suppress a
 // later client-visible failure.
 func checkSkipMonitoringForUpstreamEvent(c *gin.Context, ev *OpsUpstreamErrorEvent) {
+	if ev.SkipMonitoringFixed {
+		return
+	}
 	if ev.UpstreamStatusCode == 0 {
 		return
 	}
