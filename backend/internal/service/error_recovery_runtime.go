@@ -201,9 +201,15 @@ func applyErrorRecovery(c *gin.Context, account *Account, requestedModel string,
 	}
 	s.switches++
 	if skipRetry {
-		logger.FromContext(c.Request.Context()).Info("openai.late_failure_retry_skipped",
+		value, _ := c.Get("api_key")
+		key := value.(*APIKey) // verified by openAILateFailureSwitchAllowed
+		logger.FromContext(c.Request.Context()).Info(openAILateFailureSwitchEvent,
+			zap.String("component", openAILateFailureSwitchComponent), zap.String("origin", openAILateFailureSwitchOrigin),
+			zap.Int64("user_id", key.UserID), zap.Int64("api_key_id", key.ID),
+			zap.String("platform", account.Platform), zap.String("model", requestedModel),
 			zap.Int64("account_id", account.ID), zap.Int64("group_id", openAILateFailureSwitchGroup(c)),
 			zap.Int64("rule_id", s.rule.ID), zap.Int("upstream_status", failure.StatusCode),
+			zap.Int("upstream_attempt_count", attempt.UpstreamAttempts),
 			zap.Int64("attempt_elapsed_ms", attempt.Elapsed.Milliseconds()),
 			zap.Int64("minimum_wait_ms", openAILateFailureSwitchMinimum(p).Milliseconds()),
 			zap.Int("switch_count", s.switches), zap.Int("budget_seconds", p.BudgetSeconds))

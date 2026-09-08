@@ -624,6 +624,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	originalRequestContext := c.Request.Context()
+	c.Request = c.Request.WithContext(service.WithOpenAIUpstreamAttemptTracking(c.Request.Context()))
 	forwardAttempts := 0
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
@@ -787,7 +788,6 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		// reasoning item（含耦合的 id/summary），避免非透传上游 400 拒绝 Kiro reasoning 形态。
 		attemptBody := h.deriveOpenAIForwardAttemptBody(reqLog, forwardBody, account, &passthroughFailoverState)
 		forwardAttempts++
-		attemptStarted := time.Now()
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
 				if accountReleaseFunc != nil {
@@ -796,7 +796,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			}()
 			return h.gatewayService.Forward(c.Request.Context(), c, account, attemptBody)
 		}()
-		forwardElapsed := time.Since(attemptStarted)
+		upstreamFacts := service.OpenAIUpstreamAttemptFactsFromContext(c.Request.Context())
 		h.gatewayService.ObserveOpenAIStickyBurstResult(
 			c.Request.Context(), apiKey.GroupID, sessionHash, account.ID, reqModel,
 			selection.StickyBurstBypass, err == nil && openAIForwardSucceededForScheduling(result), err,
@@ -893,7 +893,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 						streamStarted = true
 					}
 					if action := service.ApplyErrorRecoveryAfterAttempt(c, account, reqModel, failoverErr, service.ErrorRecoveryAttempt{
-						First: forwardAttempts == 1, Elapsed: forwardElapsed, OriginalContext: originalRequestContext,
+						First: forwardAttempts == 1, Elapsed: upstreamFacts.Elapsed, UpstreamAttempts: upstreamFacts.Count, OriginalContext: originalRequestContext,
 						HandlerCanSwitch: switchCount < maxAccountSwitches, WrittenSizeBeforeForward: writerSizeBeforeForward,
 					}); action != service.ErrorRecoveryDefault {
 						switch action {
