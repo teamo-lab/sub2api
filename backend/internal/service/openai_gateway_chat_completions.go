@@ -992,7 +992,9 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 				if err != nil {
 					continue
 				}
-				if !clientOutputStarted && !refusalDetector.ShouldReleaseClientOutput() {
+				if !clientOutputStarted &&
+					!refusalDetector.ShouldReleaseClientOutput() &&
+					pendingSSEBytes+len(sse) <= openAIPassthroughPendingMaxBytes {
 					pendingSSE = append(pendingSSE, sse)
 					pendingSSEBytes += len(sse)
 					continue
