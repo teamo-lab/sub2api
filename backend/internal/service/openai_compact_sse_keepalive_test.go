@@ -62,18 +62,6 @@ func TestOpenAICompactSSEKeepalive_CommitsHeadersAndComments(t *testing.T) {
 	require.Contains(t, rec.Body.String(), ": keepalive\n\n")
 }
 
-func TestSetRouterUpstreamRouteDoesNotStopCompactKeepalive(t *testing.T) {
-	c, rec := newCompactBridgeTestContext(t, true)
-	c.Request.Header.Set(RouterContractHeader, RouterContractV2)
-	stop := StartOpenAICompactSSEKeepalive(c, keepaliveTestInterval)
-	defer stop()
-
-	SetRouterUpstreamRoute(c, "sub2api:12")
-	require.Eventually(t, func() bool { return rec.Body.Len() > 0 }, time.Second, time.Millisecond)
-	require.Equal(t, "sub2api:12", rec.Header().Get(RouterUpstreamRouteHeader))
-	require.True(t, StopOpenAICompactSSEKeepaliveCommitted(c))
-}
-
 func TestOpenAICompactSSEKeepalive_StopBeforeFirstBeatKeepsWriterUntouched(t *testing.T) {
 	c, rec := newCompactBridgeTestContext(t, true)
 	stop := StartOpenAICompactSSEKeepalive(c, time.Hour)

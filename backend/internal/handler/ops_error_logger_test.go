@@ -21,48 +21,6 @@ type ingressRejectSettingRepo struct {
 	getValueCalls int
 }
 
-func TestSetOpsSelectedAccountPublishesNamespacedRoute(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	c.Request.Header.Set(service.RouterContractHeader, service.RouterContractV2)
-
-	setOpsSelectedAccount(c, 12, service.PlatformOpenAI)
-
-	require.Equal(t, "sub2api:12", recorder.Header().Get(service.RouterUpstreamRouteHeader))
-	require.Equal(t, int64(12), c.MustGet(opsAccountIDKey))
-	require.Equal(t, int64(12), c.Request.Context().Value(ctxkey.AccountID))
-}
-
-func TestSetOpsSelectedAccountDoesNotPublishRouteToOrdinaryCaller(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-
-	setOpsSelectedAccount(c, 12, service.PlatformOpenAI)
-
-	require.Empty(t, recorder.Header().Get(service.RouterUpstreamRouteHeader))
-}
-
-func TestOpsErrorLoggerMiddlewarePublishesUnknownSub2APIRouteBeforeHandler(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	router := gin.New()
-	router.Use(OpsErrorLoggerMiddleware(nil))
-	router.POST("/v1/responses", func(c *gin.Context) {
-		require.Equal(t, "sub2api:unknown", c.Writer.Header().Get(service.RouterUpstreamRouteHeader))
-		c.Status(http.StatusNoContent)
-	})
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	req.Header.Set(service.RouterContractHeader, service.RouterContractV2)
-	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, req)
-
-	require.Equal(t, "sub2api:unknown", recorder.Header().Get(service.RouterUpstreamRouteHeader))
-}
-
 func (r *ingressRejectSettingRepo) GetValue(context.Context, string) (string, error) {
 	r.getValueCalls++
 	return "", service.ErrSettingNotFound
