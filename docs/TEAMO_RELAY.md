@@ -73,4 +73,43 @@ stage helper 生成临时 Compose environment overlay，只重建已确认 0% / 
   和实际用量/余额一致性。这是受控上游的开发验收，仍需生产真实渠道验证。
 - 候选槽配置隔离已完成本地隔离测试；实际发布、TR 端到端关联覆盖率、真实供应商计费
   及生产验收尚未完成。
-- 当前 Draft PR #20 未合并、未部署、未开 10% / 5% 实验，没有线上收益结论。
+- 内置模块 PR #20 已合并；尚未部署或开启本实验 10% / 5%，没有线上收益结论。
+
+## 跨层观测关联
+
+Gateway 从自己的入口生成 `X-Teamo-Observation-ID`，每次真实 Sub dispatch 再生成
+`X-Teamo-Attempt-ID`。Sub 只接受规范 UUID 作为日志关联字段；这两个 Header 不承担鉴权、
+分组选择、Relay 开关或计费去重，也不能独立证明请求来自 Gateway。必须与 Gateway 的
+服务端 admission 和 Router dispatch 一对一关联，才能成为实验归属证据。
+
+配置了受测分组名单的实例在鉴权前记录 `teamo_relay.ingress` 和正常返回时的
+`teamo_relay.ingress_end`，含真实 deployment slot/version/digest/release ID。
+两 ID 缺失/不合法、未配置分组名单或不是所覆盖的 POST 路径时不记录。它不经过 ingress
+reject access sampler。鉴权成功后的 assignment 才记录真实 group ID 和启用状态，最终
+request_end 继续说明实际流处理路径。所有这些观测事件只进入既有标准日志，明确跳过
+Ops 数据库日志 sink，不新增业务持久记录。
+
+panic/崩溃/丢日志产生的不完整尝试必须保留 unknown；特别是不能在外层 Recovery 处理前
+把默认 HTTP 200 记录成最终成功。HTTP 状态本身也不代表语义成功。
+
+可信 Relay 对照需要两槽拥有同一份可观测代码、相同目标 group 名单，稳定槽 Relay 关闭，
+候选槽开启。先验证 Relay 关闭的共同基线，再开展 off/on 对照，避免混入其它 main 补丁
+和观测能力差异。旧稳定槽没有 assignment 时，缺失日志不能被默认为稳定对照请求。
+
+## 单机源码 staging 的二进制来源
+
+默认 `fleet_binary` 保留双机同二进制门禁，已有 NAT 入口仍要求提供另一已验证版本的
+`SUB2API_EXPECTED_BINARY_SHA256`。只有明确仅发布一个目标时，才可设置
+`SUB2API_SINGLE_HOST_RELEASE_TARGET=<与 SUB2API_CLOUD_HOST 完全相同的目标>`；本机包装器
+将该次自定义源码 `stage` 标为 `single_host_image`。不能用于 official mode，双机发布不能
+使用它替代 fleet 门禁。
+
+单机路径仍先验证 release phase、候选0%/零活动流、数据库依赖、严格 NAT 入口和资源余量，
+创建 PostgreSQL 备份后，按提交源码构建不可变镜像。随后只在该镜像内以无网络、只读根文件
+系统执行 `sha256sum /app/sub2api`，不启动应用、不连接业务数据库。若指定外部 expected hash，
+必须在重建候选前一致。候选启动后其实际 binary hash 必须与镜像内 reference 一致；失败仍
+停留0%，不能进入canary。结果明确报告 `binary_reference=single_host_image` 与 source commit，
+不冒充来自另一主机或已完成生产效果验证的二进制。
+
+该适配不更改现有 NAT 规则、稳定槽、单例worker或流量比例；真实Key/协议、默认off与on、
+计费、采集覆盖和后验门禁仍需完成。只有本地隔离 host 工具测试通过不代表已部署。
