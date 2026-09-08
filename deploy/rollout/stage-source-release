@@ -114,4 +114,4 @@ if [[ "$observed_binary_sha256" != "$image_binary_sha256" ]]; then
 fi
 jq -n --arg version "$version" --arg digest "$digest" --arg backup "$backup" \
   --arg binary_sha256 "$observed_binary_sha256" --arg binary_reference "$reference_mode" --arg source_commit "$commit" --argjson build_cache_pruned "$build_cache_pruned" --argjson stage "$stage_result" \
-  '{ok:true,version:$version,digest:$digest,binary_sha256:$binary_sha256,binary_reference:$binary_reference,source_commit:$source_commit,backup_created:true,build_cache_pruned:$build_cache_pruned,stage:$stage} + $stage'
+  '{ok:true,version:$version,digest:$digest,binary_sha256:$binary_sha256,binary_reference:$binary_reference,source_commit:$source_commit,backup_created:true,build_cache_pruned:$build_cache_pruned,stage:$stage} + $stage + {source_commit:$source_commit,binary_sha256:$binary_sha256}'
