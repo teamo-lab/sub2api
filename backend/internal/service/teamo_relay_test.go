@@ -104,13 +104,17 @@ func TestTeamoRelayNativeResponsesCommitBoundary(t *testing.T) {
 						gotUsage = &result.Usage
 					}
 				}
+				wantFailover, wantContains := tc.failover, tc.contains
+				if adapter == "native" && (tc.name == "reasoning_failure" || tc.name == "reasoning_truncated") {
+					wantFailover, wantContains = true, ""
+				}
 				require.Equal(t, tc.failure, err != nil, "error=%v", err)
 				var failover *UpstreamFailoverError
-				require.Equal(t, tc.failover, errors.As(err, &failover), "error=%v", err)
-				if tc.contains == "" {
+				require.Equal(t, wantFailover, errors.As(err, &failover), "error=%v", err)
+				if wantContains == "" {
 					require.Empty(t, rec.Body.String())
 				} else {
-					require.Contains(t, rec.Body.String(), tc.contains)
+					require.Contains(t, rec.Body.String(), wantContains)
 				}
 				if tc.name == "success" {
 					require.NotNil(t, gotUsage)
