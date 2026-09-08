@@ -1997,6 +1997,11 @@ func (s *OpenAIGatewayService) newOpenAIStreamFailoverErrorWithModel(
 	// Preserve the existing generic envelope for unclassified stream failures;
 	// only typed access/capacity failures need the original payload downstream.
 	failoverErr.ResponseBody = body
+	// 原始 type-only 错误也必须能命中显式恢复策略。使用独立元数据，避免
+	// 把信封生成的 upstream_error/rate_limit_error 误当成真实上游 identity。
+	// 空值同样要保留：无结构化错误码时不得从合成信封推断恢复类型。
+	recoveryCode := recoveryErrorCode(payload)
+	failoverErr.RecoveryErrorCode = &recoveryCode
 	return failoverErr
 }
 
