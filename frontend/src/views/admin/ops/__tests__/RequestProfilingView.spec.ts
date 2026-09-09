@@ -7,6 +7,14 @@ const sample:ProfileResult={page:1,limit:50,summary:{count:1,mean_us:1000,p90_us
 const create=()=>mount(View,{global:{stubs:{AppLayout:{template:'<div><slot /></div>'}}}})
 beforeEach(()=>{vi.mocked(getRequestProfiles).mockReset();vi.mocked(getRequestProfiles).mockResolvedValue(sample)})
 describe('request profiling page',()=>{
+ it('filters switch count including explicit zero and clears to omitted',async()=>{
+  const w=create();await flushPromises()
+  const field=w.findAll('label').find(l=>l.text().startsWith('切换次数'))!.get('select')
+  expect(field.findAll('option').map(o=>o.text())).toEqual(['全部','0 次','1 次','2 次','3 次及以上'])
+  for(const value of ['0','1','2','3+']){await field.setValue(value);await flushPromises();expect(vi.mocked(getRequestProfiles).mock.lastCall?.[0]).toMatchObject({switch_count:value,page:1})}
+  await field.setValue('');await flushPromises();expect(vi.mocked(getRequestProfiles).mock.lastCall?.[0].switch_count).toBeUndefined();w.unmount()
+ })
+
  it('shows both output phases in aggregate and request detail without promising retry safety',async()=>{
   const segments=[{name:'response_body_before_output',start_us:0,duration_us:600},{name:'response_body_after_output',start_us:600,duration_us:400}]
   vi.mocked(getRequestProfiles).mockResolvedValue({...sample,summary:{...sample.summary,stages:segments.map(s=>({name:s.name,mean_us:s.duration_us}))},rows:[{...sample.rows[0]!,profile:{...sample.rows[0]!.profile,delivery_observation_supported:true,downstream_first_output_us:600,segments}}]})

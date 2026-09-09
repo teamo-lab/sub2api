@@ -10,12 +10,14 @@ import (
 type RequestProfileFilter struct {
 	Models, GroupIDs, AccountIDs                    []string
 	IncludeOptions                                  bool
+	SwitchCount                                     string
 	From, To                                        time.Time
 	Model, Protocol, ErrorType, RequestID, Evidence string
 	GroupID, AccountID, ID                          int64
 	Page, Limit                                     int
 }
 type RequestProfileRow struct {
+	AttemptAccounts map[int64]string        `json:"attempt_accounts"`
 	ID              int64                   `json:"id"`
 	CreatedAt       time.Time               `json:"created_at"`
 	RequestID       string                  `json:"request_id"`
@@ -67,6 +69,11 @@ func (s *OpsService) QueryRequestProfiles(ctx context.Context, f RequestProfileF
 	r, ok := s.opsRepo.(requestProfileRepository)
 	if !ok {
 		return nil, infraerrors.ServiceUnavailable("PROFILE_REPOSITORY_UNAVAILABLE", "Request profiling unavailable")
+	}
+	switch f.SwitchCount {
+	case "", "0", "1", "2", "3+":
+	default:
+		return nil, infraerrors.BadRequest("INVALID_PROFILE_SWITCH_COUNT", "Invalid switch count")
 	}
 	if f.From.IsZero() || f.To.IsZero() || !f.From.Before(f.To) || f.To.Sub(f.From) > 24*time.Hour {
 		return nil, infraerrors.BadRequest("INVALID_PROFILE_WINDOW", "Time range must be positive and at most 24 hours")
