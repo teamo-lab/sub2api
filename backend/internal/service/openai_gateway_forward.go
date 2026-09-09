@@ -961,16 +961,19 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 					backoff.Milliseconds(),
 				)
 				if backoff > 0 {
+					endRetryWait := requestprofile.Start(ctx, "retry_backoff")
 					timer := time.NewTimer(backoff)
 					select {
 					case <-ctx.Done():
 						if !timer.Stop() {
 							<-timer.C
 						}
+						endRetryWait()
 						wsErr = wrapOpenAIWSFallback("retry_backoff_canceled", ctx.Err())
 						break wsRetryLoop
 					case <-timer.C:
 					}
+					endRetryWait()
 				}
 				continue
 			}

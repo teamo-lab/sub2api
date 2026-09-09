@@ -360,3 +360,15 @@ func sleepWithContext(ctx context.Context, d time.Duration) bool {
 		return true
 	}
 }
+
+// waitForSameAccountRetry preserves the original timer/cancellation semantics
+// while accounting for the wait in the current client request's profile.
+func waitForSameAccountRetry(ctx context.Context, delay time.Duration) bool {
+	defer requestprofile.Start(ctx, "retry_backoff")()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(delay):
+		return true
+	}
+}
