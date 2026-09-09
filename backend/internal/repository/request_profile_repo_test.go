@@ -106,6 +106,9 @@ func TestRequestProfilePostgresAggregationAndAttemptFiltering(t *testing.T) {
 	if err != nil || out.Summary.Count != 1 || out.Rows[0].ID != 1 {
 		t.Fatalf("first fallback account missing %+v %v", out, err)
 	}
+	if out.Rows[0].AttemptAccounts[1] != "a" || out.Rows[0].AttemptAccounts[2] != "b" {
+		t.Fatal("missing prior attempt names", out.Rows[0].AttemptAccounts)
+	}
 	f.AccountID = 0
 	f.ErrorType = "fallback"
 	out, err = r.QueryRequestProfiles(ctx, f)
@@ -119,9 +122,67 @@ func TestRequestProfilePostgresAggregationAndAttemptFiltering(t *testing.T) {
 		t.Fatalf("network filter %+v %v", out, err)
 	}
 	f.ErrorType = ""
+
+	// Add requests with two, three and four transitions; event types are mixed.
+	for n := 2; n <= 4; n++ {
+		events := []map[string]any{}
+		for j := 0; j < n; j++ {
+			kind := "retry"
+			if j%2 == 1 {
+				kind = "fallback"
+			}
+			events = append(events, map[string]any{"kind": kind, "account_id": 1})
+		}
+		p := map[string]any{"version": 1, "evidence": "measured", "total_us": 1000, "protocol": "sse", "dropped": 0, "events": events, "segments": []any{}, "spans": []any{}}
+		raw, _ := json.Marshal(map[string]any{"status_code": 200, "request_profile": p})
+		if _, err := db.ExecContext(ctx, `INSERT INTO ops_system_logs(id,created_at,component,message,extra) VALUES($1,$2,'http.access','http request completed',$3)`, n+2, at, string(raw)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for id, field := range []string{"dropped", "concurrent_upstreams"} {
+		p := map[string]any{"version": 1, "evidence": "measured", "total_us": 1000, "protocol": "sse", "events": []any{}, "segments": []any{}, "spans": []any{}}
+		if field == "dropped" {
+			p[field] = 1
+		} else {
+			p[field] = true
+		}
+		raw, _ := json.Marshal(map[string]any{"status_code": 200, "request_profile": p})
+		if _, err := db.ExecContext(ctx, `INSERT INTO ops_system_logs(id,created_at,component,message,extra) VALUES($1,$2,'http.access','http request completed',$3)`, id+20, at, string(raw)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.Limit = 50
+	for count, want := range map[string]int64{"0": 2, "1": 1, "2": 1, "3+": 2} {
+		f.SwitchCount = count
+		out, err = r.QueryRequestProfiles(ctx, f)
+		if err != nil || out.Summary.Count != want || int64(len(out.Rows)) != want {
+			t.Fatalf("switch=%s result=%+v error=%v", count, out, err)
+		}
+	}
+	f.SwitchCount = ""
 	f.Evidence = "historical"
 	out, err = r.QueryRequestProfiles(ctx, f)
 	if err != nil || out.Summary.Count != 0 {
 		t.Fatalf("evidence mixed %+v %v", out, err)
+	}
+}
+
+func TestRequestProfileSwitchCountIsParameterized(t *testing.T) {
+	for _, v := range []string{"0", "1", "2", "3+"} {
+		where, args := requestProfileWhere(service.RequestProfileFilter{SwitchCount: v})
+		if !strings.Contains(where, "IN ('retry','fallback')") || !strings.Contains(where, "concurrent_upstreams") || !strings.Contains(where, "dropped") {
+			t.Fatal(where)
+		}
+		if v == "3+" {
+			if !strings.Contains(where, ">=3") {
+				t.Fatal(where)
+			}
+		} else if len(args) != 3 || args[2] != v {
+			t.Fatal(args)
+		}
+	}
+	where, _ := requestProfileWhere(service.RequestProfileFilter{})
+	if strings.Contains(where, "IN ('retry','fallback')") {
+		t.Fatal("empty count filtered requests")
 	}
 }
