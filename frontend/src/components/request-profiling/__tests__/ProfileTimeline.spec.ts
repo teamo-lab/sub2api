@@ -27,3 +27,10 @@ it('separates background processing after disconnect without changing elapsed ti
  expect(result.reduce((n,s)=>n+s.duration_us,0)).toBe(1000)
  expect(profileViewport(result,600,600).reduce((n,s)=>n+s.duration_us,0)).toBe(600)
 })
+
+it('distinguishes observed reasoning on both sides of first output',async()=>{
+ const segments=[{name:'reasoning_observed_before_output',start_us:0,duration_us:600},{name:'reasoning_observed_after_output',start_us:600,duration_us:400}]
+ const w=mount(ProfileTimeline,{props:{segments,total:1000}})
+ const bars=w.findAll('button');expect(bars[0]!.attributes('aria-label')).toContain('Reasoning · 首有效输出前');expect(bars[1]!.attributes('aria-label')).toContain('Reasoning · 首有效输出后')
+ await bars[1]!.trigger('click');expect(w.emitted('select')?.[0]).toEqual([segments[1]]);w.unmount()
+})
