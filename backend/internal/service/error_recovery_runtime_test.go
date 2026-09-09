@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"github.com/Wei-Shaw/sub2api/internal/model"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestprofile"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"net/http/httptest"
@@ -195,4 +196,40 @@ func TestStreamFailoverEnvelopeKeepsUpstreamErrorCodeForRecovery(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Exercise the recovery-policy branch, which returns before legacy pool retries.
+func TestErrorRecoveryProfileIncludesPolicyWait(t *testing.T) {
+	c, _, account, failure := recoveryFixture(t, "apikey", 1, 1)
+	ctx := requestprofile.Attach(c.Request.Context(), time.Now())
+	c.Request = c.Request.WithContext(ctx)
+	require.Equal(t, ErrorRecoveryRetry, ApplyErrorRecovery(c, account, "gpt", failure))
+	require.Equal(t, ErrorRecoverySwitch, ApplyErrorRecovery(c, account, "gpt", failure))
+	profile := requestprofile.Finish(ctx, time.Now())
+	require.Len(t, profile.Spans, 1)
+	span := profile.Spans[0]
+	require.Equal(t, "retry_backoff", span.Name)
+	require.False(t, span.Incomplete)
+	require.GreaterOrEqual(t, span.EndUS-span.StartUS, int64(500000))
+	var retryTotal int64
+	for _, segment := range profile.Segments {
+		if segment.Name == "retry_backoff" {
+			retryTotal += segment.DurationUS
+		}
+	}
+	require.Equal(t, span.EndUS-span.StartUS, retryTotal)
+}
+func TestErrorRecoveryProfileClosesPolicyWaitOnCancel(t *testing.T) {
+	c, _, account, failure := recoveryFixture(t, "apikey", 1, 1)
+	parent, cancel := context.WithCancel(c.Request.Context())
+	defer cancel()
+	ctx := requestprofile.Attach(parent, time.Now())
+	c.Request = c.Request.WithContext(ctx)
+	timer := time.AfterFunc(10*time.Millisecond, cancel)
+	defer timer.Stop()
+	require.Equal(t, ErrorRecoveryStop, ApplyErrorRecovery(c, account, "gpt", failure))
+	profile := requestprofile.Finish(ctx, time.Now())
+	require.Len(t, profile.Spans, 1)
+	require.Equal(t, "retry_backoff", profile.Spans[0].Name)
+	require.False(t, profile.Spans[0].Incomplete)
 }
