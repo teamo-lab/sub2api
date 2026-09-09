@@ -7,6 +7,16 @@ const sample:ProfileResult={page:1,limit:50,summary:{count:1,mean_us:1000,p90_us
 const create=()=>mount(View,{global:{stubs:{AppLayout:{template:'<div><slot /></div>'}}}})
 beforeEach(()=>{vi.mocked(getRequestProfiles).mockReset();vi.mocked(getRequestProfiles).mockResolvedValue(sample)})
 describe('request profiling page',()=>{
+ it('shows both output phases in aggregate and request detail without promising retry safety',async()=>{
+  const segments=[{name:'response_body_before_output',start_us:0,duration_us:600},{name:'response_body_after_output',start_us:600,duration_us:400}]
+  vi.mocked(getRequestProfiles).mockResolvedValue({...sample,summary:{...sample.summary,stages:segments.map(s=>({name:s.name,mean_us:s.duration_us}))},rows:[{...sample.rows[0]!,profile:{...sample.rows[0]!.profile,delivery_observation_supported:true,downstream_first_output_us:600,segments}}]})
+  const w=create();await flushPromises()
+  expect(w.text()).toContain('响应流 · 首有效输出前');expect(w.text()).toContain('响应流 · 首有效输出后')
+  expect(w.text()).toContain('仍须满足协议状态、错误类型与重试预算')
+  const before=w.findAll('button').find(b=>b.attributes('aria-label')==='响应流 · 首有效输出前 600 µs')!
+  await before.trigger('click');expect(w.text()).toContain('每请求平均 600 µs');w.unmount()
+ })
+
  it('filters by multiple names, keeps alternatives, and clears only that dimension',async()=>{
   vi.mocked(getRequestProfiles).mockResolvedValue({...sample,options:[
    {kind:'model',value:'astra',label:'Astra'},{kind:'model',value:'sol',label:'Sol'},
