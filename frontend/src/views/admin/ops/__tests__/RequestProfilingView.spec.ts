@@ -7,6 +7,21 @@ const sample:ProfileResult={page:1,limit:50,summary:{count:1,mean_us:1000,p90_us
 const create=()=>mount(View,{global:{stubs:{AppLayout:{template:'<div><slot /></div>'}}}})
 beforeEach(()=>{vi.mocked(getRequestProfiles).mockReset();vi.mocked(getRequestProfiles).mockResolvedValue(sample)})
 describe('request profiling page',()=>{
+ it('filters by multiple names, keeps alternatives, and clears only that dimension',async()=>{
+  vi.mocked(getRequestProfiles).mockResolvedValue({...sample,options:[
+   {kind:'model',value:'astra',label:'Astra'},{kind:'model',value:'sol',label:'Sol'},
+   {kind:'group',value:'38',label:'满智分组'},{kind:'account',value:'72',label:'Flux 渠道'}]})
+  const w=create();await flushPromises()
+  await w.get('button[aria-label="模型"]').trigger('click')
+  const checks=w.findAll('input[type="checkbox"]');await checks[0]!.setValue(true);await flushPromises();await checks[1]!.setValue(true);await flushPromises()
+  expect(vi.mocked(getRequestProfiles).mock.lastCall?.[0]).toMatchObject({models:'astra,sol'})
+  expect(w.findAll('input[type="checkbox"]')).toHaveLength(2)
+  await w.get('button[aria-label="分组"]').trigger('click')
+  const group=w.findAll('label').find(l=>l.text()==='满智分组')!;await group.get('input').setValue(true);await flushPromises()
+  expect(vi.mocked(getRequestProfiles).mock.lastCall?.[0]).toMatchObject({models:'astra,sol',group_ids:'38'})
+  await w.findAll('button').find(b=>b.text()==='清空选择')!.trigger('click');await flushPromises()
+  const params=vi.mocked(getRequestProfiles).mock.lastCall![0];expect(params.models).toBeUndefined();expect(params.group_ids).toBe('38');w.unmount()
+ })
  it('keeps empty windows unknown rather than claiming zero latency',async()=>{
   vi.mocked(getRequestProfiles).mockResolvedValue({...sample,rows:[],summary:{...sample.summary,count:0,mean_us:0,p90_us:0,stages:[]}})
   const w=create();await flushPromises();expect(w.text()).toContain('没有已记录的轨迹');expect(w.text()).toContain('—');expect(w.text()).not.toContain('÷ 0');w.unmount()

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/lib/pq"
 	"strings"
 	"time"
 )
@@ -31,6 +32,15 @@ func requestProfileWhere(f service.RequestProfileFilter) (string, []any) {
 	}
 	if f.AccountID > 0 {
 		add("(l.account_id::text=$%[1]d OR EXISTS (SELECT 1 FROM jsonb_array_elements(l.extra->'request_profile'->'events') e WHERE e->>'account_id'=$%[1]d))", fmt.Sprint(f.AccountID))
+	}
+	if len(f.Models) > 0 {
+		add("l.extra->'request_profile'->>'model' = ANY($%d::text[])", pq.Array(f.Models))
+	}
+	if len(f.GroupIDs) > 0 {
+		add("l.extra->'request_profile'->>'group_id' = ANY($%d::text[])", pq.Array(f.GroupIDs))
+	}
+	if len(f.AccountIDs) > 0 {
+		add("(l.account_id::text = ANY($%[1]d::text[]) OR EXISTS (SELECT 1 FROM jsonb_array_elements(l.extra->'request_profile'->'events') e WHERE e->>'account_id' = ANY($%[1]d::text[])))", pq.Array(f.AccountIDs))
 	}
 	if f.ID > 0 {
 		add("l.id=$%d", f.ID)
@@ -107,6 +117,38 @@ func (r *opsRepository) QueryRequestProfiles(ctx context.Context, f service.Requ
 	rows.Close()
 	if err != nil {
 		return nil, err
+	}
+	if f.IncludeOptions {
+		// Options cover the whole time/protocol/evidence window, not the selected page
+		// or dimensions, so choosing one value never hides the remaining choices.
+		optionFilter := service.RequestProfileFilter{From: f.From, To: f.To, Protocol: f.Protocol, Evidence: f.Evidence}
+		optionWhere, optionArgs := requestProfileWhere(optionFilter)
+		options, e := tx.QueryContext(ctx, `WITH profiles AS MATERIALIZED (
+   SELECT l.account_id,l.extra->'request_profile' AS p FROM ops_system_logs l WHERE `+optionWhere+`
+  ), option_values AS (
+   SELECT 'model' AS kind,p->>'model' AS value FROM profiles
+   UNION SELECT 'group',p->>'group_id' FROM profiles
+   UNION SELECT 'account',account_id::text FROM profiles
+   UNION SELECT 'account',e->>'account_id' FROM profiles CROSS JOIN LATERAL jsonb_array_elements(p->'events') e
+  ) SELECT v.kind,v.value,COALESCE(NULLIF(CASE WHEN v.kind='group' THEN g.name WHEN v.kind='account' THEN a.name ELSE v.value END,''), CASE WHEN v.kind='group' THEN '已删除分组' ELSE '已删除账号' END)
+  FROM option_values v LEFT JOIN groups g ON v.kind='group' AND g.id::text=v.value LEFT JOIN accounts a ON v.kind='account' AND a.id::text=v.value
+  WHERE v.value IS NOT NULL AND v.value<>'' AND (v.kind='model' OR v.value<>'0') ORDER BY v.kind,3,v.value`, optionArgs...)
+		if e != nil {
+			return nil, e
+		}
+		for options.Next() {
+			var o service.RequestProfileOption
+			if e = options.Scan(&o.Kind, &o.Value, &o.Label); e != nil {
+				options.Close()
+				return nil, e
+			}
+			result.Options = append(result.Options, o)
+		}
+		e = options.Err()
+		options.Close()
+		if e != nil {
+			return nil, e
+		}
 	}
 	return result, tx.Commit()
 }
