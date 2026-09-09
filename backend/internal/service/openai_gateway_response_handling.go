@@ -1034,6 +1034,11 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			}
 
 		case <-intervalCh:
+			// A parsed terminal already owns outcome and usage. Idle drain must
+			// not append another error or discard its accounting result.
+			if sawTerminalEvent && time.Since(time.Unix(0, atomic.LoadInt64(&lastReadAt))) >= streamInterval {
+				return finalizeStream()
+			}
 			if failureDelivered {
 				return resultWithUsage(), fmt.Errorf("upstream response failed: %s", failedMessage)
 			}
