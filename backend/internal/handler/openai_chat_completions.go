@@ -410,10 +410,8 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 								zap.Int("retry_count", sameAccountRetryCount[account.ID]),
 								zap.Duration("retry_delay", retryDelay),
 							)
-							select {
-							case <-c.Request.Context().Done():
+							if !waitForSameAccountRetry(c.Request.Context(), retryDelay) {
 								return
-							case <-time.After(retryDelay):
 							}
 							continue
 						}

@@ -942,10 +942,8 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 								zap.Int("retry_count", sameAccountRetryCount[account.ID]),
 								zap.Duration("retry_delay", retryDelay),
 							)
-							select {
-							case <-c.Request.Context().Done():
+							if !waitForSameAccountRetry(c.Request.Context(), retryDelay) {
 								return
-							case <-time.After(retryDelay):
 							}
 							continue
 						}
@@ -1534,10 +1532,8 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 								zap.Int("retry_count", sameAccountRetryCount[account.ID]),
 								zap.Duration("retry_delay", retryDelay),
 							)
-							select {
-							case <-c.Request.Context().Done():
+							if !waitForSameAccountRetry(c.Request.Context(), retryDelay) {
 								return
-							case <-time.After(retryDelay):
 							}
 							continue
 						}
@@ -2619,12 +2615,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			zap.Int("retry_count", sameAccountRetryCount[account.ID]),
 			zap.Duration("retry_delay", retryDelay),
 		)
-		select {
-		case <-ctx.Done():
-			return false
-		case <-time.After(retryDelay):
-			return true
-		}
+		return waitForSameAccountRetry(ctx, retryDelay)
 	}
 	handleWSFailover := func(account *service.Account, failoverErr *service.UpstreamFailoverError) bool {
 		if ctx.Err() != nil {
