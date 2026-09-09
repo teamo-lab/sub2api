@@ -50,6 +50,15 @@ func requestProfileWhere(f service.RequestProfileFilter) (string, []any) {
 		n := len(args)
 		clauses = append(clauses, fmt.Sprintf("(l.request_id=$%d OR l.client_request_id=$%d)", n, n))
 	}
+	if f.SwitchCount != "" {
+		clauses = append(clauses, "COALESCE(l.extra->'request_profile'->>'evidence','measured')='measured'", "COALESCE((l.extra->'request_profile'->>'dropped')::int,0)=0", "COALESCE((l.extra->'request_profile'->>'concurrent_upstreams')::boolean,false)=false")
+		expr := "(SELECT count(*) FROM jsonb_array_elements(l.extra->'request_profile'->'events') e WHERE e->>'kind' IN ('retry','fallback'))"
+		if f.SwitchCount == "3+" {
+			clauses = append(clauses, expr+">=3")
+		} else {
+			add(expr+"=$%d::int", f.SwitchCount)
+		}
+	}
 	switch f.ErrorType {
 	case "http_4xx":
 		clauses = append(clauses, "EXISTS (SELECT 1 FROM jsonb_array_elements(l.extra->'request_profile'->'events') e WHERE (e->>'status')::int BETWEEN 400 AND 499)")
@@ -117,6 +126,56 @@ func (r *opsRepository) QueryRequestProfiles(ctx context.Context, f service.Requ
 	rows.Close()
 	if err != nil {
 		return nil, err
+	}
+
+	// Resolve names for every attempt on this page with one bounded query.
+	ids := map[int64]bool{}
+	for _, row := range result.Rows {
+		if row.AccountID > 0 {
+			ids[row.AccountID] = true
+		}
+		for _, e := range row.Profile.Events {
+			if e.AccountID > 0 {
+				ids[e.AccountID] = true
+			}
+		}
+	}
+	if len(ids) > 0 {
+		list := make([]int64, 0, len(ids))
+		for id := range ids {
+			list = append(list, id)
+		}
+		names, e := tx.QueryContext(ctx, "SELECT id,name FROM accounts WHERE id=ANY($1::bigint[])", pq.Array(list))
+		if e != nil {
+			return nil, e
+		}
+		resolved := map[int64]string{}
+		for names.Next() {
+			var id int64
+			var name string
+			if e = names.Scan(&id, &name); e != nil {
+				names.Close()
+				return nil, e
+			}
+			resolved[id] = name
+		}
+		e = names.Err()
+		names.Close()
+		if e != nil {
+			return nil, e
+		}
+		for i := range result.Rows {
+			row := &result.Rows[i]
+			row.AttemptAccounts = map[int64]string{}
+			if row.AccountID > 0 {
+				row.AttemptAccounts[row.AccountID] = resolved[row.AccountID]
+			}
+			for _, event := range row.Profile.Events {
+				if event.AccountID > 0 {
+					row.AttemptAccounts[event.AccountID] = resolved[event.AccountID]
+				}
+			}
+		}
 	}
 	if f.IncludeOptions {
 		// Options cover the whole time/protocol/evidence window, not the selected page

@@ -27,6 +27,13 @@ func (h *OpsHandler) GetRequestProfiles(c *gin.Context) {
 		}
 	}
 	f := service.RequestProfileFilter{From: start, To: end, Model: strings.TrimSpace(c.Query("model")), Protocol: c.DefaultQuery("protocol", "sse"), ErrorType: c.Query("error_type"), RequestID: strings.TrimPrefix(strings.TrimSpace(c.Query("request_id")), "client:"), Page: 1, Limit: 50}
+	f.SwitchCount = c.Query("switch_count")
+	switch f.SwitchCount {
+	case "", "0", "1", "2", "3+":
+	default:
+		response.BadRequest(c, "Invalid switch_count")
+		return
+	}
 	f.IncludeOptions = c.Query("include_options") == "true"
 	for key, dest := range map[string]*[]string{"models": &f.Models, "group_ids": &f.GroupIDs, "account_ids": &f.AccountIDs} {
 		raw := c.Query(key)
