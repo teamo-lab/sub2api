@@ -23,7 +23,7 @@ func ReasoningObserver(ctx context.Context) func(reasoning, boundary bool) {
 	r.mu.Unlock()
 	var end func()
 	return func(reasoning, boundary bool) {
-		if reasoning && end == nil {
+		if reasoning && !boundary && end == nil {
 			end = Start(ctx, "reasoning_observed")
 		}
 		if boundary && end != nil {

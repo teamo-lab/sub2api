@@ -52,3 +52,15 @@ func TestReasoningObserverKeepsMissingBoundaryUnknown(t *testing.T) {
 		t.Fatalf("%+v", s.Spans)
 	}
 }
+
+func TestReasoningDoneWithoutStartDoesNotConsumeSpanBudget(t *testing.T) {
+	ctx := Attach(context.Background(), time.Now())
+	observe := ReasoningObserver(ctx)
+	for i := 0; i < MaxSpans+1; i++ {
+		observe(true, true)
+	}
+	snapshot := Finish(ctx, time.Now())
+	if len(snapshot.Spans) != 0 || snapshot.Dropped != 0 {
+		t.Fatalf("done-only events consumed budget: %+v", snapshot)
+	}
+}
