@@ -39,7 +39,7 @@ func TestRequestProfilePersistsOnceAtInfoAndWarnLevels(t *testing.T) {
 			}
 			count := 0
 			for _, e := range sink.list() {
-				if e.Message == "http request completed" {
+				if e.Message == "http request completed" && e.Fields["request_profile"] != nil {
 					count++
 					s, ok := e.Fields["request_profile"].(*requestprofile.Snapshot)
 					if !ok || len(s.Spans) != 1 || s.Evidence != "measured" {
@@ -73,7 +73,7 @@ func TestRequestProfileSurvivesHandlerContextReplacement(t *testing.T) {
 	router.ServeHTTP(w, httptest.NewRequest("POST", "/responses", nil))
 	found := false
 	for _, e := range sink.list() {
-		if e.Message == "http request completed" {
+		if e.Message == "http request completed" && e.Fields["request_profile"] != nil {
 			s, ok := e.Fields["request_profile"].(*requestprofile.Snapshot)
 			found = ok && len(s.Spans) == 1 && e.Fields["request_id"] == w.Header().Get("X-Request-ID")
 		}

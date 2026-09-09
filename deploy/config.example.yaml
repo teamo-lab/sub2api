@@ -227,7 +227,7 @@ security:
 # =============================================================================
 gateway:
   # Metadata-only request profiling; disable to stop new traces without changing requests.
-  request_profiling_enabled: true
+  request_profiling_enabled: false
   # Timeout for waiting upstream response headers (seconds)
   # 等待上游响应头超时时间（秒）
   response_header_timeout: 600

@@ -1,6 +1,6 @@
 # 耗时分析
 
-管理入口 `/admin/request-profiling`，API `/api/v1/admin/ops/request-profiles`。只记录元数据，不存请求正文、凭据或上游 URL。默认启用；设置 `GATEWAY_REQUEST_PROFILING_ENABLED=false` 并重启或重新部署应用可停止新采集，历史记录仍可查询。Compose 示例已传递此开关。
+管理入口 `/admin/request-profiling`，API `/api/v1/admin/ops/request-profiles`。只记录元数据，不存请求正文、凭据或上游 URL。默认关闭；完成容量评估后显式设置 `GATEWAY_REQUEST_PROFILING_ENABLED=true` 才采集，设为 false 并重启或重新部署应用可停止新采集，历史记录仍可查询。Compose 示例已传递此开关。
 
 ## 时间口径
 
@@ -26,7 +26,7 @@
 
 每请求最多 512 个 span、128 个事件，超限显式记录 `dropped`；下行与取消的关键时间字段独立保留。复用已有有界异步运维日志 sink 与留存策略。原有非法鉴权/拒绝日志保护仍保留，不能把查询到的记录数当成所有入站流量。
 
-页面显示 sink 健康数据；它们是整个日志 sink 的累计统计，不是本页面的请求丢失率。日志级别提高到 warn 不会关闭 profile 持久化。关闭专门开关才停止新采集。没有样本或交付打点缺失时显示未知，不宣称健康或客户成功。
+页面显示 sink 健康数据；它们是整个日志 sink 的累计统计，不是本页面的请求丢失率。profile 直接进入有界 Ops sink，与控制台级别和 sampling 解耦；控制台副本带 skip 标志，避免重复入库。日志级别提高到 warn 不会关闭 profile 持久化。关闭专门开关才停止新采集。没有样本或交付打点缺失时显示未知，不宣称健康或客户成功。
 
 `response_body` 覆盖收到响应头后到响应体读完/关闭的处理阶段，包含上游等待、接收、解析和下游转发，不能全部归为模型生成耗时。细分时优先使用已记录子阶段与实际交付节点。
 
@@ -43,3 +43,5 @@
 集成测试 `TestRequestProfilePostgresAggregationAndAttemptFiltering` 使用 `REQUEST_PROFILE_TEST_DSN` 指定 PostgreSQL，并只创建连接级临时表，不修改应用表。
 
 尚未生产上线。只有本地完整回归和浏览器交互验收通过后才提交 PR，之后再向指定协调任务一次性交接。
+
+生产开启前须阅读 `REVIEW_CAPACITY.md`；本次默认关闭变更覆盖初版文档中的默认开启说明。

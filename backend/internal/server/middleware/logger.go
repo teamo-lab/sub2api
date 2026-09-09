@@ -113,19 +113,21 @@ func LoggerWithProfiling(enabled bool) gin.HandlerFunc {
 			}
 			requestprofile.Metadata(profileContext, group, model, wire)
 
-			fields = append(fields, zap.Any("request_profile", requestprofile.Finish(profileContext, endTime)))
-		}
-		l := logger.FromContext(c.Request.Context()).With(fields...)
-		l.Info("http request completed", zap.Time("completed_at", endTime))
-		if profiled && !l.Core().Enabled(zap.InfoLevel) {
+			profileFields := append(append([]zap.Field{}, fields...), zap.Any("request_profile", requestprofile.Finish(profileContext, endTime)))
 			enc := zapcore.NewMapObjectEncoder()
-			for _, field := range fields {
+			for _, field := range profileFields {
 				field.AddTo(enc)
 			}
-			enc.Fields["request_id"], _ = profileContext.Value(ctxkey.RequestID).(string)
-			enc.Fields["client_request_id"], _ = c.Request.Context().Value(ctxkey.ClientRequestID).(string)
 			logger.WriteSinkEvent("info", "http.access", "http request completed", enc.Fields)
 		}
+		l := logger.FromContext(c.Request.Context()).With(fields...)
+		// Profiles go directly to the bounded sink exactly once. Console level
+		// and sampling must neither suppress persistence nor duplicate it.
+		console := l
+		if profiled {
+			console = l.With(zap.Bool(logger.OpsSystemLogSkipField, true))
+		}
+		console.Info("http request completed", zap.Time("completed_at", endTime))
 
 		if len(c.Errors) > 0 {
 			l.Warn("http request contains gin errors", zap.String("errors", c.Errors.String()))
