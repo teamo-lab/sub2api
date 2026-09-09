@@ -1302,8 +1302,11 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				if streamResult == nil || errors.As(err, &failover) {
 					return nil, err
 				}
-				if (streamResult.usage == nil || *streamResult.usage == (OpenAIUsage{})) && streamResult.imageCount == 0 && streamResult.searchCount == 0 {
-					return nil, err // Do not invent a billable result for an unmetered failure.
+				if GetOpsCyberPolicy(c) != nil || streamResult.imageCount > 0 || streamResult.searchCount > 0 || streamResult.usage == nil || *streamResult.usage == (OpenAIUsage{}) {
+					// The handler has separate partial-media behavior. Keep that legacy
+					// path unchanged. Cyber-policy usage also has a dedicated owner;
+					// this fix only retains otherwise unowned parsed token usage.
+					return nil, err
 				}
 				streamErr = err
 			}

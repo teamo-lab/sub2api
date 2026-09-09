@@ -11,7 +11,7 @@
 
 ## 修改
 
-已有终态的流在 idle 收尾时走既有 finalizeStream，保留 completed/failed 的终态语义，不追加新的 stream_timeout。普通不再恢复的流错误返回已解析的 OpenAIForwardResult 和原 error；可 fallback 的 UpstreamFailoverError 仍返回 nil，避免同一次客户请求各失败 attempt 独立重复计费。失败结果不绑定新的成功 response affinity。handler 已有 res!=nil 的部分计量路径负责入账。
+已有终态的流在 idle 收尾时走既有 finalizeStream，保留 completed/failed 的终态语义，不追加新的 stream_timeout。普通不再恢复的纯文本流错误只在已有非零 token usage 且没有专属计量所有者时返回 OpenAIForwardResult 和原 error；可 fallback 的 UpstreamFailoverError、无计量失败、cyber policy 和媒体/搜索失败仍返回 nil，避免重复计费并保持既有专属处理不变。失败结果不绑定新的成功 response affinity。handler 已有 res!=nil 的部分计量路径负责入账。
 
 这不会提前重放已输出请求，也不把部分失败变为成功。仍会等待既有 idle 周期，因此它是计量/终态修复，不是已完成356秒排空时长优化。JSON、Chat转换、WS不在此次变更范围，不能将本补丁的测试解释为全协议覆盖。
 
@@ -19,4 +19,4 @@
 
 原生 Forward completed-idle 与 partial-failed 两项从红转绿。真实 Responses handler、选择器、并发槽、同步 usage repository 链路验证：completed 后 idle 返回后恰好创建一条正确账号、17/3 token 的 usage；一次上游调用，槽位释放，无追加 stream_timeout。
 
-真实handler唯一usage和既有late recovery回归已通过；无计量失败保持nil、不生成零账单。第一轮service race通过；最终收紧后的race仍在验证，结果通过前不宣称可发布。生产未写入，历史缺失账单未补写，不能虚构或重发原请求。
+真实 handler 唯一 usage 和既有 late recovery 回归已通过；无计量失败保持 nil、不生成零账单。独立 Go cache 下的 service 与 handler race 均通过；新增 cyber、媒体和无计量所有权负例同样通过。组合 PR36/PR37/PR38/PR39 的构建通过，组合定向 race 另行保留运行记录。生产未写入，历史缺失账单未补写，不能虚构或重发原请求。
