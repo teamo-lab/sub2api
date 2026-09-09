@@ -8,6 +8,8 @@ import (
 )
 
 type RequestProfileFilter struct {
+	Models, GroupIDs, AccountIDs                    []string
+	IncludeOptions                                  bool
 	From, To                                        time.Time
 	Model, Protocol, ErrorType, RequestID, Evidence string
 	GroupID, AccountID, ID                          int64
@@ -38,7 +40,13 @@ type RequestProfileSummary struct {
 	Fallbacks     int64                 `json:"fallbacks"`
 	Stages        []RequestProfileStage `json:"stages"`
 }
+type RequestProfileOption struct {
+	Kind  string `json:"kind"`
+	Value string `json:"value"`
+	Label string `json:"label"`
+}
 type RequestProfileResult struct {
+	Options           []RequestProfileOption  `json:"options,omitempty"`
 	RetentionHours    int                     `json:"retention_hours"`
 	RecordingGroupIDs []int64                 `json:"recording_group_ids"`
 	RecordingEnabled  bool                    `json:"recording_enabled"`

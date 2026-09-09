@@ -75,6 +75,32 @@ func TestRequestProfilePostgresAggregationAndAttemptFiltering(t *testing.T) {
 	if sum != out.Summary.MeanUS {
 		t.Fatal("stage sum differs", sum)
 	}
+	f.GroupID = 0
+	f.Models = []string{"astra", "sol"}
+	f.GroupIDs = []string{"2", "4"}
+	f.AccountIDs = []string{"1", "3"}
+	f.IncludeOptions = true
+	out, err = r.QueryRequestProfiles(ctx, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Summary.Count != 2 || out.Summary.MeanUS != 3000 || len(out.Options) != 7 {
+		t.Fatalf("multi-filter/options: %+v", out)
+	}
+	foundFirstAccount := false
+	for _, o := range out.Options {
+		if o.Kind == "account" && o.Value == "1" && o.Label == "a" {
+			foundFirstAccount = true
+		}
+	}
+	if !foundFirstAccount {
+		t.Fatal("missing attempt account option")
+	}
+	f.Models = nil
+	f.GroupIDs = nil
+	f.AccountIDs = nil
+	f.IncludeOptions = false
+	f.GroupID = 2
 	f.AccountID = 1
 	out, err = r.QueryRequestProfiles(ctx, f)
 	if err != nil || out.Summary.Count != 1 || out.Rows[0].ID != 1 {

@@ -27,6 +27,38 @@ func (h *OpsHandler) GetRequestProfiles(c *gin.Context) {
 		}
 	}
 	f := service.RequestProfileFilter{From: start, To: end, Model: strings.TrimSpace(c.Query("model")), Protocol: c.DefaultQuery("protocol", "sse"), ErrorType: c.Query("error_type"), RequestID: strings.TrimPrefix(strings.TrimSpace(c.Query("request_id")), "client:"), Page: 1, Limit: 50}
+	f.IncludeOptions = c.Query("include_options") == "true"
+	for key, dest := range map[string]*[]string{"models": &f.Models, "group_ids": &f.GroupIDs, "account_ids": &f.AccountIDs} {
+		raw := c.Query(key)
+		if raw == "" {
+			continue
+		}
+		values := strings.Split(raw, ",")
+		if len(values) > 100 {
+			response.BadRequest(c, "Too many "+key)
+			return
+		}
+		seen := map[string]bool{}
+		for _, value := range values {
+			value = strings.TrimSpace(value)
+			if value == "" || len(value) > 256 {
+				response.BadRequest(c, "Invalid "+key)
+				return
+			}
+			if key != "models" {
+				n, err := strconv.ParseInt(value, 10, 64)
+				if err != nil || n < 1 {
+					response.BadRequest(c, "Invalid "+key)
+					return
+				}
+				value = strconv.FormatInt(n, 10)
+			}
+			if !seen[value] {
+				*dest = append(*dest, value)
+				seen[value] = true
+			}
+		}
+	}
 	for key, dest := range map[string]*int64{"group_id": &f.GroupID, "account_id": &f.AccountID, "id": &f.ID} {
 		if v := c.Query(key); v != "" {
 			n, e := strconv.ParseInt(v, 10, 64)

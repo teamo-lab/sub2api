@@ -3,9 +3,9 @@
   <header class="flex flex-wrap justify-between gap-4"><div><h1 class="text-2xl font-semibold">耗时分析</h1><p class="mt-2 text-sm text-slate-500">从 Sub2API 入口到请求结束，追踪每次尝试与时间去向。</p></div><button class="btn btn-primary" :disabled="loading" @click="load(true,true)">{{ loading?'加载中…':'刷新数据' }}</button></header><p class="text-xs text-slate-500">窗口截至 {{ windowEnd.toLocaleString() }}；切换模型 / 分组等筛选时保持同一窗口，点击刷新才推进时间。</p>
   <section class="card grid gap-4 p-5 sm:grid-cols-2 lg:grid-cols-4" aria-label="分析筛选">
    <label class="text-sm">完成时间范围<select v-model="minutes" class="input mt-1 w-full" @change="load(true,true)"><option :value="5">近 5 分钟</option><option :value="30">近 30 分钟</option><option :value="60">近 1 小时</option><option :value="360">近 6 小时</option><option :value="1440">近 24 小时</option></select></label>
-   <label class="text-sm">模型<input v-model="model" class="input mt-1 w-full" placeholder="全部模型" @change="load(true)" @keyup.enter="load(true)" /></label>
-   <label class="text-sm">分组 ID<input v-model="group" class="input mt-1 w-full" type="number" min="1" placeholder="全部分组" @change="load(true)" /></label>
-   <label class="text-sm">渠道账号 ID<input v-model="account" class="input mt-1 w-full" type="number" min="1" placeholder="包含任一次尝试" @change="load(true)" /></label>
+   <ProfileMultiSelect v-model="models" label="模型" placeholder="全部模型" :options="optionsFor('model')" @update:model-value="load(true)" />
+   <ProfileMultiSelect v-model="groups" label="分组" placeholder="全部分组" :options="optionsFor('group')" @update:model-value="load(true)" />
+   <ProfileMultiSelect v-model="accounts" label="账号 / 渠道" placeholder="全部账号 / 渠道" :options="optionsFor('account')" @update:model-value="load(true)" />
    <label class="text-sm">错误 / 重试类型<select v-model="errorType" class="input mt-1 w-full" @change="load(true)"><option value="">全部请求</option><option value="retry">同账号重试</option><option value="fallback">上游账号切换</option><option value="local_reselect">本机准入重选</option><option value="http_4xx">上游 4xx</option><option value="http_5xx">上游 5xx</option><option value="network_error">网络错误</option><option value="timeout">上游超时</option><option value="failed">最终 HTTP 失败</option><option value="client_disconnected">入口连接取消</option></select></label>
    <label class="text-sm">协议<select v-model="protocol" class="input mt-1 w-full" @change="load(true)"><option value="sse">SSE</option><option value="http">非流式 HTTP</option><option value="websocket_session">WebSocket 会话</option></select></label>
    <label class="text-sm">证据来源<select v-model="evidence" class="input mt-1 w-full" @change="load(true)"><option value="measured">当前实测轨迹</option><option value="historical">历史日志重建</option></select></label>
@@ -52,21 +52,26 @@
 <script setup lang="ts">
 import {ref,computed,onMounted,onBeforeUnmount,nextTick} from 'vue'
 import AppLayout from '@/components/layout/AppLayout.vue'
+import ProfileMultiSelect from '@/components/request-profiling/ProfileMultiSelect.vue'
 import ProfileTimeline from '@/components/request-profiling/ProfileTimeline.vue'
 import {getRequestProfiles,duration,stageColor,stageNames,eventNames,clientOutcomeNames,profileViewport,bodySize,type ProfileResult,type ProfileRow,type ProfileSegment} from '@/api/admin/requestProfiles'
 const data=ref<ProfileResult|null>(null),loading=ref(false),error=ref(''),selected=ref<ProfileRow|null>(null),selectedSegment=ref<ProfileSegment|null>(null)
 const evidence=ref('measured')
-const minutes=ref(60),model=ref(''),group=ref(''),account=ref(''),protocol=ref('sse'),errorType=ref(''),requestId=ref(''),page=ref(1)
+const minutes=ref(60),models=ref<string[]>([]),groups=ref<string[]>([]),accounts=ref<string[]>([]),protocol=ref('sse'),errorType=ref(''),requestId=ref(''),page=ref(1)
 const detailRef=ref<HTMLElement|null>(null),zoomFirst=ref(false),zoomDisconnect=ref(false),selectedAggregate=ref<ProfileSegment|null>(null)
 const firstSemantic=computed(()=>selected.value?.profile.evidence==='historical'?(selected.value.profile.events.find(e=>e.kind==='first_semantic')?.at_us??null):(selected.value?.profile.downstream_first_output_us??null))
 const detailTotal=computed(()=>zoomDisconnect.value&&selected.value?.profile.client_disconnected_us!=null?selected.value.profile.client_disconnected_us:zoomFirst.value&&firstSemantic.value!==null?firstSemantic.value:selected.value?.profile.total_us||0)
 const detailSegments=computed(()=>profileViewport(selected.value?.profile.segments||[],detailTotal.value,selected.value?.profile.client_disconnected_us))
 async function selectRow(row:ProfileRow){selected.value=row;selectedSegment.value=null;zoomFirst.value=false;zoomDisconnect.value=false;await nextTick();detailRef.value?.scrollIntoView({behavior:'smooth',block:'start'})}
+const filterOptions=ref<{kind:string;value:string;label:string}[]>([])
+const optionsFor=(kind:string)=>filterOptions.value.filter(o=>o.kind===kind)
+let optionsWindow=''
 let controller:AbortController|undefined
 const windowEnd=ref(new Date())
 const aggregate=computed(()=>{let offset=0;return (data.value?.summary.stages||[]).map(s=>{const result={name:s.name,start_us:offset,duration_us:s.mean_us};offset+=s.mean_us;return result})})
 const cards=computed(()=>{const s=data.value!.summary;return [{label:'已记录请求',value:s.count.toLocaleString()},{label:'平均服务端耗时',value:s.count?duration(s.mean_us):'—'},{label:'服务端耗时 P90',value:s.count?duration(s.p90_us):'—'},{label:'重试 / 上游切换 / 本机重选',value:evidence.value==='historical'?'未记录':`${s.retries} / ${s.fallbacks} / ${s.local_reselect||0}`}]})
-async function load(reset=false,refreshWindow=false){controller?.abort();controller=new AbortController();const active=controller;if(reset){page.value=1;if(refreshWindow)windowEnd.value=new Date();data.value=null;selected.value=null}loading.value=true;error.value='';for(const [label,v] of [['分组 ID',group.value],['渠道账号 ID',account.value]] as const){if(v!==''&&(!Number.isSafeInteger(Number(v))||Number(v)<=0)){error.value=`${label}必须为正整数`;loading.value=false;data.value=null;return}}const params:Record<string,string|number>={from:new Date(windowEnd.value.getTime()-minutes.value*60000).toISOString(),to:windowEnd.value.toISOString(),page:page.value,limit:50};for(const [k,v] of Object.entries({model:model.value,group_id:group.value,account_id:account.value,protocol:protocol.value,error_type:errorType.value,request_id:requestId.value,evidence:evidence.value})){if(v)params[k]=v}
- try{const result=await getRequestProfiles(params,active.signal);if(active!==controller)return;data.value=result;selected.value=result.rows[0]||null;selectedSegment.value=null;selectedAggregate.value=null;zoomFirst.value=false}catch(e){if(active.signal.aborted)return;error.value=e instanceof Error?e.message:'加载失败，请重试'}finally{if(active===controller)loading.value=false}}
+async function load(reset=false,refreshWindow=false){controller?.abort();controller=new AbortController();const active=controller;if(reset){page.value=1;if(refreshWindow)windowEnd.value=new Date();data.value=null;selected.value=null}loading.value=true;error.value='';const params:Record<string,string|number>={from:new Date(windowEnd.value.getTime()-minutes.value*60000).toISOString(),to:windowEnd.value.toISOString(),page:page.value,limit:50};for(const [k,v] of Object.entries({models:models.value.join(','),group_ids:groups.value.join(','),account_ids:accounts.value.join(','),protocol:protocol.value,error_type:errorType.value,request_id:requestId.value,evidence:evidence.value})){if(v)params[k]=v}
+ const optionKey=[params.from,params.to,protocol.value,evidence.value].join('|');const needOptions=optionsWindow!==optionKey;if(needOptions)params.include_options='true'
+ try{const result=await getRequestProfiles(params,active.signal);if(active!==controller)return;data.value=result;if(needOptions){const retained=filterOptions.value.filter(o=>(o.kind==='model'?models.value:o.kind==='group'?groups.value:accounts.value).includes(o.value));filterOptions.value=[...(result.options||[]),...retained.filter(o=>!(result.options||[]).some(n=>n.kind===o.kind&&n.value===o.value))];optionsWindow=optionKey}selected.value=result.rows[0]||null;selectedSegment.value=null;selectedAggregate.value=null;zoomFirst.value=false}catch(e){if(active.signal.aborted)return;error.value=e instanceof Error?e.message:'加载失败，请重试'}finally{if(active===controller)loading.value=false}}
 onMounted(()=>load(true,true));onBeforeUnmount(()=>controller?.abort())
 </script>
