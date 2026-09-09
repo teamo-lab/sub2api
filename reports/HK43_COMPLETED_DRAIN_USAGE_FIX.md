@@ -11,7 +11,7 @@
 
 ## 修改
 
-已有终态的流在 idle 收尾时走既有 finalizeStream，保留 completed/failed 的终态语义，不追加新的 stream_timeout。普通不再恢复的流错误返回已解析的 OpenAIForwardResult 和原 error；可 fallback 的 UpstreamFailoverError 仍返回 nil，避免同一次客户请求各失败 attempt 独立重复计费。失败结果不绑定新的成功 response affinity。handler 已有 res!=nil 的部分计量路径负责入账。
+已有终态的流在 idle 收尾时走既有 finalizeStream，保留 completed/failed 的终态语义，不追加新的 stream_timeout。普通不再恢复的纯文本流错误只在已有非零 token usage 且没有专属计量所有者时返回 OpenAIForwardResult 和原 error；可 fallback 的 UpstreamFailoverError、无计量失败、cyber policy 和媒体/搜索失败仍返回 nil，避免重复计费并保持既有专属处理不变。失败结果不绑定新的成功 response affinity。handler 已有 res!=nil 的部分计量路径负责入账。
 
 这不会提前重放已输出请求，也不把部分失败变为成功。仍会等待既有 idle 周期，因此它是计量/终态修复，不是已完成356秒排空时长优化。JSON、Chat转换、WS不在此次变更范围，不能将本补丁的测试解释为全协议覆盖。
 
