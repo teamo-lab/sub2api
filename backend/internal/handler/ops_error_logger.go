@@ -468,6 +468,7 @@ func setOpsSelectedAccount(c *gin.Context, accountID int64, platform ...string) 
 	if c == nil || accountID <= 0 {
 		return
 	}
+	service.RecordRouterUpstreamAccount(c, accountID)
 	service.ClearOpsUpstreamModel(c)
 	c.Set(opsAccountIDKey, accountID)
 	if c.Request != nil {
@@ -1088,6 +1089,7 @@ func OpsErrorLoggerMiddleware(ops *service.OpsService) gin.HandlerFunc {
 			releaseOpsCaptureWriter(w)
 		}()
 		c.Writer = w
+		service.BeginRouterUpstreamAttempts(c)
 		c.Next()
 		w.finalizeCapture()
 
