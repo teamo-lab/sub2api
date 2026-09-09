@@ -2206,6 +2206,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	defer stopKeepalive()
 	// flushPending 表示已写入但未到 SSE 空行边界的脏状态；defer 兜底函数退出前的残留，断连后不再 Flush。
 	requestprofile.DeliverySupported(c.Request.Context())
+	observeReasoning := profileOpenAIReasoningObserver(c.Request.Context())
 	flushPending := false
 	profileTerminal := ""
 	pendingSSEEventType := ""
@@ -2342,6 +2343,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				}
 			}
 			eventType := effectiveOpenAISSEEventType(dataBytes, rawEventType)
+			observeReasoning(dataBytes, eventType)
 			if codexFailureTerminal && sawBareError && !sawResponseFailed && eventType != "response.failed" {
 				suppressCurrentEvent = true
 			}

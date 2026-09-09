@@ -198,8 +198,17 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 	state.NamespaceTools = namespaceTools
 	clientDisconnected := false
 	requestprofile.DeliverySupported(c.Request.Context())
+	observeReasoning := requestprofile.ReasoningObserver(c.Request.Context())
 
 	writeEvents := func(events []apicompat.ResponsesStreamEvent) {
+		for _, event := range events {
+			itemType := ""
+			if event.Item != nil {
+				itemType = event.Item.Type
+			}
+			reasoning, boundary := profileReasoningBoundary(event.Type, itemType)
+			observeReasoning(reasoning, boundary)
+		}
 		if clientDisconnected || len(events) == 0 {
 			return
 		}
