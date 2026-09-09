@@ -7,17 +7,18 @@ package requestprofile
 func splitResponseBody(segments []Segment, protocol string, parallel, supported bool, firstOutput *int64) []Segment {
 	out := make([]Segment, 0, len(segments)+1)
 	for _, segment := range segments {
-		if segment.Name != "response_body" {
+		if segment.Name != "response_body" && segment.Name != "reasoning_observed" {
 			out = append(out, segment)
 			continue
 		}
+		prefix := segment.Name
 		if protocol != "sse" || parallel || !supported {
-			segment.Name = "response_body_output_unknown"
+			segment.Name = prefix + "_output_unknown"
 			out = append(out, segment)
 			continue
 		}
 		if firstOutput == nil {
-			segment.Name = "response_body_no_output"
+			segment.Name = prefix + "_no_output"
 			out = append(out, segment)
 			continue
 		}
@@ -25,13 +26,13 @@ func splitResponseBody(segments []Segment, protocol string, parallel, supported 
 		boundary := max(segment.StartUS, min(end, *firstOutput))
 		if boundary > segment.StartUS {
 			before := segment
-			before.Name = "response_body_before_output"
+			before.Name = prefix + "_before_output"
 			before.DurationUS = boundary - segment.StartUS
 			out = append(out, before)
 		}
 		if boundary < end {
 			after := segment
-			after.Name = "response_body_after_output"
+			after.Name = prefix + "_after_output"
 			after.StartUS = boundary
 			after.DurationUS = end - boundary
 			out = append(out, after)

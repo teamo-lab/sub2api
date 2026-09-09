@@ -129,6 +129,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		maxLineSize = s.cfg.Gateway.MaxLineSize
 	}
 	requestprofile.DeliverySupported(c.Request.Context())
+	observeReasoning := profileOpenAIReasoningObserver(c.Request.Context())
 	var firstTokenMs *int
 	ttftMode := s.openAITTFTMode(ctx)
 	firstOutputProgressObserved := false
@@ -578,6 +579,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		if data, ok := extractOpenAISSEDataLine(line); ok {
 			dataBytes := []byte(data)
 			eventType := effectiveOpenAISSEEventType(dataBytes, pendingSSEEventType)
+			observeReasoning(dataBytes, eventType)
 			if codexFailureTerminal && sawBareError && !sawResponseFailed &&
 				(eventType == "response.completed" || eventType == "response.done") {
 				// A later successful terminal is authoritative over a pending bare
