@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestprofile"
 	"net/http"
 	"time"
 
@@ -202,6 +203,7 @@ func (r *openAILocalCapacityReselect) acquire(h *OpenAIGatewayHandler, c *gin.Co
 		}
 		// From here onward the actual Forward result owns the request outcome.
 		if r.immediate && r.origin != nil {
+			requestprofile.LocalReselect(c.Request.Context(), r.origin.accountID, 0, selection.Account.ID, r.origin.waitMs)
 			reqLog.Info("openai.local_capacity_reselect_admitted",
 				zap.String("origin", "local_account_admission"),
 				zap.Int64("source_account_id", r.origin.accountID),
@@ -239,6 +241,7 @@ func (r *openAILocalCapacityReselect) acquire(h *OpenAIGatewayHandler, c *gin.Co
 	// No terminal was sent. A later successful account must not inherit a local
 	// failed-request marker; the deferred original rejection restores it if needed.
 	c.Set(service.OpsLocalCapacityFailureKey, false)
+	requestprofile.LocalReselect(c.Request.Context(), r.origin.accountID, selection.Account.ID, 0, r.origin.waitMs)
 	reqLog.Info("openai.local_capacity_reselect",
 		zap.String("origin", "local_account_admission"),
 		zap.Int64("source_account_id", r.origin.accountID),

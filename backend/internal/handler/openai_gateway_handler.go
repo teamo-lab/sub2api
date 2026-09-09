@@ -7,6 +7,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestprofile"
 	"io"
 	"net/http"
 	"runtime/debug"
@@ -444,7 +445,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	defer stopCompactKeepalive()
 
 	// 校验请求体 JSON 合法性
-	if !gjson.ValidBytes(body) {
+	endValidation := requestprofile.Start(c.Request.Context(), "json_validate")
+	validJSON := gjson.ValidBytes(body)
+	endValidation()
+	if !validJSON {
 		logRequestBodyParseFailure(reqLog, body, nil)
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
 		return
@@ -468,13 +472,13 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	} else if changed {
 		body = cappedBody
 	}
-	if normalizedBody, changed := normalizeCodexAutomationBootstrap(body); changed {
+	if normalizedBody, changed := profileAutomationBootstrap(c.Request.Context(), body); changed {
 		body = normalizedBody
 		reqLog.Info("openai.codex_automation_bootstrap_normalized",
 			zap.String("normalization", "call_output_to_user_message"),
 		)
 	}
-	if normalizedBody, changed := normalizeCodexDelegationBootstrap(body); changed {
+	if normalizedBody, changed := profileDelegationBootstrap(c.Request.Context(), body); changed {
 		body = normalizedBody
 		reqLog.Info("openai.codex_delegation_bootstrap_normalized",
 			zap.String("normalization", "call_output_to_user_message"),
@@ -1213,7 +1217,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		return
 	}
 
-	if !gjson.ValidBytes(body) {
+	endValidation := requestprofile.Start(c.Request.Context(), "json_validate")
+	validJSON := gjson.ValidBytes(body)
+	endValidation()
+	if !validJSON {
 		logRequestBodyParseFailure(reqLog, body, nil)
 		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
 		return
@@ -2198,6 +2205,7 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 	writeError openAISlotErrorWriter,
 	immediateOnly ...bool,
 ) (func(), openAISlotAcquireResult) {
+	defer requestprofile.Start(c.Request.Context(), "account_queue")()
 	if writeError == nil {
 		writeError = func(status int, errType, code, message string) {
 			h.handleStreamingAwareErrorWithCode(c, status, errType, code, message, *streamStarted, false)
@@ -2817,6 +2825,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		var turnStartsMu sync.Mutex
 		turnStarts := make(map[int]time.Time, 4)
 		recordTurnStart := func(turn int, startedAt time.Time) {
+			requestprofile.BeginTurn(ctx, turn)
 			if turn <= 0 || startedAt.IsZero() {
 				return
 			}
@@ -2847,6 +2856,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			ReasoningEffortMappings:     reasoningEffortMappings,
 			TurnStarted:                 recordTurnStart,
 			BeforeRequest: func(turn int, payload []byte, originalModel string) error {
+				requestprofile.BeginTurn(ctx, turn)
 				c.Set(securityAuditWSTurnContextKey, turn)
 				service.BeginOpsStreamTurn(c, turn)
 				setCyberTurnBody(turn, payload)
@@ -2942,6 +2952,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				return nil
 			},
 			AfterTurn: func(turn int, result *service.OpenAIForwardResult, turnErr error) {
+				requestprofile.EndTurn(ctx, turn, turnErr != nil)
 				turnStart := getTurnStart(turn)
 				cyberBlockBody := takeCyberTurnBody(turn)
 				// 每次 attempt 都清 cyber mark；failover 链结束前保留 recorded guard，

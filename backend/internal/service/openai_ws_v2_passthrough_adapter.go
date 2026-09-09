@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestprofile"
 	"net/http"
 	"net/url"
 	"strings"
@@ -876,7 +877,16 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			return fmt.Errorf("refresh ws authentication headers: %w", err)
 		}
 		dialCtx, cancelDial := context.WithTimeout(ctx, s.openAIWSDialTimeout())
-		upstreamConn, statusCode, handshakeHeaders, err = dialer.Dial(dialCtx, wsURL, headers, proxyURL)
+		profileCtx := requestprofile.AccountContext(dialCtx, account.ID)
+		endConnect := requestprofile.Start(profileCtx, "websocket_connect")
+		upstreamConn, statusCode, handshakeHeaders, err = dialer.Dial(profileCtx, wsURL, headers, proxyURL)
+		endConnect()
+		if err != nil {
+			profileCtx = requestprofile.NewAttempt(dialCtx, account.ID)
+			requestprofile.Mark(profileCtx, "upstream_error", statusCode)
+		} else {
+			requestprofile.Mark(profileCtx, "websocket_connected", statusCode)
+		}
 		cancelDial()
 		if err == nil {
 			break
@@ -1106,6 +1116,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			//     覆盖（Store(nil)），因为 OpenAI 上游对该帧实际不传
 			//     service_tier 时按 default 处理，billing 应如实反映。
 			if policyErr == nil && blocked == nil && isResponseCreate {
+				requestprofile.NewAttempt(ctx, account.ID)
 				usageMeta.updateFromResponseCreate(out, model, requestModelForThisFrame)
 				_, actualModel := usageMeta.turnModels(requestModelForThisFrame)
 				SetOpsUpstreamModel(c, actualModel)
@@ -1130,7 +1141,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		},
 	}
 	upstreamFirstMessageSent := false
-	firstWriteCtx, cancelFirstWrite := context.WithTimeout(ctx, s.openAIWSWriteTimeout())
+	firstWriteCtx, cancelFirstWrite := context.WithTimeout(requestprofile.NewAttempt(ctx, account.ID), s.openAIWSWriteTimeout())
 	firstWriteErr := relayUpstreamFrameConn.WriteFrame(firstWriteCtx, coderws.MessageText, firstClientMessage)
 	cancelFirstWrite()
 	if firstWriteErr != nil {

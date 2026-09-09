@@ -414,6 +414,12 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/admin/request-profiling',
+    name: 'AdminRequestProfiling',
+    component: () => import('@/views/admin/ops/RequestProfilingView.vue'),
+    meta: { requiresAuth: true, requiresAdmin: true, title: '耗时分析' }
+  },
+  {
     path: '/admin/ops',
     name: 'AdminOps',
     component: () => import('@/views/admin/ops/OpsDashboard.vue'),

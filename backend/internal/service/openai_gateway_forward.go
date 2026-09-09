@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestprofile"
 	"io"
 	"net/http"
 	"strings"
@@ -19,6 +20,8 @@ import (
 
 // Forward forwards request to OpenAI API
 func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (out *OpenAIForwardResult, forwardErr error) {
+	ctx, endPrepare := requestprofile.Preparation(ctx)
+	defer endPrepare()
 	defer func() {
 		if budgetErr := finishOpenAIEncryptedSemanticRetry(c); budgetErr != nil {
 			out, forwardErr = nil, budgetErr
@@ -66,7 +69,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	if normalized {
 		body = normalizedBody
 	}
+	endLegacy := requestprofile.Start(ctx, "legacy_normalize")
 	legacyIngressBody, legacyIngressChanged, legacyIngressErr := normalizeOpenAIResponsesLegacyIngress(body)
+	endLegacy()
 	if legacyIngressErr != nil {
 		return nil, legacyIngressErr
 	}
@@ -76,7 +81,10 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	// 在分流到 passthrough / Codex transform / 原生 ChatCompletions 之前统一修正
 	// 显式为 null 的工具 Schema type，否则 upstream 的 400 会被归一成可重试的 502，
 	// 同一份坏定义在账号池里反复重放。
-	if sanitizedToolBody, toolSchemaSanitized, toolSchemaErr := sanitizeOpenAIResponsesToolSchemasForPlatform(body, account.Platform); toolSchemaErr != nil {
+	endSchema := requestprofile.Start(ctx, "tool_schema")
+	sanitizedToolBody, toolSchemaSanitized, toolSchemaErr := sanitizeOpenAIResponsesToolSchemasForPlatform(body, account.Platform)
+	endSchema()
+	if toolSchemaErr != nil {
 		return nil, toolSchemaErr
 	} else if toolSchemaSanitized {
 		body = sanitizedToolBody
@@ -305,7 +313,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	var reqBody map[string]any
 	ensureReqBody := func() (map[string]any, error) {
 		if requestView.HasPatches() {
-			patchedBody, patchErr := requestView.ApplyPatches()
+			patchedBody, patchErr := profileOpenAIPatches(ctx, requestView)
 			if patchErr != nil {
 				return nil, patchErr
 			}
@@ -708,7 +716,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 
 	if bodyModified {
 		if requestView.HasPatches() {
-			if patchedBody, patchErr := requestView.ApplyPatches(); patchErr == nil {
+			if patchedBody, patchErr := profileOpenAIPatches(ctx, requestView); patchErr == nil {
 				body = patchedBody
 				requestView = newOpenAIRequestView(body)
 				reqBody = nil
@@ -721,7 +729,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				return nil, decodeErr
 			}
 			var marshalErr error
-			body, marshalErr = marshalOpenAIUpstreamJSON(decoded)
+			body, marshalErr = profileOpenAIJSONMarshal(ctx, decoded)
 			if marshalErr != nil {
 				return nil, fmt.Errorf("serialize request body: %w", marshalErr)
 			}
@@ -778,7 +786,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		imageInputSize = imageCfg.InputSize
 	}
 	// Get access token
+	endCredential := requestprofile.Start(ctx, "credential_load")
 	token, _, err := s.GetAccessToken(ctx, account)
+	endCredential()
 	if err != nil {
 		return nil, err
 	}
@@ -1129,7 +1139,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				}
 				invalidDigests := collectOpenAIEncryptedContentDigestsRaw(lineageEntryBody)
 				if trimOpenAIEncryptedReasoningItems(decoded) {
-					body, err = marshalOpenAIUpstreamJSON(decoded)
+					body, err = profileOpenAIJSONMarshal(ctx, decoded)
 					if err != nil {
 						return nil, fmt.Errorf("serialize invalid_encrypted_content retry body: %w", err)
 					}
@@ -1385,6 +1395,7 @@ func shouldForwardOpenAIResponsesViaRawChatCompletions(account *Account) bool {
 }
 
 func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Context, account *Account, body []byte, token string, isStream bool, promptCacheKey string, isCodexCLI bool) (*http.Request, error) {
+	defer requestprofile.Start(ctx, "request_build")()
 	// Determine target URL based on account type
 	var targetURL string
 	switch account.Type {

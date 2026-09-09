@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestprofile"
 	"net/http"
 	"sort"
 	"strconv"
@@ -127,6 +128,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	if s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
 		maxLineSize = s.cfg.Gateway.MaxLineSize
 	}
+	requestprofile.DeliverySupported(c.Request.Context())
 	var firstTokenMs *int
 	ttftMode := s.openAITTFTMode(ctx)
 	firstOutputProgressObserved := false
@@ -267,6 +269,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	errorEventSent := false
 	clientDisconnected := false // 客户端断开后继续 drain 上游以收集 usage
 	sawTerminalEvent := false
+	profileTerminal := ""
 	sawFailedEvent := false
 	sawBareError := false
 	sawResponseFailed := false
@@ -355,6 +358,8 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 					clientDisconnected = true
 					logger.LegacyPrintf("service.openai_gateway", "Client disconnected during streaming flush, continuing to drain upstream for billing")
 				} else {
+					requestprofile.Delivery(c.Request.Context(), pendingAnswerOutput || answerOutputStarted, profileTerminal)
+					profileTerminal = ""
 					clientOutputStarted = true
 					if pendingAnswerOutput {
 						answerOutputStarted = true
@@ -373,6 +378,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		if completedTTFTEvent && firstTokenMs == nil {
 			ms := int(time.Since(startTime).Milliseconds())
 			firstTokenMs = &ms
+			requestprofile.Mark(c.Request.Context(), "first_semantic", 0)
 		}
 		eventStartsClientOutput = false
 		eventStartsTTFTOutput = false
@@ -396,6 +402,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			clientDisconnected = true
 			return
 		}
+		requestprofile.Delivery(c.Request.Context(), false, "error")
 		clientOutputStarted = true
 		CompleteErrorRecovery(c)
 		lastDownstreamWriteAt = time.Now()
@@ -429,6 +436,8 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			logger.LegacyPrintf("service.openai_gateway", "%s", disconnectMessage)
 			return
 		}
+		requestprofile.Delivery(c.Request.Context(), pendingAnswerOutput || answerOutputStarted, profileTerminal)
+		profileTerminal = ""
 		clientOutputStarted = true
 		CompleteErrorRecovery(c)
 		lastDownstreamWriteAt = time.Now()
@@ -827,6 +836,12 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				} else if _, err := writePendingString("\n"); err != nil {
 					handlePendingWriteError(err)
 				} else {
+					switch eventType {
+					case "response.completed", "response.done":
+						profileTerminal = "complete"
+					case "response.failed", "response.incomplete", "response.cancelled", "response.canceled", "error":
+						profileTerminal = "error"
+					}
 					eventInProgress = true
 				}
 			}
@@ -835,6 +850,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if !guardFirstOutput && firstTokenMs == nil && startsTTFTOutput {
 				ms := int(time.Since(startTime).Milliseconds())
 				firstTokenMs = &ms
+				requestprofile.Mark(c.Request.Context(), "first_semantic", 0)
 				stopFirstOutputTimer()
 			}
 			s.parseSSEUsageBytesWithType(dataBytes, eventType, usage)
@@ -911,6 +927,8 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 						clientDisconnected = true
 						logger.LegacyPrintf("service.openai_gateway", "Client disconnected during streaming flush, continuing to drain upstream for billing")
 					} else {
+						requestprofile.Delivery(c.Request.Context(), pendingAnswerOutput || answerOutputStarted, profileTerminal)
+						profileTerminal = ""
 						clientOutputStarted = true
 						CompleteErrorRecovery(c)
 						lastDownstreamWriteAt = time.Now()

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestprofile"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
@@ -96,6 +97,13 @@ func TestOpenAILateFailureSwitchHandler_InternalRetriesDoNotQualify(t *testing.T
 					c, _ := gin.CreateTestContext(w)
 					c.Request = httptest.NewRequest("POST", "/v1/"+route, bytes.NewBufferString(payload))
 					c.Request.Header.Set("Content-Type", "application/json")
+					// Deliberately divergent profiling metadata must not replace R3 dispatch facts.
+					profileCtx := requestprofile.Attach(c.Request.Context(), time.Now())
+					for i := 0; i < 8; i++ {
+						requestprofile.NewAttempt(profileCtx, 999)
+					}
+					c.Request = c.Request.WithContext(profileCtx)
+					defer func() { requestprofile.Finish(profileCtx, time.Now()) }()
 					groupID := int64(3)
 					c.Set(string(middleware2.ContextKeyAPIKey), &service.APIKey{ID: 901, UserID: 902, GroupID: &groupID, Group: &service.Group{ID: groupID, Platform: service.PlatformOpenAI}, User: &service.User{ID: 902}})
 					c.Set(string(middleware2.ContextKeyUser), middleware2.AuthSubject{UserID: 902, Concurrency: 1})

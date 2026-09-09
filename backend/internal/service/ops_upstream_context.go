@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestprofile"
 	"strconv"
 	"strings"
 	"time"
@@ -373,6 +374,9 @@ func SetOpsUpstreamError(c *gin.Context, upstreamStatusCode int, upstreamMessage
 }
 
 func setOpsUpstreamError(c *gin.Context, upstreamStatusCode int, upstreamMessage, upstreamDetail string) {
+	if c != nil && c.Request != nil {
+		requestprofile.Mark(c.Request.Context(), "upstream_error", upstreamStatusCode)
+	}
 	if c == nil {
 		return
 	}

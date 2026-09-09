@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestprofile"
 	"net/http"
 	"strings"
 	"time"
@@ -26,6 +27,8 @@ func (s *OpenAIGatewayService) forwardResponsesViaRawChatCompletions(
 	body []byte,
 ) (*OpenAIForwardResult, error) {
 	startTime := time.Now()
+	endConvert := requestprofile.Start(ctx, "protocol_convert")
+	defer endConvert()
 
 	var responsesReq apicompat.ResponsesRequest
 	if err := json.Unmarshal(body, &responsesReq); err != nil {
@@ -75,7 +78,10 @@ func (s *OpenAIGatewayService) forwardResponsesViaRawChatCompletions(
 		chatReq.StreamOptions = &apicompat.ChatStreamOptions{IncludeUsage: true}
 	}
 
+	endMarshal := requestprofile.Start(ctx, "json_serialize")
 	chatBody, err := json.Marshal(chatReq)
+	endMarshal()
+	endConvert()
 	if err != nil {
 		return nil, fmt.Errorf("marshal chat completions fallback request: %w", err)
 	}
@@ -191,13 +197,28 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 	state.ToolSearchDeclared = toolSearch
 	state.NamespaceTools = namespaceTools
 	clientDisconnected := false
+	requestprofile.DeliverySupported(c.Request.Context())
 
 	writeEvents := func(events []apicompat.ResponsesStreamEvent) {
 		if clientDisconnected || len(events) == 0 {
 			return
 		}
 		writeStreamHeaders()
+		profileOutput := false
+		profileTerminal := ""
 		for _, event := range events {
+			if event.Type == "response.output_text.delta" && strings.TrimSpace(event.Delta) != "" {
+				profileOutput = true
+			}
+			if event.Type == "response.output_item.done" && event.Item != nil && (event.Item.Type == "function_call" || event.Item.Type == "custom_tool_call") {
+				profileOutput = true
+			}
+			switch event.Type {
+			case "response.completed", "response.done":
+				profileTerminal = "complete"
+			case "response.failed", "response.incomplete", "error":
+				profileTerminal = "error"
+			}
 			sse, err := apicompat.ResponsesEventToSSE(event)
 			if err != nil {
 				logger.L().Warn("openai responses chat fallback: failed to marshal stream event",
@@ -216,6 +237,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 			}
 		}
 		c.Writer.Flush()
+		requestprofile.Delivery(c.Request.Context(), profileOutput, profileTerminal)
 	}
 
 	scan := s.scanCCStream(c, resp, account, "openai responses chat fallback", requestID, startTime, reasoningEffort, func(chunk *apicompat.ChatCompletionsChunk) {

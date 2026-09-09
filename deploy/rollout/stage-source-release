@@ -12,6 +12,9 @@ allow_existing_nat_entry="${8:-false}"
 relay_enabled="${9-inherit}"
 relay_groups="${10-inherit}"
 reference_mode="${11-fleet_binary}"
+profile_enabled="${12-inherit}"
+profile_groups="${13-inherit}"
+profile_retention="${14-inherit}"
 root="${SUB2API_DEPLOY_ROOT:-/opt/sub2api/deploy}"
 if [[ -f "$root/rollout/site.env" ]]; then set -a; source "$root/rollout/site.env"; set +a; fi
 backups="${SUB2API_BACKUP_DIR:-/opt/sub2api/backups}"
@@ -107,7 +110,7 @@ if [[ -n "$expected_binary_sha256" && "$image_binary_sha256" != "$expected_binar
   fail binary_sha256_mismatch 'Built image differs from the validated fleet binary; candidate was not changed.' 6
 fi
 
-stage_result="$(SUB2API_ALLOW_OFFICIAL_NO_IDENTITY_HEADER="$official_mode" "$stage_image" "$release_id" "$version" "$digest" "stage-$release_id" "$relay_enabled" "$relay_groups")"
+stage_result="$(SUB2API_ALLOW_OFFICIAL_NO_IDENTITY_HEADER="$official_mode" "$stage_image" "$release_id" "$version" "$digest" "stage-$release_id" "$relay_enabled" "$relay_groups" standard "" "" "$allow_existing_nat_entry" "$profile_enabled" "$profile_groups" "$profile_retention")"
 observed_binary_sha256="$(docker exec "sub2api-$candidate" sha256sum /app/sub2api | awk '{print $1}')"
 if [[ "$observed_binary_sha256" != "$image_binary_sha256" ]]; then
   fail binary_sha256_mismatch 'Candidate remains at zero weight: running binary differs from its immutable image.' 6
