@@ -331,3 +331,19 @@ func TestConcurrentHTTPCallsDoNotCreateFalseRetries(t *testing.T) {
 		}
 	}
 }
+
+func TestProfileScopeStopsUnselectedGroup(t *testing.T) {
+	ctx := AttachScoped(context.Background(), time.Now(), []int64{38})
+	root := ctx
+	ctx = AuthorizeGroup(ctx, 2)
+	if From(ctx) != nil || Finish(root, time.Now()) != nil {
+		t.Fatal("unselected group recorded")
+	}
+	selected := AttachScoped(context.Background(), time.Now(), []int64{38})
+	selected = AuthorizeGroup(selected, 38)
+	Start(selected, "read")()
+	s := Finish(selected, time.Now())
+	if s == nil || s.GroupID != 38 || len(s.Spans) != 1 {
+		t.Fatal(s)
+	}
+}

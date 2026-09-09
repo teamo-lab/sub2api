@@ -113,12 +113,22 @@ func LoggerWithProfiling(enabled bool) gin.HandlerFunc {
 			}
 			requestprofile.Metadata(profileContext, group, model, wire)
 
-			profileFields := append(append([]zap.Field{}, fields...), zap.Any("request_profile", requestprofile.Finish(profileContext, endTime)))
-			enc := zapcore.NewMapObjectEncoder()
-			for _, field := range profileFields {
-				field.AddTo(enc)
+			snapshot := requestprofile.Finish(profileContext, endTime)
+			if snapshot != nil {
+				profileFields := append(append([]zap.Field{}, fields...), zap.Any("request_profile", snapshot))
+				enc := zapcore.NewMapObjectEncoder()
+				for _, field := range profileFields {
+					field.AddTo(enc)
+				}
+				for key, value := range enc.Fields {
+					if text, ok := value.(string); ok && len(text) > 1024 {
+						enc.Fields[key] = text[:1024]
+					}
+				}
+				logger.WriteSinkEvent("info", "http.access", "http request completed", enc.Fields)
+			} else {
+				profiled = false
 			}
-			logger.WriteSinkEvent("info", "http.access", "http request completed", enc.Fields)
 		}
 		l := logger.FromContext(c.Request.Context()).With(fields...)
 		// Profiles go directly to the bounded sink exactly once. Console level

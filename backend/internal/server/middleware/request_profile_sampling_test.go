@@ -80,3 +80,34 @@ func TestProfileRealSinkDisabledRejectedAndOverflow(t *testing.T) {
 		})
 	}
 }
+
+func TestProfileScopeRealSinkPreservesOtherGroups(t *testing.T) {
+	logger.Init(logger.InitOptions{Level: "warn", Format: "json"})
+	sink := service.NewOpsSystemLogSink(nil)
+	logger.SetSink(sink)
+	defer logger.SetSink(nil)
+	defer sink.Stop()
+	r := gin.New()
+	r.Use(RequestLoggerWithProfiling(true, 38), LoggerWithProfiling(true))
+	r.POST("/responses", func(c *gin.Context) {
+		gid := int64(2)
+		if c.GetHeader("X-QA-Group") == "38" {
+			gid = 38
+		}
+		setGroupContext(c, &service.Group{ID: gid, Status: "active"})
+		requestprofile.Start(c.Request.Context(), "body_read")()
+		c.String(200, "same")
+	})
+	for _, group := range []string{"2", "38"} {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/responses", nil)
+		req.Header.Set("X-QA-Group", group)
+		r.ServeHTTP(w, req)
+		if w.Code != 200 || w.Body.String() != "same" {
+			t.Fatal("wire changed")
+		}
+	}
+	if sink.Health().QueueDepth != 1 {
+		t.Fatal("wrong scope", sink.Health())
+	}
+}

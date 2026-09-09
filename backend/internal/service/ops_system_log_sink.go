@@ -16,18 +16,23 @@ import (
 )
 
 type OpsSystemLogSinkHealth struct {
-	QueueDepth      int64  `json:"queue_depth"`
-	QueueCapacity   int64  `json:"queue_capacity"`
-	DroppedCount    uint64 `json:"dropped_count"`
-	WriteFailed     uint64 `json:"write_failed_count"`
-	WrittenCount    uint64 `json:"written_count"`
-	AvgWriteDelayMs uint64 `json:"avg_write_delay_ms"`
-	LastError       string `json:"last_error"`
+	ProfileQueueBytes     int64  `json:"profile_queue_bytes"`
+	ProfileQueueByteLimit int64  `json:"profile_queue_byte_limit"`
+	ProfileRejectedCount  uint64 `json:"profile_rejected_count"`
+	QueueDepth            int64  `json:"queue_depth"`
+	QueueCapacity         int64  `json:"queue_capacity"`
+	DroppedCount          uint64 `json:"dropped_count"`
+	WriteFailed           uint64 `json:"write_failed_count"`
+	WrittenCount          uint64 `json:"written_count"`
+	AvgWriteDelayMs       uint64 `json:"avg_write_delay_ms"`
+	LastError             string `json:"last_error"`
 }
 
 type OpsSystemLogSink struct {
-	opsRepo OpsRepository
-	host    string
+	profileQueueBytes int64
+	profileRejected   uint64
+	opsRepo           OpsRepository
+	host              string
 
 	queue chan *logger.LogEvent
 
@@ -51,6 +56,8 @@ type OpsSystemLogSink struct {
 }
 
 const maxSystemLogHostLength = 255
+const profileQueueByteLimit int64 = 32 << 20
+const profileMaxRecordBytes = 128 << 10
 
 const (
 	// 首次写入失败后暂停落库的时长，之后逐次翻倍到上限。
@@ -140,9 +147,38 @@ func (s *OpsSystemLogSink) WriteLogEvent(event *logger.LogEvent) {
 		}
 	}
 
+	if _, profile := event.Fields["request_profile"]; profile {
+		encoded, err := json.Marshal(event.Fields)
+		if err != nil || len(encoded) > profileMaxRecordBytes {
+			atomic.AddUint64(&s.droppedCount, 1)
+			atomic.AddUint64(&s.profileRejected, 1)
+			return
+		}
+		charge := int64(len(encoded))
+		for {
+			used := atomic.LoadInt64(&s.profileQueueBytes)
+			if used+charge > profileQueueByteLimit {
+				atomic.AddUint64(&s.droppedCount, 1)
+				atomic.AddUint64(&s.profileRejected, 1)
+				return
+			}
+			if atomic.CompareAndSwapInt64(&s.profileQueueBytes, used, used+charge) {
+				break
+			}
+		}
+		copied := *event
+		copied.Fields = nil
+		copied.EncodedFields = encoded
+		copied.ProfileQueueBytes = charge
+		event = &copied
+	}
+
 	select {
 	case s.queue <- event:
 	default:
+		if event.ProfileQueueBytes > 0 {
+			atomic.AddInt64(&s.profileQueueBytes, -event.ProfileQueueBytes)
+		}
 		atomic.AddUint64(&s.droppedCount, 1)
 	}
 }
@@ -210,6 +246,8 @@ func (s *OpsSystemLogSink) run() {
 			// 退避窗口内直接丢弃本批：日志是尽力而为的观测数据，继续攒批只会把
 			// 压力转移到内存，而每次重试都会再占用并取消一条池内连接。
 			atomic.AddUint64(&s.droppedCount, uint64(len(batch)))
+			releaseProfileBytes(s, batch)
+			clear(batch)
 			batch = batch[:0]
 			return
 		}
@@ -233,6 +271,8 @@ func (s *OpsSystemLogSink) run() {
 			atomic.AddUint64(&s.totalDelayNs, uint64(delay.Nanoseconds()))
 			s.lastError.Store("")
 		}
+		releaseProfileBytes(s, batch)
+		clear(batch)
 		batch = batch[:0]
 	}
 	drainAndFlush := func() {
@@ -284,6 +324,11 @@ func (s *OpsSystemLogSink) flushBatch(baseCtx context.Context, batch []*logger.L
 		}
 
 		fields := copyMap(event.Fields)
+		if event.EncodedFields != nil {
+			if err := json.Unmarshal(event.EncodedFields, &fields); err != nil {
+				return 0, err
+			}
+		}
 		requestID := asString(fields["request_id"])
 		clientRequestID := asString(fields["client_request_id"])
 		platform := asString(fields["platform"])
@@ -354,6 +399,7 @@ func (s *OpsSystemLogSink) Health() OpsSystemLogSinkHealth {
 
 	lastErr, _ := s.lastError.Load().(string)
 	return OpsSystemLogSinkHealth{
+		ProfileQueueBytes: atomic.LoadInt64(&s.profileQueueBytes), ProfileQueueByteLimit: profileQueueByteLimit, ProfileRejectedCount: atomic.LoadUint64(&s.profileRejected),
 		QueueDepth:      int64(len(s.queue)),
 		QueueCapacity:   int64(cap(s.queue)),
 		DroppedCount:    atomic.LoadUint64(&s.droppedCount),
@@ -426,4 +472,12 @@ func asInt64Ptr(v any) *int64 {
 		}
 	}
 	return nil
+}
+
+func releaseProfileBytes(s *OpsSystemLogSink, batch []*logger.LogEvent) {
+	for _, e := range batch {
+		if e != nil && e.ProfileQueueBytes > 0 {
+			atomic.AddInt64(&s.profileQueueBytes, -e.ProfileQueueBytes)
+		}
+	}
 }

@@ -17,7 +17,7 @@ const requestIDHeader = "X-Request-ID"
 
 // RequestLogger 在请求入口注入 request-scoped logger。
 func RequestLogger() gin.HandlerFunc { return RequestLoggerWithProfiling(true) }
-func RequestLoggerWithProfiling(enabled bool) gin.HandlerFunc {
+func RequestLoggerWithProfiling(enabled bool, groups ...int64) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.Request == nil {
 			c.Next()
@@ -25,7 +25,7 @@ func RequestLoggerWithProfiling(enabled bool) gin.HandlerFunc {
 		}
 
 		if enabled && isProfiledInferenceRequest(c.Request) {
-			c.Request = c.Request.WithContext(requestprofile.Attach(c.Request.Context(), time.Now()))
+			c.Request = c.Request.WithContext(requestprofile.AttachScoped(c.Request.Context(), time.Now(), groups))
 		}
 		requestID, validRequestID := normalizeCorrelationID(c.GetHeader(requestIDHeader))
 		if !validRequestID {

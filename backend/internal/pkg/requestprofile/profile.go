@@ -5,6 +5,7 @@ package requestprofile
 import (
 	"context"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -71,6 +72,8 @@ type Snapshot struct {
 	BodyBytes                    int64     `json:"body_bytes,omitempty"`
 }
 type Recorder struct {
+	allowedGroups                                                    []int64
+	discarded                                                        bool
 	httpActive                                                       int
 	parallel                                                         bool
 	original                                                         context.Context
@@ -103,7 +106,10 @@ type attemptRef struct {
 }
 
 func Attach(ctx context.Context, start time.Time) context.Context {
-	r := &Recorder{start: start, original: ctx}
+	return AttachScoped(ctx, start, nil)
+}
+func AttachScoped(ctx context.Context, start time.Time, groups []int64) context.Context {
+	r := &Recorder{start: start, original: ctx, allowedGroups: append([]int64(nil), groups...)}
 	attached := context.WithValue(ctx, contextKey{}, r)
 	r.stopCancellation = context.AfterFunc(ctx, func() {
 		r.mu.Lock()
@@ -136,7 +142,11 @@ func Metadata(ctx context.Context, group int64, model, protocol string) {
 			r.group = group
 		}
 		if model != "" {
-			r.model = model
+			if len(model) > 256 {
+				model = model[:256]
+				r.dropped++
+			}
+			r.model = strings.Clone(model)
 		}
 		if protocol != "" {
 			r.protocol = protocol
@@ -248,6 +258,9 @@ func Finish(ctx context.Context, at time.Time) *Snapshot {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.discarded {
+		return nil
+	}
 	if r.stopCancellation != nil {
 		r.stopCancellation()
 	}
@@ -520,4 +533,32 @@ func activeHTTP(ctx context.Context) func() {
 	r.mu.Unlock()
 	var once sync.Once
 	return func() { once.Do(func() { r.mu.Lock(); r.httpActive--; r.mu.Unlock() }) }
+}
+
+// Restrict collection as soon as authenticated group identity is available.
+func AuthorizeGroup(ctx context.Context, group int64) context.Context {
+	r := From(ctx)
+	if r == nil {
+		return ctx
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	allowed := len(r.allowedGroups) == 0
+	for _, id := range r.allowedGroups {
+		if id == group {
+			allowed = true
+		}
+	}
+	if allowed {
+		r.group = group
+		return ctx
+	}
+	r.discarded = true
+	r.closed = true
+	if r.stopCancellation != nil {
+		r.stopCancellation()
+	}
+	r.spans = nil
+	r.events = nil
+	return context.WithValue(ctx, contextKey{}, (*Recorder)(nil))
 }

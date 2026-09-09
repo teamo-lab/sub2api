@@ -39,12 +39,14 @@ type RequestProfileSummary struct {
 	Stages        []RequestProfileStage `json:"stages"`
 }
 type RequestProfileResult struct {
-	RecordingEnabled bool                    `json:"recording_enabled"`
-	Rows             []RequestProfileRow     `json:"rows"`
-	Summary          RequestProfileSummary   `json:"summary"`
-	Page             int                     `json:"page"`
-	Limit            int                     `json:"limit"`
-	Health           *OpsSystemLogSinkHealth `json:"health,omitempty"`
+	RetentionHours    int                     `json:"retention_hours"`
+	RecordingGroupIDs []int64                 `json:"recording_group_ids"`
+	RecordingEnabled  bool                    `json:"recording_enabled"`
+	Rows              []RequestProfileRow     `json:"rows"`
+	Summary           RequestProfileSummary   `json:"summary"`
+	Page              int                     `json:"page"`
+	Limit             int                     `json:"limit"`
+	Health            *OpsSystemLogSinkHealth `json:"health,omitempty"`
 }
 type requestProfileRepository interface {
 	QueryRequestProfiles(context.Context, RequestProfileFilter) (*RequestProfileResult, error)
@@ -73,6 +75,10 @@ func (s *OpsService) QueryRequestProfiles(ctx context.Context, f RequestProfileF
 	result, err := r.QueryRequestProfiles(ctx, f)
 	if err != nil {
 		return nil, err
+	}
+	if s.cfg != nil {
+		result.RetentionHours = s.cfg.Gateway.RequestProfilingRetentionHours
+		result.RecordingGroupIDs = append([]int64{}, s.cfg.Gateway.RequestProfilingGroupIDs...)
 	}
 	result.RecordingEnabled = s.cfg == nil || s.cfg.Gateway.RequestProfilingEnabled
 	if s.systemLogSink != nil {

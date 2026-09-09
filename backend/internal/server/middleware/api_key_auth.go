@@ -386,6 +386,14 @@ func GetSubscriptionFromContext(c *gin.Context) (*service.UserSubscription, bool
 }
 
 func setGroupContext(c *gin.Context, group *service.Group) {
+	if c != nil && c.Request != nil && group != nil {
+		c.Request = c.Request.WithContext(requestprofile.AuthorizeGroup(c.Request.Context(), group.ID))
+		if requestprofile.From(c.Request.Context()) == nil {
+			if w, ok := c.Writer.(*requestProfileWriter); ok {
+				c.Writer = w.ResponseWriter
+			}
+		}
+	}
 	if !service.IsGroupContextValid(group) {
 		return
 	}

@@ -71,7 +71,7 @@ else:sys.exit(2)
         overlay = json.loads((self.root / "overlay.json").read_text())
         self.assertEqual(list(overlay["services"]), ["sub2api-blue"])
         self.assertEqual(overlay["services"]["sub2api-blue"]["environment"], {
-            "GATEWAY_TEAMO_RELAY_ENABLED": "true", "GATEWAY_TEAMO_RELAY_GROUP_IDS": "3,29"})
+            "GATEWAY_TEAMO_RELAY_ENABLED": "true", "GATEWAY_TEAMO_RELAY_GROUP_IDS": "3,29", "GATEWAY_REQUEST_PROFILING_ENABLED":"false", "GATEWAY_REQUEST_PROFILING_GROUP_IDS":"", "GATEWAY_REQUEST_PROFILING_RETENTION_HOURS":"6"})
         args = json.loads((self.root / "up-args.json").read_text())
         self.assertEqual(args[-1], "sub2api-blue")
         self.assertIn("--no-deps", args)
@@ -84,6 +84,17 @@ else:sys.exit(2)
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         report = json.loads(result.stdout)
         self.assertEqual(report["relay"], {"enabled": True, "group_ids": "3"})
+
+    @unittest.skipUnless(shutil.which("jq"), "jq required")
+    def test_profiling_overlay_is_explicit_and_candidate_only(self):
+        result=self.run_stage("inherit","inherit","standard","","","false","true","38","6")
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        overlay=json.loads((self.root/"overlay.json").read_text())
+        self.assertEqual(list(overlay["services"]),["sub2api-blue"])
+        values=overlay["services"]["sub2api-blue"]["environment"]
+        self.assertEqual(values["GATEWAY_REQUEST_PROFILING_ENABLED"],"true")
+        self.assertEqual(values["GATEWAY_REQUEST_PROFILING_GROUP_IDS"],"38")
+        self.assertEqual(values["GATEWAY_TEAMO_RELAY_ENABLED"],"false")
 
     @unittest.skipUnless(shutil.which("jq"), "jq is required by the stage helper")
     def test_green_candidate_uses_its_own_profile(self):

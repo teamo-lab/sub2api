@@ -11,6 +11,9 @@ experiment_mode="${7-standard}"
 expected_source_commit="${8:-}"
 expected_binary_sha256="${9:-}"
 allow_existing_nat_entry="${10-false}"
+profile_enabled="${11-inherit}"
+profile_groups="${12-inherit}"
+profile_retention="${13-inherit}"
 root="${SUB2API_DEPLOY_ROOT:-/opt/sub2api/deploy}"
 if [[ -f "$root/rollout/site.env" ]]; then set -a; source "$root/rollout/site.env"; set +a; fi
 controller="$root/bin/sub2api-rollout"
@@ -131,15 +134,25 @@ fi
 [[ "$relay_enabled" == true || "$relay_enabled" == false ]] || fail invalid_stable_relay_enabled 'Stable has an invalid Relay flag.' 4
 [[ -z "$relay_groups" || "$relay_groups" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] || fail invalid_stable_relay_groups 'Stable has invalid Relay groups.' 4
 [[ "$relay_enabled" != true || -n "$relay_groups" ]] || fail relay_groups_required 'Enabling Relay requires explicit authenticated groups.' 4
+[[ "$profile_enabled" == inherit || "$profile_enabled" == true || "$profile_enabled" == false ]] || fail invalid_profile_flag 'Invalid profiling flag.' 2
+[[ "$profile_groups" == inherit || -z "$profile_groups" || "$profile_groups" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] || fail invalid_profile_groups 'Invalid profiling groups.' 2
+if [[ "$profile_enabled" == inherit ]]; then profile_enabled="$(env_value "$stable_container" GATEWAY_REQUEST_PROFILING_ENABLED)"; profile_enabled="${profile_enabled:-false}"; fi
+if [[ "$profile_groups" == inherit ]]; then profile_groups="$(env_value "$stable_container" GATEWAY_REQUEST_PROFILING_GROUP_IDS)"; fi
+if [[ "$profile_retention" == inherit ]]; then profile_retention="$(env_value "$stable_container" GATEWAY_REQUEST_PROFILING_RETENTION_HOURS)"; profile_retention="${profile_retention:-6}"; fi
+[[ "$profile_retention" =~ ^[0-9]+$ && "$profile_retention" -ge 1 && "$profile_retention" -le 24 ]] || fail invalid_profile_retention 'Profiling retention must be 1-24 hours.' 2
+[[ "$profile_enabled" != true || -n "$profile_groups" ]] || fail profile_groups_required 'Explicit profiling groups are required for production enablement.' 2
 relay_overlay="$(mktemp "$root/rollout/relay-env.XXXXXX")"
 trap 'rm -f -- "$relay_overlay"' EXIT
 chmod 0600 "$relay_overlay"
-python3 - "$candidate_container" "$relay_enabled" "$relay_groups" >"$relay_overlay" <<'PYRELAY'
+python3 - "$candidate_container" "$relay_enabled" "$relay_groups" "$profile_enabled" "$profile_groups" "$profile_retention" >"$relay_overlay" <<'PYRELAY'
 import json, sys
-service, enabled, groups = sys.argv[1:]
+service, enabled, groups, profile_enabled, profile_groups, retention = sys.argv[1:]
 print(json.dumps({"services": {service: {"environment": {
     "GATEWAY_TEAMO_RELAY_ENABLED": enabled,
     "GATEWAY_TEAMO_RELAY_GROUP_IDS": groups,
+    "GATEWAY_REQUEST_PROFILING_ENABLED": profile_enabled,
+    "GATEWAY_REQUEST_PROFILING_GROUP_IDS": profile_groups,
+    "GATEWAY_REQUEST_PROFILING_RETENTION_HOURS": retention,
 }}}}))
 PYRELAY
 compose+=(-f "$relay_overlay")
@@ -182,6 +195,7 @@ done
    "$(env_value "$candidate_container" GATEWAY_TEAMO_RELAY_GROUP_IDS)" == "$relay_groups" ]] \
   || fail relay_config_mismatch 'Candidate Relay configuration read-back failed; candidate remains at zero weight.' 6
 
+[[ "$(env_value "$candidate_container" GATEWAY_REQUEST_PROFILING_ENABLED)" == "$profile_enabled" && "$(env_value "$candidate_container" GATEWAY_REQUEST_PROFILING_GROUP_IDS)" == "$profile_groups" && "$(env_value "$candidate_container" GATEWAY_REQUEST_PROFILING_RETENTION_HOURS)" == "$profile_retention" ]] || fail profile_config_mismatch 'Candidate profiling read-back failed; candidate remains at zero weight.' 6
 configuration_snapshot='null'
 if [[ "$experiment_mode" == relay-off-on ]]; then
   [[ "$(docker exec "$candidate_container" sha256sum /app/sub2api | awk '{print $1}')" == "$expected_binary_sha256" ]] \
@@ -196,6 +210,7 @@ for label, container in zip(('stable', 'candidate'), sys.argv[1:]):
     info = json.loads(subprocess.check_output(['docker', 'inspect', container]))[0]
     env = dict(value.split('=', 1) for value in info['Config']['Env'] if '=' in value)
     selected = {key: value for key, value in env.items() if key not in skip}
+    for key, value in {'GATEWAY_REQUEST_PROFILING_ENABLED':'false','GATEWAY_REQUEST_PROFILING_GROUP_IDS':'','GATEWAY_REQUEST_PROFILING_RETENTION_HOURS':'6'}.items(): selected.setdefault(key,value)
     result[label + '_environment_sha256'] = hashlib.sha256(json.dumps(selected, sort_keys=True).encode()).hexdigest()
 result['environment_fingerprints_match'] = result['stable_environment_sha256'] == result['candidate_environment_sha256']
 print(json.dumps(result))
@@ -211,6 +226,6 @@ observed_slot="$(curl -fsS -D - -o /dev/null --max-time 5 "http://$candidate_ip:
 "$controller" stage --release-id "$release_id" --candidate-slot "$candidate" \
   --candidate-version "$candidate_version" --candidate-digest "$candidate_image" --schema-compatible \
   --actor codex --action-id "$action_prefix-stage" --json \
-  | jq -c --arg relay_enabled "$relay_enabled" --arg relay_groups "$relay_groups" --arg experiment_mode "$experiment_mode" --arg source_commit "$expected_source_commit" --arg binary_sha256 "$expected_binary_sha256" --argjson configuration_snapshot "$configuration_snapshot" '{relay:{enabled:($relay_enabled=="true"),group_ids:$relay_groups},experiment_mode:$experiment_mode,source_commit:$source_commit,binary_sha256:$binary_sha256,configuration_snapshot:$configuration_snapshot,action,result,release_id,phase,stable_slot,candidate_slot,rollback_target_slot,
+  | jq -c --arg profile_enabled "$profile_enabled" --arg profile_groups "$profile_groups" --arg profile_retention "$profile_retention" --arg relay_enabled "$relay_enabled" --arg relay_groups "$relay_groups" --arg experiment_mode "$experiment_mode" --arg source_commit "$expected_source_commit" --arg binary_sha256 "$expected_binary_sha256" --argjson configuration_snapshot "$configuration_snapshot" '{profiling:{enabled:($profile_enabled=="true"),group_ids:$profile_groups,retention_hours:($profile_retention|tonumber)},relay:{enabled:($relay_enabled=="true"),group_ids:$relay_groups},experiment_mode:$experiment_mode,source_commit:$source_commit,binary_sha256:$binary_sha256,configuration_snapshot:$configuration_snapshot,action,result,release_id,phase,stable_slot,candidate_slot,rollback_target_slot,
             blue:{health:.blue.health,weight:.blue.weight,version:.blue.version,digest:.blue.digest},
             green:{health:.green.health,weight:.green.weight,version:.green.version,digest:.green.digest},rollback}'

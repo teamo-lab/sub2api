@@ -1014,6 +1014,8 @@ const (
 
 // GatewayConfig API网关相关配置
 type GatewayConfig struct {
+	RequestProfilingRetentionHours int     `mapstructure:"request_profiling_retention_hours"`
+	RequestProfilingGroupIDs       []int64 `mapstructure:"request_profiling_group_ids"`
 	// RequestProfilingEnabled records bounded metadata-only inference timelines.
 	RequestProfilingEnabled bool `mapstructure:"request_profiling_enabled"`
 	// 等待上游响应头的超时时间（秒），0表示无超时
@@ -2503,6 +2505,8 @@ func setDefaults() {
 	viper.SetDefault("gateway.max_account_switches_gemini", 3)
 	viper.SetDefault("gateway.force_codex_cli", false)
 	viper.SetDefault("gateway.request_profiling_enabled", false)
+	viper.SetDefault("gateway.request_profiling_group_ids", []int64{})
+	viper.SetDefault("gateway.request_profiling_retention_hours", 6)
 	viper.SetDefault("gateway.disable_codex_identity_enforcement", false)
 	viper.SetDefault("gateway.disable_codex_originator_normalization", false)
 	viper.SetDefault("gateway.codex_image_generation_bridge_enabled", false)
@@ -2781,6 +2785,14 @@ func setEnvReachableDefaults() {
 }
 
 func (c *Config) Validate() error {
+	for _, id := range c.Gateway.RequestProfilingGroupIDs {
+		if id <= 0 {
+			return fmt.Errorf("gateway.request_profiling_group_ids must be positive")
+		}
+	}
+	if c.Gateway.RequestProfilingEnabled && (c.Gateway.RequestProfilingRetentionHours < 1 || c.Gateway.RequestProfilingRetentionHours > 24) {
+		return fmt.Errorf("gateway.request_profiling_retention_hours must be 1-24 when enabled")
+	}
 	if err := c.Deployment.Validate(); err != nil {
 		return fmt.Errorf("deployment: %w", err)
 	}
