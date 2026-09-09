@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/Wei-Shaw/sub2api/internal/model"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestprofile"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
@@ -187,6 +188,7 @@ func applyErrorRecovery(c *gin.Context, account *Account, requestedModel string,
 		for i := 1; i < s.retries[account.ID] && delay < 8*time.Second; i++ {
 			delay *= 2
 		}
+		defer requestprofile.Start(c.Request.Context(), "retry_backoff")()
 		timer := time.NewTimer(delay)
 		defer timer.Stop()
 		select {
