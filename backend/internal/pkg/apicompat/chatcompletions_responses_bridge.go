@@ -53,14 +53,17 @@ func ResponsesToChatCompletionsRequestWithOptions(req *ResponsesRequest, opts *R
 	}
 
 	out := &ChatCompletionsRequest{
-		Model:               req.Model,
-		Messages:            messages,
-		MaxCompletionTokens: req.MaxOutputTokens,
-		Temperature:         req.Temperature,
-		TopP:                req.TopP,
-		Stream:              req.Stream,
-		ServiceTier:         req.ServiceTier,
-		ParallelToolCalls:   req.ParallelToolCalls,
+		PromptCacheKey:       req.PromptCacheKey,
+		PromptCacheOptions:   append(json.RawMessage(nil), req.PromptCacheOptions...),
+		PromptCacheRetention: req.PromptCacheRetention,
+		Model:                req.Model,
+		Messages:             messages,
+		MaxCompletionTokens:  req.MaxOutputTokens,
+		Temperature:          req.Temperature,
+		TopP:                 req.TopP,
+		Stream:               req.Stream,
+		ServiceTier:          req.ServiceTier,
+		ParallelToolCalls:    req.ParallelToolCalls,
 	}
 	if req.Reasoning != nil {
 		out.ReasoningEffort = req.Reasoning.Effort
@@ -503,6 +506,15 @@ func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessa
 			}
 			delete(mediaByCallID, callID)
 
+			if hasCacheBoundary(outputRaw) {
+				content, err := convertCacheMarkedContent(outputRaw, false, "tool")
+				if err != nil {
+					return nil, nil, err
+				}
+				messages = append(messages, ChatMessage{Role: "tool", ToolCallID: callID, Content: content})
+				pendingReasoning = ""
+				continue
+			}
 			outputText, media, rewritten := extractToolOutputMedia(outputRaw)
 			if rewritten {
 				if callID != "" {
@@ -556,6 +568,9 @@ func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessa
 			if text := rawString(item["text"]); text != "" {
 				content, _ = json.Marshal(text)
 			}
+		}
+		if hasCacheBoundary(content) && rawString(item["role"]) == "developer" {
+			role = "developer"
 		}
 		chatContent, err := responsesContentToChatContent(content, role)
 		if err != nil {
@@ -900,6 +915,9 @@ func chatCompletionsBridgeRole(role string) string {
 }
 
 func responsesContentToChatContent(raw json.RawMessage, role string) (json.RawMessage, error) {
+	if hasCacheBoundary(raw) {
+		return convertCacheMarkedContent(raw, false, role)
+	}
 	raw = bytesTrimSpace(raw)
 	if len(raw) == 0 || string(raw) == "null" {
 		empty, _ := json.Marshal("")

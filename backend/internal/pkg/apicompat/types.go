@@ -226,23 +226,25 @@ type AnthropicDelta struct {
 
 // ResponsesRequest is the request body for POST /v1/responses.
 type ResponsesRequest struct {
-	Model              string              `json:"model"`
-	Instructions       string              `json:"instructions,omitempty"`
-	Input              json.RawMessage     `json:"input"` // string or []ResponsesInputItem
-	MaxOutputTokens    *int                `json:"max_output_tokens,omitempty"`
-	Temperature        *float64            `json:"temperature,omitempty"`
-	TopP               *float64            `json:"top_p,omitempty"`
-	Stream             bool                `json:"stream,omitempty"`
-	Tools              []ResponsesTool     `json:"tools,omitempty"`
-	Include            []string            `json:"include,omitempty"`
-	Store              *bool               `json:"store,omitempty"`
-	ParallelToolCalls  *bool               `json:"parallel_tool_calls,omitempty"`
-	Reasoning          *ResponsesReasoning `json:"reasoning,omitempty"`
-	Text               *ResponsesText      `json:"text,omitempty"`
-	ToolChoice         json.RawMessage     `json:"tool_choice,omitempty"`
-	ServiceTier        string              `json:"service_tier,omitempty"`
-	PromptCacheKey     string              `json:"prompt_cache_key,omitempty"`
-	PreviousResponseID string              `json:"previous_response_id,omitempty"`
+	PromptCacheOptions   json.RawMessage     `json:"prompt_cache_options,omitempty"`
+	PromptCacheRetention string              `json:"prompt_cache_retention,omitempty"`
+	Model                string              `json:"model"`
+	Instructions         string              `json:"instructions,omitempty"`
+	Input                json.RawMessage     `json:"input"` // string or []ResponsesInputItem
+	MaxOutputTokens      *int                `json:"max_output_tokens,omitempty"`
+	Temperature          *float64            `json:"temperature,omitempty"`
+	TopP                 *float64            `json:"top_p,omitempty"`
+	Stream               bool                `json:"stream,omitempty"`
+	Tools                []ResponsesTool     `json:"tools,omitempty"`
+	Include              []string            `json:"include,omitempty"`
+	Store                *bool               `json:"store,omitempty"`
+	ParallelToolCalls    *bool               `json:"parallel_tool_calls,omitempty"`
+	Reasoning            *ResponsesReasoning `json:"reasoning,omitempty"`
+	Text                 *ResponsesText      `json:"text,omitempty"`
+	ToolChoice           json.RawMessage     `json:"tool_choice,omitempty"`
+	ServiceTier          string              `json:"service_tier,omitempty"`
+	PromptCacheKey       string              `json:"prompt_cache_key,omitempty"`
+	PreviousResponseID   string              `json:"previous_response_id,omitempty"`
 }
 
 // ResponsesReasoning configures reasoning effort in the Responses API.
@@ -277,8 +279,9 @@ type ResponsesInputItem struct {
 	ID        string `json:"id,omitempty"`
 
 	// type=function_call_output
-	Output    string `json:"output,omitempty"`
-	outputRaw json.RawMessage
+	Output      string `json:"output,omitempty"`
+	outputRaw   json.RawMessage
+	cacheOutput json.RawMessage
 }
 
 func (i *ResponsesInputItem) UnmarshalJSON(data []byte) error {
@@ -303,15 +306,19 @@ func (i *ResponsesInputItem) UnmarshalJSON(data []byte) error {
 	}
 
 	i.outputRaw = append(i.outputRaw[:0], output...)
+	if hasCacheBoundary(output) {
+		i.cacheOutput = append(json.RawMessage(nil), output...)
+	}
 	i.Output = string(output)
 	return nil
 }
 
 // ResponsesContentPart is a typed content part in a Responses message.
 type ResponsesContentPart struct {
-	Type     string `json:"type"` // "input_text" | "output_text" | "input_image" | "input_file"
-	Text     string `json:"text,omitempty"`
-	ImageURL string `json:"image_url,omitempty"` // data URI for input_image
+	PromptCacheBreakpoint json.RawMessage `json:"prompt_cache_breakpoint,omitempty"`
+	Type                  string          `json:"type"` // "input_text" | "output_text" | "input_image" | "input_file"
+	Text                  string          `json:"text,omitempty"`
+	ImageURL              string          `json:"image_url,omitempty"` // data URI for input_image
 
 	// input_file fields.
 	Filename string `json:"filename,omitempty"`
@@ -652,22 +659,25 @@ type ResponsesStreamEvent struct {
 
 // ChatCompletionsRequest is the request body for POST /v1/chat/completions.
 type ChatCompletionsRequest struct {
-	Model               string             `json:"model"`
-	Messages            []ChatMessage      `json:"messages"`
-	Instructions        string             `json:"instructions,omitempty"` // OpenAI Responses API compat
-	MaxTokens           *int               `json:"max_tokens,omitempty"`
-	MaxCompletionTokens *int               `json:"max_completion_tokens,omitempty"`
-	Temperature         *float64           `json:"temperature,omitempty"`
-	TopP                *float64           `json:"top_p,omitempty"`
-	Stream              bool               `json:"stream,omitempty"`
-	StreamOptions       *ChatStreamOptions `json:"stream_options,omitempty"`
-	Tools               []ChatTool         `json:"tools,omitempty"`
-	ParallelToolCalls   *bool              `json:"parallel_tool_calls,omitempty"`
-	ToolChoice          json.RawMessage    `json:"tool_choice,omitempty"`
-	ReasoningEffort     string             `json:"reasoning_effort,omitempty"` // "low" | "medium" | "high" | "xhigh"
-	ServiceTier         string             `json:"service_tier,omitempty"`
-	Stop                json.RawMessage    `json:"stop,omitempty"` // string or []string
-	ResponseFormat      json.RawMessage    `json:"response_format,omitempty"`
+	PromptCacheKey       string             `json:"prompt_cache_key,omitempty"`
+	PromptCacheOptions   json.RawMessage    `json:"prompt_cache_options,omitempty"`
+	PromptCacheRetention string             `json:"prompt_cache_retention,omitempty"`
+	Model                string             `json:"model"`
+	Messages             []ChatMessage      `json:"messages"`
+	Instructions         string             `json:"instructions,omitempty"` // OpenAI Responses API compat
+	MaxTokens            *int               `json:"max_tokens,omitempty"`
+	MaxCompletionTokens  *int               `json:"max_completion_tokens,omitempty"`
+	Temperature          *float64           `json:"temperature,omitempty"`
+	TopP                 *float64           `json:"top_p,omitempty"`
+	Stream               bool               `json:"stream,omitempty"`
+	StreamOptions        *ChatStreamOptions `json:"stream_options,omitempty"`
+	Tools                []ChatTool         `json:"tools,omitempty"`
+	ParallelToolCalls    *bool              `json:"parallel_tool_calls,omitempty"`
+	ToolChoice           json.RawMessage    `json:"tool_choice,omitempty"`
+	ReasoningEffort      string             `json:"reasoning_effort,omitempty"` // "low" | "medium" | "high" | "xhigh"
+	ServiceTier          string             `json:"service_tier,omitempty"`
+	Stop                 json.RawMessage    `json:"stop,omitempty"` // string or []string
+	ResponseFormat       json.RawMessage    `json:"response_format,omitempty"`
 
 	// Legacy function calling (deprecated but still supported)
 	Functions    []ChatFunction  `json:"functions,omitempty"`
@@ -695,10 +705,11 @@ type ChatMessage struct {
 
 // ChatContentPart is a typed content part in a multi-modal message.
 type ChatContentPart struct {
-	Type     string        `json:"type"` // "text" | "image_url" | "file"
-	Text     string        `json:"text,omitempty"`
-	ImageURL *ChatImageURL `json:"image_url,omitempty"`
-	File     *ChatFile     `json:"file,omitempty"`
+	PromptCacheBreakpoint json.RawMessage `json:"prompt_cache_breakpoint,omitempty"`
+	Type                  string          `json:"type"` // "text" | "image_url" | "file"
+	Text                  string          `json:"text,omitempty"`
+	ImageURL              *ChatImageURL   `json:"image_url,omitempty"`
+	File                  *ChatFile       `json:"file,omitempty"`
 }
 
 // ChatImageURL contains the URL for an image content part.
@@ -848,3 +859,15 @@ func (d ChatDelta) reasoningText() *string {
 // minMaxOutputTokens is the floor for max_output_tokens in a Responses request.
 // Very small values may cause upstream API errors, so we enforce a minimum.
 const minMaxOutputTokens = 128
+
+// Only newly preserved marked tool outputs use a structured wire output.
+func (i ResponsesInputItem) MarshalJSON() ([]byte, error) {
+	type alias ResponsesInputItem
+	if len(i.cacheOutput) == 0 {
+		return json.Marshal(alias(i))
+	}
+	return json.Marshal(struct {
+		*alias
+		Output json.RawMessage `json:"output"`
+	}{alias: (*alias)(&i), Output: i.cacheOutput})
+}
