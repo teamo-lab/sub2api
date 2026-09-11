@@ -30,19 +30,30 @@ def inspect(name):
     return json.loads(result.stdout)[0] if result.returncode == 0 else None
 
 
-def app_container():
+def container_has_program(name, program):
+    result = subprocess.run(
+        ['docker', 'exec', name, 'sh', '-c', 'command -v "$1" >/dev/null 2>&1', 'sh', program],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return result.returncode == 0
+
+
+def app_container(required_program=None):
     for name in ['sub2api-worker', 'sub2api-blue', 'sub2api-green', os.environ.get('SUB2API_LEGACY_CONTAINER', 'sub2api')]:
         data = inspect(name)
-        if data and data['State']['Running'] and data['State'].get('Health', {}).get('Status') == 'healthy':
+        healthy = data and data['State']['Running'] and data['State'].get('Health', {}).get('Status') == 'healthy'
+        if healthy and (not required_program or container_has_program(name, required_program)):
             return name, dict(item.split('=', 1) for item in data['Config']['Env'] if '=' in item)
-    raise RuntimeError('no healthy application container')
+    requirement = f' with {required_program}' if required_program else ''
+    raise RuntimeError(f'no healthy application container{requirement}')
 
 
 def db_command(program, args):
     if program not in {'psql', 'pg_dump'}:
         raise RuntimeError('unsupported database command')
     if os.environ.get('SUB2API_DEPENDENCY_MODE') == 'external':
-        name, env = app_container()
+        name, env = app_container(program)
         if not all(env.get(k) for k in ('DATABASE_HOST', 'DATABASE_USER', 'DATABASE_PASSWORD')):
             raise RuntimeError('database configuration incomplete')
         shell = 'export PGPASSWORD="$DATABASE_PASSWORD" PGSSLMODE="${DATABASE_SSLMODE:-disable}"; exec "$@" -h "$DATABASE_HOST" -p "${DATABASE_PORT:-5432}" -U "$DATABASE_USER" -d "${DATABASE_DBNAME:-${DATABASE_NAME:-sub2api}}"'
