@@ -159,7 +159,8 @@ func TestCursorMixedShape_JSONRoundtrip(t *testing.T) {
 // prompt_cache_retention, safety_identifier, metadata and stream_options
 // as top-level Responses API parameters, which Codex upstreams reject with
 // "Unsupported parameter: ...". The fix must remove them from the raw body
-// before it is forwarded, for BOTH OAuth and API Key account types.
+// before it is forwarded to Codex. Public API-key cache retention is covered
+// by TestAPIKeyChatForwardPreservesCacheControls.
 func TestCursorMixedShape_StripsUnsupportedFields(t *testing.T) {
 	cursorBody := []byte(`{
 		"model": "gpt-5.4",

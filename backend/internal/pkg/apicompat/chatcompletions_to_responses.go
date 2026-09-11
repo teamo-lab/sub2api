@@ -27,13 +27,16 @@ func ChatCompletionsToResponses(req *ChatCompletionsRequest) (*ResponsesRequest,
 	}
 
 	out := &ResponsesRequest{
-		Model:             req.Model,
-		Instructions:      req.Instructions,
-		Input:             inputJSON,
-		Stream:            true, // upstream always streams
-		Include:           []string{"reasoning.encrypted_content"},
-		ServiceTier:       req.ServiceTier,
-		ParallelToolCalls: req.ParallelToolCalls,
+		PromptCacheKey:       req.PromptCacheKey,
+		PromptCacheOptions:   append(json.RawMessage(nil), req.PromptCacheOptions...),
+		PromptCacheRetention: req.PromptCacheRetention,
+		Model:                req.Model,
+		Instructions:         req.Instructions,
+		Input:                inputJSON,
+		Stream:               true, // upstream always streams
+		Include:              []string{"reasoning.encrypted_content"},
+		ServiceTier:          req.ServiceTier,
+		ParallelToolCalls:    req.ParallelToolCalls,
 	}
 
 	// Reasoning models (gpt-5.x) do not accept sampling parameters.
@@ -115,7 +118,7 @@ func convertChatMessagesToResponsesInput(msgs []ChatMessage) ([]ResponsesInputIt
 // ResponsesInputItem values.
 func chatMessageToResponsesItems(m ChatMessage) ([]ResponsesInputItem, error) {
 	switch m.Role {
-	case "system":
+	case "system", "developer":
 		return chatSystemToResponses(m)
 	case "user":
 		return chatUserToResponses(m)
@@ -132,6 +135,13 @@ func chatMessageToResponsesItems(m ChatMessage) ([]ResponsesInputItem, error) {
 
 // chatSystemToResponses converts a system message.
 func chatSystemToResponses(m ChatMessage) ([]ResponsesInputItem, error) {
+	if hasCacheBoundary(m.Content) {
+		content, err := convertCacheMarkedContent(m.Content, true, m.Role)
+		if err != nil {
+			return nil, err
+		}
+		return []ResponsesInputItem{{Role: m.Role, Content: content}}, nil
+	}
 	parsed, err := parseChatMessageContent(m.Content)
 	if err != nil {
 		return nil, err
@@ -140,12 +150,19 @@ func chatSystemToResponses(m ChatMessage) ([]ResponsesInputItem, error) {
 	if err != nil {
 		return nil, err
 	}
-	return []ResponsesInputItem{{Role: "system", Content: content}}, nil
+	return []ResponsesInputItem{{Role: m.Role, Content: content}}, nil
 }
 
 // chatUserToResponses converts a user message, handling both plain strings and
 // multi-modal content arrays.
 func chatUserToResponses(m ChatMessage) ([]ResponsesInputItem, error) {
+	if hasCacheBoundary(m.Content) {
+		content, err := convertCacheMarkedContent(m.Content, true, "user")
+		if err != nil {
+			return nil, err
+		}
+		return []ResponsesInputItem{{Role: "user", Content: content}}, nil
+	}
 	parsed, err := parseChatMessageContent(m.Content)
 	if err != nil {
 		return nil, fmt.Errorf("parse user content: %w", err)
@@ -170,7 +187,25 @@ func chatAssistantToResponses(m ChatMessage) ([]ResponsesInputItem, error) {
 	}
 
 	// Emit assistant message with output_text if content is non-empty.
-	if len(m.Content) > 0 {
+	if hasCacheBoundary(m.Content) {
+		marked, err := convertCacheMarkedContent(m.Content, true, "assistant")
+		if err != nil {
+			return nil, err
+		}
+		if content != "" {
+			var parts []json.RawMessage
+			if err := json.Unmarshal(marked, &parts); err != nil {
+				return nil, err
+			}
+			prefix, _ := json.Marshal(ResponsesContentPart{Type: "output_text", Text: content + "\n"})
+			marked, err = json.Marshal(append([]json.RawMessage{prefix}, parts...))
+			if err != nil {
+				return nil, err
+			}
+		}
+		items = append(items, ResponsesInputItem{Role: "assistant", Content: marked})
+		content = ""
+	} else if len(m.Content) > 0 {
 		s, err := parseAssistantContent(m.Content)
 		if err != nil {
 			return nil, err
@@ -282,6 +317,13 @@ func parseAssistantContent(raw json.RawMessage) (string, error) {
 // chatToolToResponses converts a tool result message (role=tool) into a
 // function_call_output item.
 func chatToolToResponses(m ChatMessage) ([]ResponsesInputItem, error) {
+	if hasCacheBoundary(m.Content) {
+		raw, err := convertCacheMarkedContent(m.Content, true, "tool")
+		if err != nil {
+			return nil, err
+		}
+		return []ResponsesInputItem{{Type: "function_call_output", CallID: m.ToolCallID, cacheOutput: raw}}, nil
+	}
 	output, err := parseChatContent(m.Content)
 	if err != nil {
 		return nil, err
@@ -367,8 +409,9 @@ func convertChatContentPartsToResponses(parts []ChatContentPart) []ResponsesCont
 		case "text":
 			if p.Text != "" {
 				responseParts = append(responseParts, ResponsesContentPart{
-					Type: "input_text",
-					Text: p.Text,
+					Type:                  "input_text",
+					Text:                  p.Text,
+					PromptCacheBreakpoint: append(json.RawMessage(nil), p.PromptCacheBreakpoint...),
 				})
 			}
 		case "image_url":
