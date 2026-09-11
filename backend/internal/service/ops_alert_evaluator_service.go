@@ -217,7 +217,7 @@ func (s *OpsAlertEvaluatorService) evaluateOnce(interval time.Duration) {
 		}
 		rulesEnabled++
 
-		scopePlatform, scopeGroupID, scopeRegion := parseOpsAlertRuleScope(rule.Filters)
+		scopePlatform, scopeGroupID, scopeAccountID, scopeRegion := parseOpsAlertRuleScope(rule.Filters)
 
 		windowMinutes := rule.WindowMinutes
 		if windowMinutes <= 0 {
@@ -226,7 +226,7 @@ func (s *OpsAlertEvaluatorService) evaluateOnce(interval time.Duration) {
 		windowStart := safeEnd.Add(-time.Duration(windowMinutes) * time.Minute)
 		windowEnd := safeEnd
 
-		metricValue, ok := s.computeRuleMetric(ctx, rule, systemMetrics, windowStart, windowEnd, scopePlatform, scopeGroupID)
+		metricValue, ok := s.computeRuleMetric(ctx, rule, systemMetrics, windowStart, windowEnd, scopePlatform, scopeGroupID, scopeAccountID)
 		if !ok {
 			s.resetRuleState(rule.ID, now)
 			continue
@@ -276,10 +276,10 @@ func (s *OpsAlertEvaluatorService) evaluateOnce(interval time.Duration) {
 				Severity:       strings.TrimSpace(rule.Severity),
 				Status:         OpsAlertStatusFiring,
 				Title:          fmt.Sprintf("%s: %s", strings.TrimSpace(rule.Severity), strings.TrimSpace(rule.Name)),
-				Description:    buildOpsAlertDescription(rule, metricValue, windowMinutes, scopePlatform, scopeGroupID),
+				Description:    buildOpsAlertDescription(rule, metricValue, windowMinutes, scopePlatform, scopeGroupID, scopeAccountID),
 				MetricValue:    float64Ptr(metricValue),
 				ThresholdValue: float64Ptr(rule.Threshold),
-				Dimensions:     buildOpsAlertDimensions(scopePlatform, scopeGroupID),
+				Dimensions:     buildOpsAlertDimensions(scopePlatform, scopeGroupID, scopeAccountID),
 				FiredAt:        now,
 				CreatedAt:      now,
 			}
@@ -388,9 +388,9 @@ func requiredSustainedBreaches(sustainedMinutes int, interval time.Duration) int
 	return required
 }
 
-func parseOpsAlertRuleScope(filters map[string]any) (platform string, groupID *int64, region *string) {
+func parseOpsAlertRuleScope(filters map[string]any) (platform string, groupID *int64, accountID *int64, region *string) {
 	if filters == nil {
-		return "", nil, nil
+		return "", nil, nil, nil
 	}
 	if v, ok := filters["platform"]; ok {
 		if s, ok := v.(string); ok {
@@ -398,28 +398,10 @@ func parseOpsAlertRuleScope(filters map[string]any) (platform string, groupID *i
 		}
 	}
 	if v, ok := filters["group_id"]; ok {
-		switch t := v.(type) {
-		case float64:
-			if t > 0 {
-				id := int64(t)
-				groupID = &id
-			}
-		case int64:
-			if t > 0 {
-				id := t
-				groupID = &id
-			}
-		case int:
-			if t > 0 {
-				id := int64(t)
-				groupID = &id
-			}
-		case string:
-			n, err := strconv.ParseInt(strings.TrimSpace(t), 10, 64)
-			if err == nil && n > 0 {
-				groupID = &n
-			}
-		}
+		groupID = parseOpsAlertPositiveInt(v)
+	}
+	if v, ok := filters["account_id"]; ok {
+		accountID = parseOpsAlertPositiveInt(v)
 	}
 	if v, ok := filters["region"]; ok {
 		if s, ok := v.(string); ok {
@@ -429,7 +411,25 @@ func parseOpsAlertRuleScope(filters map[string]any) (platform string, groupID *i
 			}
 		}
 	}
-	return platform, groupID, region
+	return platform, groupID, accountID, region
+}
+
+func parseOpsAlertPositiveInt(value any) *int64 {
+	var parsed int64
+	switch typed := value.(type) {
+	case float64:
+		parsed = int64(typed)
+	case int64:
+		parsed = typed
+	case int:
+		parsed = int64(typed)
+	case string:
+		parsed, _ = strconv.ParseInt(strings.TrimSpace(typed), 10, 64)
+	}
+	if parsed <= 0 {
+		return nil
+	}
+	return &parsed
 }
 
 func (s *OpsAlertEvaluatorService) computeRuleMetric(
@@ -440,8 +440,12 @@ func (s *OpsAlertEvaluatorService) computeRuleMetric(
 	end time.Time,
 	platform string,
 	groupID *int64,
+	accountID *int64,
 ) (float64, bool) {
 	if rule == nil {
+		return 0, false
+	}
+	if accountID != nil && !supportsAccountScopedAlertMetric(rule.MetricType) {
 		return 0, false
 	}
 	switch strings.TrimSpace(rule.MetricType) {
@@ -588,6 +592,7 @@ func (s *OpsAlertEvaluatorService) computeRuleMetric(
 		EndTime:   end,
 		Platform:  platform,
 		GroupID:   groupID,
+		AccountID: accountID,
 		QueryMode: OpsQueryModeRaw,
 	})
 	if err != nil {
@@ -618,6 +623,15 @@ func (s *OpsAlertEvaluatorService) computeRuleMetric(
 	}
 }
 
+func supportsAccountScopedAlertMetric(metricType string) bool {
+	switch strings.TrimSpace(metricType) {
+	case "success_rate", "error_rate", "upstream_error_rate":
+		return true
+	default:
+		return false
+	}
+}
+
 func compareMetric(value float64, operator string, threshold float64) bool {
 	switch strings.TrimSpace(operator) {
 	case ">":
@@ -637,7 +651,7 @@ func compareMetric(value float64, operator string, threshold float64) bool {
 	}
 }
 
-func buildOpsAlertDimensions(platform string, groupID *int64) map[string]any {
+func buildOpsAlertDimensions(platform string, groupID *int64, accountID *int64) map[string]any {
 	dims := map[string]any{}
 	if strings.TrimSpace(platform) != "" {
 		dims["platform"] = strings.TrimSpace(platform)
@@ -645,13 +659,16 @@ func buildOpsAlertDimensions(platform string, groupID *int64) map[string]any {
 	if groupID != nil && *groupID > 0 {
 		dims["group_id"] = *groupID
 	}
+	if accountID != nil && *accountID > 0 {
+		dims["account_id"] = *accountID
+	}
 	if len(dims) == 0 {
 		return nil
 	}
 	return dims
 }
 
-func buildOpsAlertDescription(rule *OpsAlertRule, value float64, windowMinutes int, platform string, groupID *int64) string {
+func buildOpsAlertDescription(rule *OpsAlertRule, value float64, windowMinutes int, platform string, groupID *int64, accountID *int64) string {
 	if rule == nil {
 		return ""
 	}
@@ -661,6 +678,9 @@ func buildOpsAlertDescription(rule *OpsAlertRule, value float64, windowMinutes i
 	}
 	if groupID != nil && *groupID > 0 {
 		scope = fmt.Sprintf("%s group_id=%d", scope, *groupID)
+	}
+	if accountID != nil && *accountID > 0 {
+		scope = fmt.Sprintf("%s account_id=%d", scope, *accountID)
 	}
 	if windowMinutes <= 0 {
 		windowMinutes = 1

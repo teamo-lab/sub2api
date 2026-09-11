@@ -6,9 +6,10 @@ type OpsDashboardFilter struct {
 	StartTime time.Time
 	EndTime   time.Time
 
-	Platform string
-	GroupID  *int64
-	Model    string
+	Platform  string
+	GroupID   *int64
+	AccountID *int64
+	Model     string
 
 	// QueryMode controls whether dashboard queries should use raw logs or pre-aggregated tables.
 	// Expected values: auto/raw/preagg (see OpsQueryMode).
@@ -35,6 +36,7 @@ type OpsDashboardOverview struct {
 	EndTime   time.Time `json:"end_time"`
 	Platform  string    `json:"platform"`
 	GroupID   *int64    `json:"group_id"`
+	AccountID *int64    `json:"account_id,omitempty"`
 
 	// HealthScore is a backend-computed overall health score (0-100).
 	// It is derived from the monitored metrics in this overview, plus best-effort system metrics/job heartbeats.
@@ -82,6 +84,7 @@ type OpsLatencyHistogramResponse struct {
 	EndTime   time.Time `json:"end_time"`
 	Platform  string    `json:"platform"`
 	GroupID   *int64    `json:"group_id"`
+	AccountID *int64    `json:"account_id,omitempty"`
 
 	TotalRequests int64                        `json:"total_requests"`
 	Buckets       []*OpsLatencyHistogramBucket `json:"buckets"`

@@ -18,24 +18,12 @@ func (h *OpsHandler) GetDashboardModels(c *gin.Context) {
 		response.Error(c, http.StatusServiceUnavailable, "Ops service not available")
 		return
 	}
-	startTime, endTime, err := parseOpsTimeRange(c, "1h")
+	filter, err := parseOpsDashboardFilter(c, "1h")
 	if err != nil {
 		response.BadRequest(c, err.Error())
 		return
 	}
-	filter := &service.OpsDashboardFilter{
-		StartTime: startTime,
-		EndTime:   endTime,
-		Platform:  strings.TrimSpace(c.Query("platform")),
-	}
-	if v := strings.TrimSpace(c.Query("group_id")); v != "" {
-		id, err := strconv.ParseInt(v, 10, 64)
-		if err != nil || id <= 0 {
-			response.BadRequest(c, "Invalid group_id")
-			return
-		}
-		filter.GroupID = &id
-	}
+	filter.Model = ""
 	models, err := h.opsService.ListDashboardModels(c.Request.Context(), filter)
 	if err != nil {
 		response.ErrorFrom(c, err)
@@ -56,27 +44,11 @@ func (h *OpsHandler) GetDashboardOverview(c *gin.Context) {
 		return
 	}
 
-	startTime, endTime, err := parseOpsTimeRange(c, "1h")
+	filter, err := parseOpsDashboardFilter(c, "1h")
 	if err != nil {
 		response.BadRequest(c, err.Error())
 		return
 	}
-	filter := &service.OpsDashboardFilter{
-		StartTime: startTime,
-		EndTime:   endTime,
-		Platform:  strings.TrimSpace(c.Query("platform")),
-		Model:     strings.TrimSpace(c.Query("model")),
-		QueryMode: parseOpsQueryMode(c),
-	}
-	if v := strings.TrimSpace(c.Query("group_id")); v != "" {
-		id, err := strconv.ParseInt(v, 10, 64)
-		if err != nil || id <= 0 {
-			response.BadRequest(c, "Invalid group_id")
-			return
-		}
-		filter.GroupID = &id
-	}
-
 	data, err := h.opsService.GetDashboardOverview(c.Request.Context(), filter)
 	if err != nil {
 		response.ErrorFrom(c, err)
@@ -97,28 +69,12 @@ func (h *OpsHandler) GetDashboardThroughputTrend(c *gin.Context) {
 		return
 	}
 
-	startTime, endTime, err := parseOpsTimeRange(c, "1h")
+	filter, err := parseOpsDashboardFilter(c, "1h")
 	if err != nil {
 		response.BadRequest(c, err.Error())
 		return
 	}
-	filter := &service.OpsDashboardFilter{
-		StartTime: startTime,
-		EndTime:   endTime,
-		Platform:  strings.TrimSpace(c.Query("platform")),
-		Model:     strings.TrimSpace(c.Query("model")),
-		QueryMode: parseOpsQueryMode(c),
-	}
-	if v := strings.TrimSpace(c.Query("group_id")); v != "" {
-		id, err := strconv.ParseInt(v, 10, 64)
-		if err != nil || id <= 0 {
-			response.BadRequest(c, "Invalid group_id")
-			return
-		}
-		filter.GroupID = &id
-	}
-
-	bucketSeconds := pickThroughputBucketSeconds(endTime.Sub(startTime))
+	bucketSeconds := pickThroughputBucketSeconds(filter.EndTime.Sub(filter.StartTime))
 	data, err := h.opsService.GetThroughputTrend(c.Request.Context(), filter, bucketSeconds)
 	if err != nil {
 		response.ErrorFrom(c, err)
@@ -139,27 +95,11 @@ func (h *OpsHandler) GetDashboardLatencyHistogram(c *gin.Context) {
 		return
 	}
 
-	startTime, endTime, err := parseOpsTimeRange(c, "1h")
+	filter, err := parseOpsDashboardFilter(c, "1h")
 	if err != nil {
 		response.BadRequest(c, err.Error())
 		return
 	}
-	filter := &service.OpsDashboardFilter{
-		StartTime: startTime,
-		EndTime:   endTime,
-		Platform:  strings.TrimSpace(c.Query("platform")),
-		Model:     strings.TrimSpace(c.Query("model")),
-		QueryMode: parseOpsQueryMode(c),
-	}
-	if v := strings.TrimSpace(c.Query("group_id")); v != "" {
-		id, err := strconv.ParseInt(v, 10, 64)
-		if err != nil || id <= 0 {
-			response.BadRequest(c, "Invalid group_id")
-			return
-		}
-		filter.GroupID = &id
-	}
-
 	data, err := h.opsService.GetLatencyHistogram(c.Request.Context(), filter)
 	if err != nil {
 		response.ErrorFrom(c, err)
@@ -180,28 +120,12 @@ func (h *OpsHandler) GetDashboardErrorTrend(c *gin.Context) {
 		return
 	}
 
-	startTime, endTime, err := parseOpsTimeRange(c, "1h")
+	filter, err := parseOpsDashboardFilter(c, "1h")
 	if err != nil {
 		response.BadRequest(c, err.Error())
 		return
 	}
-	filter := &service.OpsDashboardFilter{
-		StartTime: startTime,
-		EndTime:   endTime,
-		Platform:  strings.TrimSpace(c.Query("platform")),
-		Model:     strings.TrimSpace(c.Query("model")),
-		QueryMode: parseOpsQueryMode(c),
-	}
-	if v := strings.TrimSpace(c.Query("group_id")); v != "" {
-		id, err := strconv.ParseInt(v, 10, 64)
-		if err != nil || id <= 0 {
-			response.BadRequest(c, "Invalid group_id")
-			return
-		}
-		filter.GroupID = &id
-	}
-
-	bucketSeconds := pickThroughputBucketSeconds(endTime.Sub(startTime))
+	bucketSeconds := pickThroughputBucketSeconds(filter.EndTime.Sub(filter.StartTime))
 	data, err := h.opsService.GetErrorTrend(c.Request.Context(), filter, bucketSeconds)
 	if err != nil {
 		response.ErrorFrom(c, err)
@@ -222,27 +146,11 @@ func (h *OpsHandler) GetDashboardErrorDistribution(c *gin.Context) {
 		return
 	}
 
-	startTime, endTime, err := parseOpsTimeRange(c, "1h")
+	filter, err := parseOpsDashboardFilter(c, "1h")
 	if err != nil {
 		response.BadRequest(c, err.Error())
 		return
 	}
-	filter := &service.OpsDashboardFilter{
-		StartTime: startTime,
-		EndTime:   endTime,
-		Platform:  strings.TrimSpace(c.Query("platform")),
-		Model:     strings.TrimSpace(c.Query("model")),
-		QueryMode: parseOpsQueryMode(c),
-	}
-	if v := strings.TrimSpace(c.Query("group_id")); v != "" {
-		id, err := strconv.ParseInt(v, 10, 64)
-		if err != nil || id <= 0 {
-			response.BadRequest(c, "Invalid group_id")
-			return
-		}
-		filter.GroupID = &id
-	}
-
 	data, err := h.opsService.GetErrorDistribution(c.Request.Context(), filter)
 	if err != nil {
 		response.ErrorFrom(c, err)
@@ -382,4 +290,35 @@ func parseOpsQueryMode(c *gin.Context) service.OpsQueryMode {
 		return ""
 	}
 	return service.ParseOpsQueryMode(raw)
+}
+
+func parseOpsDashboardFilter(c *gin.Context, defaultTimeRange string) (*service.OpsDashboardFilter, error) {
+	startTime, endTime, err := parseOpsTimeRange(c, defaultTimeRange)
+	if err != nil {
+		return nil, err
+	}
+
+	filter := &service.OpsDashboardFilter{
+		StartTime: startTime,
+		EndTime:   endTime,
+		Platform:  strings.TrimSpace(c.Query("platform")),
+		Model:     strings.TrimSpace(c.Query("model")),
+		QueryMode: parseOpsQueryMode(c),
+	}
+	if v := strings.TrimSpace(c.Query("group_id")); v != "" {
+		id, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || id <= 0 {
+			return nil, fmt.Errorf("Invalid group_id")
+		}
+		filter.GroupID = &id
+	}
+	if v := strings.TrimSpace(c.Query("account_id")); v != "" {
+		id, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || id <= 0 {
+			return nil, fmt.Errorf("Invalid account_id")
+		}
+		filter.AccountID = &id
+		filter.QueryMode = service.OpsQueryModeRaw
+	}
+	return filter, nil
 }

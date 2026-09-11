@@ -23,7 +23,7 @@ func (s *OpsService) GetThroughputTrend(ctx context.Context, filter *OpsDashboar
 		return nil, infraerrors.BadRequest("OPS_TIME_RANGE_INVALID", "start_time must be <= end_time")
 	}
 
-	filter.QueryMode = s.resolveOpsQueryMode(ctx, filter.QueryMode)
+	filter.QueryMode = s.resolveOpsFilterQueryMode(ctx, filter)
 
 	result, err := s.opsRepo.GetThroughputTrend(ctx, filter, bucketSeconds)
 	if err != nil && shouldFallbackOpsPreagg(filter, err) {

@@ -78,6 +78,7 @@ ORDER BY 3 ASC`
 		EndTime:       end,
 		Platform:      strings.TrimSpace(filter.Platform),
 		GroupID:       filter.GroupID,
+		AccountID:     filter.AccountID,
 		TotalRequests: total,
 		Buckets:       buckets,
 	}, nil

@@ -19,6 +19,7 @@ export interface OpsDashboardFilterParams {
   end_time?: string
   platform?: string
   group_id?: number | null
+  account_id?: number | null
   model?: string
   mode?: OpsQueryMode
 }
@@ -90,6 +91,10 @@ export interface OpsThroughputTrendPoint {
   bucket_start: string
   request_count: number
   token_consumed: number
+  input_tokens?: number
+  output_tokens?: number
+  cache_creation_tokens?: number
+  cache_read_tokens?: number
   switch_count?: number
   qps: number
   tps: number
@@ -1183,6 +1188,7 @@ export interface AlertEventsQuery {
   before_id?: number
   platform?: string
   group_id?: number
+  account_id?: number
 }
 
 export async function listAlertEvents(params: AlertEventsQuery = {}): Promise<AlertEvent[]> {
