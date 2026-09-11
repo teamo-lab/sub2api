@@ -37,12 +37,15 @@ type Sink interface {
 }
 
 type LogEvent struct {
-	Time       time.Time
-	Level      string
-	Component  string
-	Message    string
-	LoggerName string
-	Fields     map[string]any
+	// Internal bounded-sink representation; never emitted to console.
+	EncodedFields     []byte `json:"-"`
+	ProfileQueueBytes int64  `json:"-"`
+	Time              time.Time
+	Level             string
+	Component         string
+	Message           string
+	LoggerName        string
+	Fields            map[string]any
 }
 
 var (

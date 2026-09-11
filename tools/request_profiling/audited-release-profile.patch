@@ -1,0 +1,9 @@
+--- a/sub2api-release
++++ b/sub2api-release
+@@ -6,0 +7,3 @@
++profile_enabled="${SUB2API_RELEASE_PROFILE_ENABLED-inherit}"
++profile_groups="${SUB2API_RELEASE_PROFILE_GROUP_IDS-inherit}"
++profile_retention="${SUB2API_RELEASE_PROFILE_RETENTION_HOURS-inherit}"
+@@ -185 +188 @@
+-    remote_command=$(printf '%q ' "$remote_root/bin/sub2api-stage-source-release" "$release_id" "$version" "$commit" "$remote_archive" "$official_mode" "$(git -C "$repo" show -s --format=%cI HEAD)" "$expected_binary_sha256" "$allow_existing_nat_entry" "$relay_enabled" "$relay_groups" "$reference_mode")
++    remote_command=$(printf '%q ' "$remote_root/bin/sub2api-stage-source-release" "$release_id" "$version" "$commit" "$remote_archive" "$official_mode" "$(git -C "$repo" show -s --format=%cI HEAD)" "$expected_binary_sha256" "$allow_existing_nat_entry" "$relay_enabled" "$relay_groups" "$reference_mode" "$profile_enabled" "$profile_groups" "$profile_retention")

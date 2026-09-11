@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/Wei-Shaw/sub2api/internal/model"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestprofile"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
+	"go.uber.org/zap"
 	"strings"
 	"sync"
 	"time"
@@ -85,18 +88,27 @@ func recoveryErrorCode(body []byte) string {
 }
 
 func recoveryErrorCodeFromJSON(body []byte) string {
-	for _, path := range []string{"error.code", "response.error.code", "code"} {
+	// 上游可以只返回结构化 error.type。它仅在所有 code 字段都缺失时兜底，
+	// 不能读取顶层/response.type：那些字段通常是 SSE 事件或响应元数据。
+	for _, path := range []string{"error.code", "response.error.code", "code", "error.type", "response.error.type"} {
 		if v := gjson.GetBytes(body, path); v.Type == gjson.String && v.String() != "" {
 			return v.String()
 		}
 	}
 	return ""
 }
-func (s *ErrorPassthroughService) matchRecoveryRule(account *Account, requestedModel string, status int, body []byte) *model.ErrorPassthroughRule {
+func recoveryFailureErrorCode(failure *UpstreamFailoverError) string {
+	if failure.RecoveryErrorCode != nil {
+		return *failure.RecoveryErrorCode
+	}
+	return recoveryErrorCode(failure.ResponseBody)
+}
+
+func (s *ErrorPassthroughService) matchRecoveryRule(account *Account, requestedModel string, failure *UpstreamFailoverError) *model.ErrorPassthroughRule {
 	if s == nil || account == nil {
 		return nil
 	}
-	code := recoveryErrorCode(body)
+	code := recoveryFailureErrorCode(failure)
 	if code == "" {
 		return nil
 	}
@@ -111,7 +123,7 @@ func (s *ErrorPassthroughService) matchRecoveryRule(account *Account, requestedM
 		if !s.platformMatchesCached(r, lower) || !recoveryContains(p.AccountTypes, account.Type) || !recoveryContains(p.Models, requestedModel) || !recoveryContains(p.UpstreamCodes, code) {
 			continue
 		}
-		if s.ruleMatchesOptimized(r, status, body, &text, &done) {
+		if s.ruleMatchesOptimized(r, failure.StatusCode, failure.ResponseBody, &text, &done) {
 			return r.ErrorPassthroughRule
 		}
 	}
@@ -121,20 +133,32 @@ func (s *ErrorPassthroughService) matchRecoveryRule(account *Account, requestedM
 // ApplyErrorRecovery is called only where replay is still safe, before default
 // retry/switch handling. The first matching rule owns one immutable request budget.
 func ApplyErrorRecovery(c *gin.Context, account *Account, requestedModel string, failure *UpstreamFailoverError) ErrorRecoveryAction {
+	return applyErrorRecovery(c, account, requestedModel, failure, nil)
+}
+
+// ApplyErrorRecoveryAfterAttempt uses the same rule, timer and switch counter as
+// ApplyErrorRecovery. The optional HK43 experiment can only skip the first
+// account's retry; it never changes the cached policy or starts a second budget.
+func ApplyErrorRecoveryAfterAttempt(c *gin.Context, account *Account, requestedModel string, failure *UpstreamFailoverError, attempt ErrorRecoveryAttempt) ErrorRecoveryAction {
+	return applyErrorRecovery(c, account, requestedModel, failure, &attempt)
+}
+
+func applyErrorRecovery(c *gin.Context, account *Account, requestedModel string, failure *UpstreamFailoverError, attempt *ErrorRecoveryAttempt) ErrorRecoveryAction {
 	if c == nil || c.Request == nil || account == nil || failure == nil {
 		return ErrorRecoveryDefault
 	}
 	s := recoveryState(c)
+	firstFailure := s == nil
 	if s == nil {
 		svc := getBoundErrorPassthroughService(c)
-		rule := svc.matchRecoveryRule(account, requestedModel, failure.StatusCode, failure.ResponseBody)
+		rule := svc.matchRecoveryRule(account, requestedModel, failure)
 		if rule == nil {
 			return ErrorRecoveryDefault
 		}
 		parent := c.Request.Context()
 		ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
 		ctx = context.WithValue(ctx, recoveryContextKey{}, true)
-		s = &errorRecoveryState{rule: rule, parent: parent, cancel: cancel, deadline: time.Now().Add(time.Duration(rule.RecoveryPolicy.BudgetSeconds) * time.Second), retries: make(map[int64]int), code: recoveryErrorCode(failure.ResponseBody), failure: failure}
+		s = &errorRecoveryState{rule: rule, parent: parent, cancel: cancel, deadline: time.Now().Add(time.Duration(rule.RecoveryPolicy.BudgetSeconds) * time.Second), retries: make(map[int64]int), code: recoveryFailureErrorCode(failure), failure: failure}
 		s.timer = time.AfterFunc(time.Until(s.deadline), func() {
 			s.mu.Lock()
 			defer s.mu.Unlock()
@@ -157,12 +181,14 @@ func ApplyErrorRecovery(c *gin.Context, account *Account, requestedModel string,
 		return ErrorRecoveryStop
 	}
 	p := s.rule.RecoveryPolicy
-	if s.retries[account.ID] < p.SameAccountRetries {
+	skipRetry := firstFailure && s.switches < p.AccountSwitches && openAILateFailureSwitchAllowed(c, account, failure, p, attempt)
+	if !skipRetry && s.retries[account.ID] < p.SameAccountRetries {
 		s.retries[account.ID]++
 		delay := 500 * time.Millisecond
 		for i := 1; i < s.retries[account.ID] && delay < 8*time.Second; i++ {
 			delay *= 2
 		}
+		defer requestprofile.Start(c.Request.Context(), "retry_backoff")()
 		timer := time.NewTimer(delay)
 		defer timer.Stop()
 		select {
@@ -176,6 +202,20 @@ func ApplyErrorRecovery(c *gin.Context, account *Account, requestedModel string,
 		return ErrorRecoveryStop
 	}
 	s.switches++
+	if skipRetry {
+		value, _ := c.Get("api_key")
+		key := value.(*APIKey) // verified by openAILateFailureSwitchAllowed
+		logger.FromContext(c.Request.Context()).Info(openAILateFailureSwitchEvent,
+			zap.String("component", openAILateFailureSwitchComponent), zap.String("origin", openAILateFailureSwitchOrigin),
+			zap.Int64("user_id", key.UserID), zap.Int64("api_key_id", key.ID),
+			zap.String("platform", account.Platform), zap.String("model", requestedModel),
+			zap.Int64("account_id", account.ID), zap.Int64("group_id", openAILateFailureSwitchGroup(c)),
+			zap.Int64("rule_id", s.rule.ID), zap.Int("upstream_status", failure.StatusCode),
+			zap.Int("upstream_attempt_count", attempt.UpstreamAttempts),
+			zap.Int64("attempt_elapsed_ms", attempt.Elapsed.Milliseconds()),
+			zap.Int64("minimum_wait_ms", openAILateFailureSwitchMinimum(p).Milliseconds()),
+			zap.Int("switch_count", s.switches), zap.Int("budget_seconds", p.BudgetSeconds))
+	}
 	return ErrorRecoverySwitch
 }
 func RecoveryBudgetExpired(c *gin.Context) bool {
@@ -188,8 +228,32 @@ func RecoveryBudgetExpired(c *gin.Context) bool {
 	return !s.output && !time.Now().Before(s.deadline)
 }
 
+// ReserveErrorRecoveryAccountSwitch shares an existing request's switch budget
+// with a local admission reselect. It never creates a recovery state, renews its
+// deadline, replaces its upstream failure, or spends a same-account retry.
+func ReserveErrorRecoveryAccountSwitch(c *gin.Context) bool {
+	if c == nil || c.Request == nil || c.Request.Context().Err() != nil {
+		return false
+	}
+	s := recoveryState(c)
+	if s == nil {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.rule == nil || s.rule.RecoveryPolicy == nil || s.rule.RecoveryPolicy.Mode != "limited" || s.output || !time.Now().Before(s.deadline) || s.parent.Err() != nil {
+		return false
+	}
+	if s.switches >= s.rule.RecoveryPolicy.AccountSwitches {
+		return false
+	}
+	s.switches++
+	return true
+}
+
 // Semantic output ends recovery. Keep the successful stream alive beyond budget.
 func CompleteErrorRecovery(c *gin.Context) {
+	completeOpenAIEncryptedSemanticRetry(c)
 	s := recoveryState(c)
 	if s == nil {
 		return

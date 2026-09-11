@@ -14,6 +14,7 @@ interface Props {
   customEndTime?: string | null
   platform?: string
   groupId?: number | null
+  accountId?: number | null
   model?: string
   errorType: 'request' | 'upstream'
   resumeState?: boolean
@@ -128,7 +129,8 @@ async function fetchErrorLogs() {
     const platform = String(props.platform || '').trim()
     if (platform) params.platform = platform
     if (typeof props.groupId === 'number' && props.groupId > 0) params.group_id = props.groupId
-	if (props.model?.trim()) params.model = props.model.trim()
+    if (typeof props.accountId === 'number' && props.accountId > 0) params.account_id = props.accountId
+    if (props.model?.trim()) params.model = props.model.trim()
 
     if (q.value.trim()) params.q = q.value.trim()
     if (statusCode.value === 'other') params.status_codes_other = '1'
@@ -178,7 +180,7 @@ watch(
 )
 
 watch(
-  () => [props.timeRange, props.customStartTime, props.customEndTime, props.platform, props.groupId, props.model] as const,
+  () => [props.timeRange, props.customStartTime, props.customEndTime, props.platform, props.groupId, props.accountId, props.model] as const,
   () => {
     if (!props.show) return
     page.value = 1

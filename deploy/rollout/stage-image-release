@@ -5,6 +5,15 @@ release_id="${1:-}"
 candidate_version="${2:-}"
 candidate_image="${3:-}"
 action_prefix="${4:-stage-$(date -u +%Y%m%dT%H%M%SZ)}"
+relay_enabled="${5-inherit}"
+relay_groups="${6-inherit}"
+experiment_mode="${7-standard}"
+expected_source_commit="${8:-}"
+expected_binary_sha256="${9:-}"
+allow_existing_nat_entry="${10-false}"
+profile_enabled="${11-inherit}"
+profile_groups="${12-inherit}"
+profile_retention="${13-inherit}"
 root="${SUB2API_DEPLOY_ROOT:-/opt/sub2api/deploy}"
 if [[ -f "$root/rollout/site.env" ]]; then set -a; source "$root/rollout/site.env"; set +a; fi
 controller="$root/bin/sub2api-rollout"
@@ -19,6 +28,20 @@ fail() {
 [[ "$candidate_version" =~ ^[A-Za-z0-9._:+@/-]{1,128}$ ]] || fail invalid_version 'candidate version is required' 2
 [[ "$candidate_image" =~ ^sha256:[0-9a-f]{64}$ ]] || fail invalid_candidate_digest 'candidate image must be an immutable sha256 image ID' 2
 [[ "$action_prefix" =~ ^[A-Za-z0-9._:+@/-]{1,96}$ ]] || fail invalid_action_prefix 'action prefix is invalid' 2
+[[ "$experiment_mode" == standard || "$experiment_mode" == relay-off-on ]] \
+  || fail invalid_experiment_mode 'Use standard or the explicit relay-off-on experiment.' 2
+if [[ "$experiment_mode" == relay-off-on ]]; then
+  [[ "$expected_source_commit" =~ ^[0-9a-f]{40}$ && "$expected_binary_sha256" =~ ^[0-9a-f]{64}$ ]] \
+    || fail experiment_reference_required 'Relay configuration experiments require the validated source commit and binary SHA256.' 2
+  [[ "$relay_enabled" == true && "$relay_groups" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] \
+    || fail invalid_relay_experiment 'The explicit experiment must enable Relay for a non-empty group list.' 2
+  [[ "$allow_existing_nat_entry" == true || "$allow_existing_nat_entry" == false ]] \
+    || fail invalid_nat_entry_option 'Existing NAT entry must be explicitly approved.' 2
+fi
+[[ "$relay_enabled" == inherit || "$relay_enabled" == true || "$relay_enabled" == false ]] \
+  || fail invalid_relay_enabled 'Relay enabled must be inherit, true, or false.' 2
+[[ "$relay_groups" == inherit || -z "$relay_groups" || "$relay_groups" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] \
+  || fail invalid_relay_groups 'Relay groups must be a comma-separated list of positive IDs.' 2
 [[ -x "$controller" ]] || fail controller_missing 'rollout controller is unavailable'
 docker image inspect "$candidate_image" >/dev/null 2>&1 || fail candidate_image_missing 'candidate image is not present on this host' 6
 
@@ -48,7 +71,49 @@ stable_container="sub2api-$stable"
 candidate_container="sub2api-$candidate"
 stable_image="$(docker inspect --format '{{.Image}}' "$stable_container")"
 [[ "$stable_image" =~ ^sha256:[0-9a-f]{64}$ ]] || fail stable_digest_invalid 'stable image ID is not immutable'
-[[ "$candidate_image" != "$stable_image" ]] || fail candidate_matches_stable 'use stage-identical-release for an identical image' 2
+if [[ "$experiment_mode" == standard ]]; then
+  [[ "$candidate_image" != "$stable_image" ]] || fail candidate_matches_stable 'use an explicitly authorized configuration experiment for the same image' 2
+else
+  [[ "$candidate_image" == "$stable_image" ]] || fail experiment_image_mismatch 'Relay off/on must use the same immutable image.' 2
+  [[ "$(jq -r .phase <<<"$status")" == complete || "$(jq -r .phase <<<"$status")" == rolled_back ]] \
+    || fail rollout_busy 'Finish the previous rollout before preparing the configuration experiment.' 4
+  [[ "$(env_value "$stable_container" SUB2API_DEPLOYMENT_VERSION)" == "$candidate_version" ]] \
+    || fail experiment_version_mismatch 'Relay off/on must keep the stable version.' 2
+  stable_relay_enabled="$(env_value "$stable_container" GATEWAY_TEAMO_RELAY_ENABLED)"
+  [[ "${stable_relay_enabled:-false}" == false ]] \
+    || fail experiment_stable_not_off 'Relay must be disabled on the stable control slot.' 2
+  [[ "$(env_value "$stable_container" GATEWAY_TEAMO_RELAY_GROUP_IDS)" == "$relay_groups" ]] \
+    || fail experiment_groups_mismatch 'Both arms must have the same explicit authenticated group list.' 2
+
+  # Reuse the source-release entry/dependency/backup gates, without rebuilding
+  # or changing the stable image. --version exits before server/DB initialization.
+  "$root/rollout/dependency-client" check >/dev/null || fail dependencies_unhealthy 'PostgreSQL or Redis health check failed.' 6
+  final_proxy_health="$(docker inspect --format '{{.State.Health.Status}}' sub2api-haproxy-final 2>/dev/null || true)"
+  bootstrap_proxy_health="$(docker inspect --format '{{.State.Health.Status}}' sub2api-haproxy 2>/dev/null || true)"
+  legacy_health="$(docker inspect --format '{{.State.Health.Status}}' "${SUB2API_LEGACY_CONTAINER:-sub2api}" 2>/dev/null || true)"
+  if [[ "$final_proxy_health" != healthy && !( "$bootstrap_proxy_health" == healthy && "$legacy_health" == healthy ) ]]; then
+    [[ "$allow_existing_nat_entry" == true ]] || fail haproxy_unhealthy 'Existing NAT entry has not been explicitly approved.' 6
+    python3 "$root/bin/sub2api-validate-nat-entry" "$root" "${SUB2API_PUBLIC_PORT:-80}" "${ROLLOUT_ENTRY_PORT:-18080}" "${SUB2API_LEGACY_CONTAINER:-sub2api}" >/dev/null \
+      || fail nat_entry_not_ready 'Existing NAT entry failed strict read-only validation.' 6
+  fi
+  available_kb="$(df -Pk "$root" | awk 'NR==2 {print $4}')"
+  available_mem_kb="$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)"
+  [[ "$available_kb" =~ ^[0-9]+$ && "$available_kb" -ge 5242880 ]] || fail insufficient_disk 'At least 5 GiB free disk is required.' 4
+  [[ "$available_mem_kb" =~ ^[0-9]+$ && "$available_mem_kb" -ge 2097152 ]] || fail insufficient_memory 'At least 2 GiB available memory is required.' 4
+  image_binary_sha256="$(docker run --rm --network none --read-only --entrypoint sha256sum "$candidate_image" /app/sub2api | awk '{print $1}')" \
+    || fail experiment_binary_unreadable 'Cannot read the immutable image binary hash.' 6
+  stable_binary_sha256="$(docker exec "$stable_container" sha256sum /app/sub2api | awk '{print $1}')" \
+    || fail experiment_binary_unreadable 'Cannot read the stable binary hash.' 6
+  [[ "$image_binary_sha256" == "$expected_binary_sha256" && "$stable_binary_sha256" == "$expected_binary_sha256" ]] \
+    || fail experiment_binary_mismatch 'Stable and immutable image must match the validated binary SHA256.' 6
+  image_version="$(docker run --rm --network none --read-only --entrypoint /app/sub2api "$candidate_image" --version 2>&1)" \
+    || fail experiment_source_unreadable 'Cannot inspect the immutable binary build identity.' 6
+  [[ "$image_version" == *"Sub2API $candidate_version (commit: $expected_source_commit, built:"* ]] \
+    || fail experiment_source_mismatch 'Immutable binary source commit or version does not match the reference.' 6
+  backup="${SUB2API_BACKUP_DIR:-/opt/sub2api/backups}/pre-release-$release_id.dump"
+  "$root/rollout/dependency-client" backup "$backup" >/dev/null \
+    || fail backup_failed 'PostgreSQL backup failed; candidate was not changed.' 6
+fi
 
 blue_image="$(docker inspect --format '{{.Image}}' sub2api-blue)"
 green_image="$(docker inspect --format '{{.Image}}' sub2api-green)"
@@ -56,6 +121,41 @@ blue_release="$(env_value sub2api-blue SUB2API_RELEASE_ID)"
 green_release="$(env_value sub2api-green SUB2API_RELEASE_ID)"
 blue_version="$(env_value sub2api-blue SUB2API_DEPLOYMENT_VERSION)"
 green_version="$(env_value sub2api-green SUB2API_DEPLOYMENT_VERSION)"
+
+# Only the idle candidate gets an environment overlay. Stable and worker
+# containers are never recreated; future releases inherit stable's actual flag.
+if [[ "$relay_enabled" == inherit ]]; then
+  relay_enabled="$(env_value "$stable_container" GATEWAY_TEAMO_RELAY_ENABLED)"
+  relay_enabled="${relay_enabled:-false}"
+fi
+if [[ "$relay_groups" == inherit ]]; then
+  relay_groups="$(env_value "$stable_container" GATEWAY_TEAMO_RELAY_GROUP_IDS)"
+fi
+[[ "$relay_enabled" == true || "$relay_enabled" == false ]] || fail invalid_stable_relay_enabled 'Stable has an invalid Relay flag.' 4
+[[ -z "$relay_groups" || "$relay_groups" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] || fail invalid_stable_relay_groups 'Stable has invalid Relay groups.' 4
+[[ "$relay_enabled" != true || -n "$relay_groups" ]] || fail relay_groups_required 'Enabling Relay requires explicit authenticated groups.' 4
+[[ "$profile_enabled" == inherit || "$profile_enabled" == true || "$profile_enabled" == false ]] || fail invalid_profile_flag 'Invalid profiling flag.' 2
+[[ "$profile_groups" == inherit || -z "$profile_groups" || "$profile_groups" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] || fail invalid_profile_groups 'Invalid profiling groups.' 2
+if [[ "$profile_enabled" == inherit ]]; then profile_enabled="$(env_value "$stable_container" GATEWAY_REQUEST_PROFILING_ENABLED)"; profile_enabled="${profile_enabled:-false}"; fi
+if [[ "$profile_groups" == inherit ]]; then profile_groups="$(env_value "$stable_container" GATEWAY_REQUEST_PROFILING_GROUP_IDS)"; fi
+if [[ "$profile_retention" == inherit ]]; then profile_retention="$(env_value "$stable_container" GATEWAY_REQUEST_PROFILING_RETENTION_HOURS)"; profile_retention="${profile_retention:-6}"; fi
+[[ "$profile_retention" =~ ^[0-9]+$ && "$profile_retention" -ge 1 && "$profile_retention" -le 24 ]] || fail invalid_profile_retention 'Profiling retention must be 1-24 hours.' 2
+[[ "$profile_enabled" != true || -n "$profile_groups" ]] || fail profile_groups_required 'Explicit profiling groups are required for production enablement.' 2
+relay_overlay="$(mktemp "$root/rollout/relay-env.XXXXXX")"
+trap 'rm -f -- "$relay_overlay"' EXIT
+chmod 0600 "$relay_overlay"
+python3 - "$candidate_container" "$relay_enabled" "$relay_groups" "$profile_enabled" "$profile_groups" "$profile_retention" >"$relay_overlay" <<'PYRELAY'
+import json, sys
+service, enabled, groups, profile_enabled, profile_groups, retention = sys.argv[1:]
+print(json.dumps({"services": {service: {"environment": {
+    "GATEWAY_TEAMO_RELAY_ENABLED": enabled,
+    "GATEWAY_TEAMO_RELAY_GROUP_IDS": groups,
+    "GATEWAY_REQUEST_PROFILING_ENABLED": profile_enabled,
+    "GATEWAY_REQUEST_PROFILING_GROUP_IDS": profile_groups,
+    "GATEWAY_REQUEST_PROFILING_RETENTION_HOURS": retention,
+}}}}))
+PYRELAY
+compose+=(-f "$relay_overlay")
 
 "$controller" prepare-stage --release-id "$release_id" --candidate-slot "$candidate" \
   --schema-compatible --actor codex --action-id "$action_prefix-prepare" --json >/dev/null
@@ -76,9 +176,8 @@ common_env=(
   SUB2API_WORKER_IMAGE="$stable_image" SUB2API_WORKER_RELEASE_ID="$release_id" SUB2API_WORKER_VERSION="$candidate_version" SUB2API_WORKER_DIGEST="$stable_image"
 )
 
-profile_args=()
-[[ "$candidate" == green ]] && profile_args=(--profile candidate)
-env "${common_env[@]}" "${compose[@]}" "${profile_args[@]}" up -d --no-deps --no-build --force-recreate "$candidate_container" >/dev/null
+[[ "$candidate" == green ]] && compose+=(--profile candidate)
+env "${common_env[@]}" "${compose[@]}" up -d --no-deps --no-build --force-recreate "$candidate_container" >/dev/null
 
 candidate_health=""
 for attempt in $(seq 1 90); do
@@ -92,6 +191,33 @@ done
 [[ "$(docker inspect --format '{{.RestartCount}}' "$candidate_container")" == 0 ]] \
   || fail candidate_restarted 'candidate restarted during staging'
 
+[[ "$(env_value "$candidate_container" GATEWAY_TEAMO_RELAY_ENABLED)" == "$relay_enabled" && \
+   "$(env_value "$candidate_container" GATEWAY_TEAMO_RELAY_GROUP_IDS)" == "$relay_groups" ]] \
+  || fail relay_config_mismatch 'Candidate Relay configuration read-back failed; candidate remains at zero weight.' 6
+
+[[ "$(env_value "$candidate_container" GATEWAY_REQUEST_PROFILING_ENABLED)" == "$profile_enabled" && "$(env_value "$candidate_container" GATEWAY_REQUEST_PROFILING_GROUP_IDS)" == "$profile_groups" && "$(env_value "$candidate_container" GATEWAY_REQUEST_PROFILING_RETENTION_HOURS)" == "$profile_retention" ]] || fail profile_config_mismatch 'Candidate profiling read-back failed; candidate remains at zero weight.' 6
+configuration_snapshot='null'
+if [[ "$experiment_mode" == relay-off-on ]]; then
+  [[ "$(docker exec "$candidate_container" sha256sum /app/sub2api | awk '{print $1}')" == "$expected_binary_sha256" ]] \
+    || fail experiment_binary_mismatch 'Idle candidate binary differs from the validated image.' 6
+  # Configuration fingerprints are review evidence, not a substitute for the
+  # real traffic experiment. No environment values or credentials are emitted.
+  configuration_snapshot="$(python3 - "$stable_container" "$candidate_container" <<'PYCONFIG'
+import hashlib, json, subprocess, sys
+skip = {'SUB2API_DEPLOYMENT_SLOT', 'SUB2API_RELEASE_ID', 'GATEWAY_TEAMO_RELAY_ENABLED'}
+result = {}
+for label, container in zip(('stable', 'candidate'), sys.argv[1:]):
+    info = json.loads(subprocess.check_output(['docker', 'inspect', container]))[0]
+    env = dict(value.split('=', 1) for value in info['Config']['Env'] if '=' in value)
+    selected = {key: value for key, value in env.items() if key not in skip}
+    for key, value in {'GATEWAY_REQUEST_PROFILING_ENABLED':'false','GATEWAY_REQUEST_PROFILING_GROUP_IDS':'','GATEWAY_REQUEST_PROFILING_RETENTION_HOURS':'6'}.items(): selected.setdefault(key,value)
+    result[label + '_environment_sha256'] = hashlib.sha256(json.dumps(selected, sort_keys=True).encode()).hexdigest()
+result['environment_fingerprints_match'] = result['stable_environment_sha256'] == result['candidate_environment_sha256']
+print(json.dumps(result))
+PYCONFIG
+)" || fail experiment_configuration_unreadable 'Cannot capture configuration fingerprints; candidate remains at zero weight.' 6
+fi
+
 candidate_ip="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$candidate_container")"
 observed_slot="$(curl -fsS -D - -o /dev/null --max-time 5 "http://$candidate_ip:8080/health" \
   | awk -F': ' 'tolower($1)=="x-sub2api-deployment-slot" {gsub("\\r", "", $2); print $2}')"
@@ -100,6 +226,6 @@ observed_slot="$(curl -fsS -D - -o /dev/null --max-time 5 "http://$candidate_ip:
 "$controller" stage --release-id "$release_id" --candidate-slot "$candidate" \
   --candidate-version "$candidate_version" --candidate-digest "$candidate_image" --schema-compatible \
   --actor codex --action-id "$action_prefix-stage" --json \
-  | jq -c '{action,result,release_id,phase,stable_slot,candidate_slot,rollback_target_slot,
+  | jq -c --arg profile_enabled "$profile_enabled" --arg profile_groups "$profile_groups" --arg profile_retention "$profile_retention" --arg relay_enabled "$relay_enabled" --arg relay_groups "$relay_groups" --arg experiment_mode "$experiment_mode" --arg source_commit "$expected_source_commit" --arg binary_sha256 "$expected_binary_sha256" --argjson configuration_snapshot "$configuration_snapshot" '{profiling:{enabled:($profile_enabled=="true"),group_ids:$profile_groups,retention_hours:($profile_retention|tonumber)},relay:{enabled:($relay_enabled=="true"),group_ids:$relay_groups},experiment_mode:$experiment_mode,source_commit:$source_commit,binary_sha256:$binary_sha256,configuration_snapshot:$configuration_snapshot,action,result,release_id,phase,stable_slot,candidate_slot,rollback_target_slot,
             blue:{health:.blue.health,weight:.blue.weight,version:.blue.version,digest:.blue.digest},
             green:{health:.green.health,weight:.green.weight,version:.green.version,digest:.green.digest},rollback}'

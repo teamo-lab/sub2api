@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestprofile"
 	"io"
 	"net/http"
 	"strings"
@@ -18,7 +19,14 @@ import (
 )
 
 // Forward forwards request to OpenAI API
-func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
+func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (out *OpenAIForwardResult, forwardErr error) {
+	ctx, endPrepare := requestprofile.Preparation(ctx)
+	defer endPrepare()
+	defer func() {
+		if budgetErr := finishOpenAIEncryptedSemanticRetry(c); budgetErr != nil {
+			out, forwardErr = nil, budgetErr
+		}
+	}()
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)
 	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
@@ -61,7 +69,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	if normalized {
 		body = normalizedBody
 	}
+	endLegacy := requestprofile.Start(ctx, "legacy_normalize")
 	legacyIngressBody, legacyIngressChanged, legacyIngressErr := normalizeOpenAIResponsesLegacyIngress(body)
+	endLegacy()
 	if legacyIngressErr != nil {
 		return nil, legacyIngressErr
 	}
@@ -71,7 +81,10 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	// 在分流到 passthrough / Codex transform / 原生 ChatCompletions 之前统一修正
 	// 显式为 null 的工具 Schema type，否则 upstream 的 400 会被归一成可重试的 502，
 	// 同一份坏定义在账号池里反复重放。
-	if sanitizedToolBody, toolSchemaSanitized, toolSchemaErr := sanitizeOpenAIResponsesToolSchemasForPlatform(body, account.Platform); toolSchemaErr != nil {
+	endSchema := requestprofile.Start(ctx, "tool_schema")
+	sanitizedToolBody, toolSchemaSanitized, toolSchemaErr := sanitizeOpenAIResponsesToolSchemasForPlatform(body, account.Platform)
+	endSchema()
+	if toolSchemaErr != nil {
 		return nil, toolSchemaErr
 	} else if toolSchemaSanitized {
 		body = sanitizedToolBody
@@ -300,7 +313,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	var reqBody map[string]any
 	ensureReqBody := func() (map[string]any, error) {
 		if requestView.HasPatches() {
-			patchedBody, patchErr := requestView.ApplyPatches()
+			patchedBody, patchErr := profileOpenAIPatches(ctx, requestView)
 			if patchErr != nil {
 				return nil, patchErr
 			}
@@ -703,7 +716,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 
 	if bodyModified {
 		if requestView.HasPatches() {
-			if patchedBody, patchErr := requestView.ApplyPatches(); patchErr == nil {
+			if patchedBody, patchErr := profileOpenAIPatches(ctx, requestView); patchErr == nil {
 				body = patchedBody
 				requestView = newOpenAIRequestView(body)
 				reqBody = nil
@@ -716,7 +729,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				return nil, decodeErr
 			}
 			var marshalErr error
-			body, marshalErr = marshalOpenAIUpstreamJSON(decoded)
+			body, marshalErr = profileOpenAIJSONMarshal(ctx, decoded)
 			if marshalErr != nil {
 				return nil, fmt.Errorf("serialize request body: %w", marshalErr)
 			}
@@ -773,7 +786,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		imageInputSize = imageCfg.InputSize
 	}
 	// Get access token
+	endCredential := requestprofile.Start(ctx, "credential_load")
 	token, _, err := s.GetAccessToken(ctx, account)
+	endCredential()
 	if err != nil {
 		return nil, err
 	}
@@ -946,16 +961,19 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 					backoff.Milliseconds(),
 				)
 				if backoff > 0 {
+					endRetryWait := requestprofile.Start(ctx, "retry_backoff")
 					timer := time.NewTimer(backoff)
 					select {
 					case <-ctx.Done():
 						if !timer.Stop() {
 							<-timer.C
 						}
+						endRetryWait()
 						wsErr = wrapOpenAIWSFallback("retry_backoff_canceled", ctx.Err())
 						break wsRetryLoop
 					case <-timer.C:
 					}
+					endRetryWait()
 				}
 				continue
 			}
@@ -1030,6 +1048,8 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	agentTaskRecoveryTried := false
 	rejectedFieldRetryState := openAIResponsesRejectedFieldRetryStateForRequest(c, body)
 	for {
+		initializeOpenAIEncryptedSemanticRetry(c, account, body)
+		ctx = openAIEncryptedSemanticRetryContext(c, ctx)
 		// Build upstream request
 		upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
 		var headerGuard *openAIFirstOutputHeaderGuard
@@ -1095,6 +1115,16 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
 			upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 			upstreamCode := extractUpstreamErrorCode(respBody)
+			if resp.StatusCode == http.StatusBadRequest && upstreamCode != "invalid_encrypted_content" {
+				if retryBody, retry := consumeOpenAIEncryptedSemanticRetry(c, body,
+					newOpenAIEncryptedSemanticRetrySignal(c, respBody), account); retry {
+					body = retryBody
+					requestView = newOpenAIRequestView(body)
+					reqBody = nil
+					httpInvalidEncryptedContentRetryTried = true
+					continue
+				}
+			}
 			if !agentTaskRecoveryTried && s.isAgentIdentityAccount(ctx, account) && isAgentIdentityTaskInvalidHTTPResponse(resp.StatusCode, respBody) {
 				agentTaskRecoveryTried = true
 				expectedTaskID := account.GetCredential("task_id")
@@ -1112,7 +1142,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				}
 				invalidDigests := collectOpenAIEncryptedContentDigestsRaw(lineageEntryBody)
 				if trimOpenAIEncryptedReasoningItems(decoded) {
-					body, err = marshalOpenAIUpstreamJSON(decoded)
+					body, err = profileOpenAIJSONMarshal(ctx, decoded)
 					if err != nil {
 						return nil, fmt.Errorf("serialize invalid_encrypted_content retry body: %w", err)
 					}
@@ -1123,6 +1153,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 						s.markOpenAIWSInvalidEncryptedContentLineage(lineageGroupID, lineageSessionHash, invalidDigests)
 					}
 					httpInvalidEncryptedContentRetryTried = true
+					if retryState := openAIEncryptedSemanticRetryStateFor(c); retryState != nil {
+						retryState.tried = true
+					}
 					rejectedFieldRetryState.remember(body)
 					logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Retrying non-WSv2 request once after invalid_encrypted_content (account: %s)", account.Name)
 					continue
@@ -1215,9 +1248,18 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		imageCount := 0
 		searchCount := 0
 		var imageOutputSizes []string
+		var streamErr error
 		if reqStream {
 			streamResult, err := s.handleStreamingResponseWithReasoning(ctx, resp, c, account, startTime, originalModel, upstreamModel, reasoningEffortValue)
 			if err != nil {
+				if retryBody, retry := consumeOpenAIEncryptedSemanticRetry(c, body, err, account); retry {
+					_ = resp.Body.Close()
+					body = retryBody
+					requestView = newOpenAIRequestView(body)
+					reqBody = nil
+					httpInvalidEncryptedContentRetryTried = true
+					continue
+				}
 				if signal, ok := asOpenAICompactFallbackSignal(err); ok {
 					if retryBody, fallbackModel, retry := s.prepareOpenAICompactFallbackRetry(
 						c, account, requestedModel, body, http.StatusBadRequest, signal.message, signal.payload, compactModelFallbackRetried,
@@ -1254,7 +1296,19 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 					}
 					return s.handleErrorResponse(ctx, compactResp, c, account, body, resolveOpenAIErrorSchedulingModel(billingModel, upstreamModel))
 				}
-				return nil, err
+				// A replayable failure belongs to the next attempt and must not be
+				// billed here. Other stream errors retain already parsed usage.
+				var failover *UpstreamFailoverError
+				if streamResult == nil || errors.As(err, &failover) {
+					return nil, err
+				}
+				if GetOpsCyberPolicy(c) != nil || streamResult.imageCount > 0 || streamResult.searchCount > 0 || streamResult.usage == nil || *streamResult.usage == (OpenAIUsage{}) {
+					// The handler has separate partial-media behavior. Keep that legacy
+					// path unchanged. Cyber-policy usage also has a dedicated owner;
+					// this fix only retains otherwise unowned parsed token usage.
+					return nil, err
+				}
+				streamErr = err
 			}
 			usage = streamResult.usage
 			firstTokenMs = streamResult.firstTokenMs
@@ -1286,15 +1340,17 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			imageOutputSizes = nonStreamResult.imageOutputSizes
 			searchCount = nonStreamResult.searchCount
 		}
-		s.bindHTTPResponseAccount(ctx, c, account, responseID)
+		if streamErr == nil {
+			s.bindHTTPResponseAccount(ctx, c, account, responseID)
+		}
 
 		// Extract and save Codex usage snapshot from response headers (for OAuth accounts).
 		// 排除 spark 影子:其 codex_* 仅由 QueryUsage(/wham/usage bengalfox)更新(外审第7轮 P1)。
-		if account.UsesOpenAICodexProtocol() && !account.IsShadow() {
+		if streamErr == nil && account.UsesOpenAICodexProtocol() && !account.IsShadow() {
 			if snapshot := ParseCodexRateLimitHeaders(resp.Header); snapshot != nil {
 				s.updateCodexUsageSnapshot(ctx, account.ID, snapshot)
 			}
-		} else if account.IsShadow() && account.ParentAccountID != nil {
+		} else if streamErr == nil && account.IsShadow() && account.ParentAccountID != nil {
 			notifyOpenAIAutoReset(*account.ParentAccountID)
 		}
 
@@ -1333,7 +1389,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		if searchCount > 0 && account != nil && account.IsGrok() {
 			forwardResult.SearchCount = searchCount
 		}
-		return forwardResult, nil
+		return forwardResult, streamErr
 	}
 }
 
@@ -1357,6 +1413,7 @@ func shouldForwardOpenAIResponsesViaRawChatCompletions(account *Account) bool {
 }
 
 func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Context, account *Account, body []byte, token string, isStream bool, promptCacheKey string, isCodexCLI bool) (*http.Request, error) {
+	defer requestprofile.Start(ctx, "request_build")()
 	// Determine target URL based on account type
 	var targetURL string
 	switch account.Type {

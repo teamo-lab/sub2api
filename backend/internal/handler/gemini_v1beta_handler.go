@@ -455,6 +455,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 					zap.Int64("account_id", account.ID),
 					zap.Int("max_waiting", selection.WaitPlan.MaxWaiting),
 				)
+				service.MarkOpsLocalCapacityFailure(c)
 				googleError(c, http.StatusTooManyRequests, "Too many pending requests, please retry later")
 				return
 			}

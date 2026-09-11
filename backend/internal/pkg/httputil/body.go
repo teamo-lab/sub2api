@@ -6,6 +6,7 @@ import (
 	"compress/zlib"
 	"errors"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestprofile"
 	"io"
 	"net/http"
 	"strings"
@@ -43,17 +44,24 @@ func ReadRequestBodyWithPrealloc(req *http.Request) ([]byte, error) {
 	}
 
 	buf := bytes.NewBuffer(make([]byte, 0, capHint))
-	if _, err := io.Copy(buf, req.Body); err != nil {
+	endRead := requestprofile.Start(req.Context(), "body_read")
+	_, readErr := io.Copy(buf, req.Body)
+	endRead()
+	if err := readErr; err != nil {
 		return nil, err
 	}
 	raw := buf.Bytes()
+	requestprofile.BodySize(req.Context(), int64(len(raw)))
 
 	enc := strings.ToLower(strings.TrimSpace(req.Header.Get("Content-Encoding")))
 	if enc == "" || enc == "identity" {
 		return raw, nil
 	}
 
+	endDecode := requestprofile.Start(req.Context(), "body_decompress")
 	decoded, err := decompressRequestBody(enc, raw)
+	endDecode()
+	requestprofile.BodySize(req.Context(), int64(len(decoded)))
 	if err != nil {
 		return nil, fmt.Errorf("decode Content-Encoding %q: %w", enc, err)
 	}
@@ -72,6 +80,8 @@ func ReadLenientJSONRequestBodyWithPrealloc(req *http.Request, maxNormalizedByte
 	if err != nil {
 		return nil, err
 	}
+	endNormalize := requestprofile.Start(req.Context(), "json_normalize")
+	defer endNormalize()
 	return NormalizeLenientJSONRequestBody(body, maxNormalizedBytes)
 }
 

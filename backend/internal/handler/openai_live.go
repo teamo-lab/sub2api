@@ -107,6 +107,7 @@ func (h *OpenAIGatewayHandler) Live(c *gin.Context) {
 		return
 	}
 	if !acquired {
+		service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonUserConcurrency)
 		h.errorResponse(c, http.StatusTooManyRequests, "rate_limit_error", "Live concurrency limit reached")
 		return
 	}

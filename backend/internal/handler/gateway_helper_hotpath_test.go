@@ -290,6 +290,7 @@ func TestAcquireUserSlotWithWait_ImmediateAcquireSkipsWaitQueue(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, release)
 	release()
+	require.False(t, service.HasOpsClientBusinessLimited(c))
 
 	require.Equal(t, 1, cache.userAcquireCalls)
 	require.Equal(t, 0, cache.waitIncrementCalls)
@@ -377,6 +378,7 @@ func TestAcquireUserSlotWithWait_TimeoutDecrementsWaitQueue(t *testing.T) {
 	var cErr *ConcurrencyError
 	require.ErrorAs(t, err, &cErr)
 	require.True(t, cErr.IsTimeout)
+	require.Equal(t, service.OpsClientBusinessLimitedReasonUserConcurrency, service.OpsClientBusinessLimitedReason(c))
 	require.Equal(t, 1, cache.waitIncrementCalls)
 	require.Equal(t, 1, cache.waitDecrementCalls)
 	require.Equal(t, 0, cache.userReleaseCalls)
@@ -406,6 +408,7 @@ func TestAcquireUserSlotWithWait_RequestCancelDecrementsWaitQueue(t *testing.T) 
 	<-cancelled
 	require.Nil(t, release)
 	require.ErrorIs(t, err, context.Canceled)
+	require.False(t, service.HasOpsClientBusinessLimited(c))
 	require.Equal(t, 1, cache.waitIncrementCalls)
 	require.Equal(t, 1, cache.waitDecrementCalls)
 	require.Equal(t, 0, cache.userReleaseCalls)

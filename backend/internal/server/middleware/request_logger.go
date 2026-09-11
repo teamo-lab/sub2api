@@ -2,7 +2,9 @@ package middleware
 
 import (
 	"context"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestprofile"
 	"strings"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -14,13 +16,17 @@ import (
 const requestIDHeader = "X-Request-ID"
 
 // RequestLogger 在请求入口注入 request-scoped logger。
-func RequestLogger() gin.HandlerFunc {
+func RequestLogger() gin.HandlerFunc { return RequestLoggerWithProfiling(true) }
+func RequestLoggerWithProfiling(enabled bool, groups ...int64) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.Request == nil {
 			c.Next()
 			return
 		}
 
+		if enabled && isProfiledInferenceRequest(c.Request) {
+			c.Request = c.Request.WithContext(requestprofile.AttachScoped(c.Request.Context(), time.Now(), groups))
+		}
 		requestID, validRequestID := normalizeCorrelationID(c.GetHeader(requestIDHeader))
 		if !validRequestID {
 			requestID = uuid.NewString()

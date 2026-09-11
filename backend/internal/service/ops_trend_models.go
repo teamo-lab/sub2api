@@ -3,12 +3,16 @@ package service
 import "time"
 
 type OpsThroughputTrendPoint struct {
-	BucketStart   time.Time `json:"bucket_start"`
-	RequestCount  int64     `json:"request_count"`
-	TokenConsumed int64     `json:"token_consumed"`
-	SwitchCount   int64     `json:"switch_count"`
-	QPS           float64   `json:"qps"`
-	TPS           float64   `json:"tps"`
+	BucketStart         time.Time `json:"bucket_start"`
+	RequestCount        int64     `json:"request_count"`
+	TokenConsumed       int64     `json:"token_consumed"`
+	InputTokens         int64     `json:"input_tokens"`
+	OutputTokens        int64     `json:"output_tokens"`
+	CacheCreationTokens int64     `json:"cache_creation_tokens"`
+	CacheReadTokens     int64     `json:"cache_read_tokens"`
+	SwitchCount         int64     `json:"switch_count"`
+	QPS                 float64   `json:"qps"`
+	TPS                 float64   `json:"tps"`
 }
 
 type OpsThroughputPlatformBreakdownItem struct {

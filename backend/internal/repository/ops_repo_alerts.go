@@ -834,6 +834,10 @@ func buildOpsAlertEventsWhere(filter *service.OpsAlertEventFilter) (string, []an
 		args = append(args, fmt.Sprintf("%d", *filter.GroupID))
 		clauses = append(clauses, "(dimensions->>'group_id') = $"+itoa(len(args)))
 	}
+	if filter.AccountID != nil && *filter.AccountID > 0 {
+		args = append(args, fmt.Sprintf("%d", *filter.AccountID))
+		clauses = append(clauses, "(dimensions->>'account_id') = $"+itoa(len(args)))
+	}
 
 	return "WHERE " + strings.Join(clauses, " AND "), args
 }

@@ -319,10 +319,8 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 								zap.Int("retry_count", sameAccountRetryCount[account.ID]),
 								zap.Duration("retry_delay", retryDelay),
 							)
-							select {
-							case <-requestCtx.Done():
+							if !waitForSameAccountRetry(requestCtx, retryDelay) {
 								return
-							case <-time.After(retryDelay):
 							}
 							continue
 						}

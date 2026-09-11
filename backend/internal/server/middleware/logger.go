@@ -1,6 +1,8 @@
 package middleware
 
 import (
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestprofile"
+	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
@@ -8,17 +10,28 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // Logger 请求日志中间件
-func Logger() gin.HandlerFunc {
+func Logger() gin.HandlerFunc { return LoggerWithProfiling(true) }
+func LoggerWithProfiling(enabled bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// 开始时间
 		startTime := time.Now()
 
 		// 请求路径
 		path := c.Request.URL.Path
+		// Profile inference requests only; admin/health traffic is not a model request.
+		profiled := enabled && isProfiledInferenceRequest(c.Request)
+		if profiled && requestprofile.From(c.Request.Context()) == nil {
+			c.Request = c.Request.WithContext(requestprofile.Attach(c.Request.Context(), startTime))
+		}
 
+		profileContext := c.Request.Context()
+		if profiled {
+			c.Writer = &requestProfileWriter{ResponseWriter: c.Writer, ctx: profileContext}
+		}
 		// 处理请求
 		c.Next()
 
@@ -78,8 +91,53 @@ func Logger() gin.HandlerFunc {
 			fields = append(fields, zap.String("model", model))
 		}
 
+		if profiled {
+			requestID, _ := profileContext.Value(ctxkey.RequestID).(string)
+			clientID, _ := c.Request.Context().Value(ctxkey.ClientRequestID).(string)
+			if requestID != "" {
+				fields = append(fields, zap.String("request_id", requestID))
+			}
+			if clientID != "" {
+				fields = append(fields, zap.String("client_request_id", clientID))
+			}
+			group := int64(0)
+			if key, ok := GetAPIKeyFromContext(c); ok && key.GroupID != nil {
+				group = *key.GroupID
+			}
+			wire := "http"
+			if strings.Contains(c.Writer.Header().Get("Content-Type"), "text/event-stream") {
+				wire = "sse"
+			}
+			if strings.EqualFold(c.GetHeader("Upgrade"), "websocket") {
+				wire = "websocket_session"
+			}
+			requestprofile.Metadata(profileContext, group, model, wire)
+
+			snapshot := requestprofile.Finish(profileContext, endTime)
+			if snapshot != nil {
+				profileFields := append(append([]zap.Field{}, fields...), zap.Any("request_profile", snapshot))
+				enc := zapcore.NewMapObjectEncoder()
+				for _, field := range profileFields {
+					field.AddTo(enc)
+				}
+				for key, value := range enc.Fields {
+					if text, ok := value.(string); ok && len(text) > 1024 {
+						enc.Fields[key] = text[:1024]
+					}
+				}
+				logger.WriteSinkEvent("info", "http.access", "http request completed", enc.Fields)
+			} else {
+				profiled = false
+			}
+		}
 		l := logger.FromContext(c.Request.Context()).With(fields...)
-		l.Info("http request completed", zap.Time("completed_at", endTime))
+		// Profiles go directly to the bounded sink exactly once. Console level
+		// and sampling must neither suppress persistence nor duplicate it.
+		console := l
+		if profiled {
+			console = l.With(zap.Bool(logger.OpsSystemLogSkipField, true))
+		}
+		console.Info("http request completed", zap.Time("completed_at", endTime))
 
 		if len(c.Errors) > 0 {
 			l.Warn("http request contains gin errors", zap.String("errors", c.Errors.String()))

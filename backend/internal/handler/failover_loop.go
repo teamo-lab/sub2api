@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestprofile"
 	"net/http"
 	"time"
 
@@ -348,6 +349,7 @@ func failoverClientGone(c *gin.Context) bool {
 
 // sleepWithContext 等待指定时长，返回 false 表示 context 已取消。
 func sleepWithContext(ctx context.Context, d time.Duration) bool {
+	defer requestprofile.Start(ctx, "retry_backoff")()
 	if d <= 0 {
 		return true
 	}
@@ -355,6 +357,18 @@ func sleepWithContext(ctx context.Context, d time.Duration) bool {
 	case <-ctx.Done():
 		return false
 	case <-time.After(d):
+		return true
+	}
+}
+
+// waitForSameAccountRetry preserves the original timer/cancellation semantics
+// while accounting for the wait in the current client request's profile.
+func waitForSameAccountRetry(ctx context.Context, delay time.Duration) bool {
+	defer requestprofile.Start(ctx, "retry_backoff")()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(delay):
 		return true
 	}
 }

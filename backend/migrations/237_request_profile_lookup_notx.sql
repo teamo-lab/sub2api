@@ -1,0 +1,5 @@
+-- Non-transactional: do not block shared log writers during a 0% candidate migration.
+-- Profiles reuse the bounded asynchronous ops log sink and its retention policy.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_ops_request_profile_created
+ON ops_system_logs (created_at DESC, id DESC)
+WHERE extra ? 'request_profile' AND component = 'http.access' AND message = 'http request completed';

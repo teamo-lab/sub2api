@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestprofile"
 	"net/http"
 	"sort"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
+	"github.com/Wei-Shaw/sub2api/internal/relay"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -59,6 +61,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	}
 	guardFirstOutput := firstOutputTimeout > 0
 	stageFirstOutput := account != nil && account.Platform == PlatformOpenAI
+	nativeRelayHold := stageFirstOutput && s.teamoRelayEnabled(c)
+	var relayCommitStarted atomic.Bool
+	relayReplayUnsafe := false
 	var attemptResponseHeaders http.Header
 	if stageFirstOutput {
 		if s.responseHeaderFilter != nil {
@@ -123,13 +128,15 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	if s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
 		maxLineSize = s.cfg.Gateway.MaxLineSize
 	}
+	requestprofile.DeliverySupported(c.Request.Context())
+	observeReasoning := profileOpenAIReasoningObserver(c.Request.Context())
 	var firstTokenMs *int
 	ttftMode := s.openAITTFTMode(ctx)
 	firstOutputProgressObserved := false
 	bufferedWriter := bufio.NewWriterSize(w, 4*1024)
-	var firstOutputStage *openAIFirstOutputStage
+	var firstOutputStage openAIStreamStage
 	if stageFirstOutput {
-		firstOutputStage = newDefaultOpenAIFirstOutputStage()
+		firstOutputStage = s.newOpenAIStreamStage(c)
 		defer func() {
 			if err := firstOutputStage.Close(); err != nil {
 				logger.LegacyPrintf("service.openai_gateway", "OpenAI first-output staging cleanup failed: account=%d model=%s error=%v", account.ID, originalModel, err)
@@ -137,19 +144,32 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		}()
 	}
 	writePendingString := func(value string) (int, error) {
-		if firstOutputStage != nil && !firstOutputStage.closed {
+		if firstOutputStage != nil && !firstOutputStage.Closed() {
 			return firstOutputStage.WriteString(value)
 		}
 		return bufferedWriter.WriteString(value)
 	}
 	pendingBytes := func() int64 {
-		if firstOutputStage != nil && !firstOutputStage.closed {
+		if firstOutputStage != nil && !firstOutputStage.Closed() {
 			return firstOutputStage.Buffered()
 		}
 		return int64(bufferedWriter.Buffered())
 	}
 	flushBuffered := func() error {
-		if firstOutputStage != nil && !firstOutputStage.closed {
+		if nativeRelayHold {
+			if !relayCommitStarted.Load() {
+				if err := c.Request.Context().Err(); err != nil {
+					return err
+				}
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+			}
+			// A failed/short write may still have delivered bytes. Never reopen
+			// the replay window based on the writer's byte count afterward.
+			relayCommitStarted.Store(true)
+		}
+		if firstOutputStage != nil && !firstOutputStage.Closed() {
 			if err := firstOutputStage.CommitTo(w); err != nil {
 				return err
 			}
@@ -250,6 +270,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	errorEventSent := false
 	clientDisconnected := false // 客户端断开后继续 drain 上游以收集 usage
 	sawTerminalEvent := false
+	profileTerminal := ""
 	sawFailedEvent := false
 	sawBareError := false
 	sawResponseFailed := false
@@ -268,6 +289,8 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	var streamEarlyErr error
 	terminalFailurePending := false
 	failureDelivered := false
+	terminalOrigin := s.newOpenAIStreamErrorOrigin(c, account, false, upstreamRequestID)
+	defer terminalOrigin.record()
 	suppressCurrentEvent := false
 	var bareErrorPayload []byte
 	bareErrorAccountSideEffectsPending := false
@@ -276,10 +299,37 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	eventStartsClientOutput := false
 	eventStartsTTFTOutput := false
 	eventShouldFlush := false
+	relayContextErr := func() error {
+		if err := c.Request.Context().Err(); err != nil {
+			return err
+		}
+		return ctx.Err()
+	}
+	canRelayReplay := func() bool {
+		return !relayCommitStarted.Load() && !relayReplayUnsafe && !clientDisconnected && relayContextErr() == nil
+	}
+	if nativeRelayHold {
+		// Before delivery, cancellation must unblock a silent body read. After
+		// delivery the existing usage-drain behavior remains unchanged.
+		closeBeforeDelivery := func() {
+			if !relayCommitStarted.Load() {
+				_ = resp.Body.Close()
+			}
+		}
+		stopCancel := context.AfterFunc(c.Request.Context(), closeBeforeDelivery)
+		stopBudget := context.AfterFunc(ctx, closeBeforeDelivery)
+		defer stopCancel()
+		defer stopBudget()
+	}
 	handlePendingWriteError := func(err error) {
-		if firstOutputStage != nil && !firstOutputStage.closed {
+		if firstOutputStage != nil && !firstOutputStage.Closed() {
+			if nativeRelayHold && !canRelayReplay() {
+				streamEarlyErr = fmt.Errorf("native stream staging stopped after replay boundary: %v", err)
+				_ = resp.Body.Close()
+				return
+			}
 			message := "OpenAI first-output staging failed"
-			if errors.Is(err, errOpenAIFirstOutputStageLimit) {
+			if errors.Is(err, errOpenAIFirstOutputStageLimit) || errors.Is(err, relay.ErrLimit) {
 				message = "OpenAI first-output staging limit exceeded"
 			}
 			logger.LegacyPrintf("service.openai_gateway", "%s: account=%d model=%s error=%v", message, account.ID, originalModel, err)
@@ -298,7 +348,10 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		shouldFlush := eventShouldFlush || (queueDrained && clientOutputStarted)
 		eventInProgress = false
 		if !clientDisconnected {
-			if completedProgressEvent {
+			if terminalFailurePending {
+				terminalOrigin.seal()
+			}
+			if completedProgressEvent && (!nativeRelayHold || shouldFlush) {
 				applyAttemptResponseHeaders()
 			}
 			if shouldFlush {
@@ -306,6 +359,8 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 					clientDisconnected = true
 					logger.LegacyPrintf("service.openai_gateway", "Client disconnected during streaming flush, continuing to drain upstream for billing")
 				} else {
+					requestprofile.Delivery(c.Request.Context(), pendingAnswerOutput || answerOutputStarted, profileTerminal)
+					profileTerminal = ""
 					clientOutputStarted = true
 					if pendingAnswerOutput {
 						answerOutputStarted = true
@@ -324,6 +379,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		if completedTTFTEvent && firstTokenMs == nil {
 			ms := int(time.Since(startTime).Milliseconds())
 			firstTokenMs = &ms
+			requestprofile.Mark(c.Request.Context(), "first_semantic", 0)
 		}
 		eventStartsClientOutput = false
 		eventStartsTTFTOutput = false
@@ -347,6 +403,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			clientDisconnected = true
 			return
 		}
+		requestprofile.Delivery(c.Request.Context(), false, "error")
 		clientOutputStarted = true
 		CompleteErrorRecovery(c)
 		lastDownstreamWriteAt = time.Now()
@@ -380,11 +437,16 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			logger.LegacyPrintf("service.openai_gateway", "%s", disconnectMessage)
 			return
 		}
+		requestprofile.Delivery(c.Request.Context(), pendingAnswerOutput || answerOutputStarted, profileTerminal)
+		profileTerminal = ""
 		clientOutputStarted = true
 		CompleteErrorRecovery(c)
 		lastDownstreamWriteAt = time.Now()
 	}
 	finalizeStream := func() (*openaiStreamingResult, error) {
+		if nativeRelayHold && !relayCommitStarted.Load() && relayContextErr() != nil {
+			return resultWithUsage(), fmt.Errorf("stream usage incomplete: %w", relayContextErr())
+		}
 		if stageFirstOutput && eventInProgress {
 			// EOF dispatches the final SSE event even without a trailing blank line.
 			completeGuardedEvent(true)
@@ -399,12 +461,13 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				handlePendingWriteError(err)
 			} else {
 				failureDelivered = true
+				terminalOrigin.seal()
 			}
 		}
 		if sawTerminalEvent && !sawFailedEvent {
 			s.clearOpenAIProxyStreamDisconnect(account)
 		}
-		if !sawTerminalEvent && !openAIStreamClientOutputStarted(c, clientOutputStarted) && !eventShouldFlush {
+		if !sawTerminalEvent && !openAIStreamClientOutputStarted(c, clientOutputStarted) && !eventShouldFlush && (!nativeRelayHold || canRelayReplay()) {
 			return resultWithUsage(), s.newOpenAIStreamFailoverError(
 				c,
 				account,
@@ -414,7 +477,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				"OpenAI stream ended before a terminal event",
 			)
 		}
-		if !sawTerminalEvent && !answerOutputReached() && !clientDisconnected && account != nil && account.Platform == PlatformOpenAI {
+		if !s.teamoRelayEnabled(c) && !sawTerminalEvent && !answerOutputReached() && !clientDisconnected && account != nil && account.Platform == PlatformOpenAI {
 			// Only reasoning reached the client before the upstream dropped the
 			// stream: replay on another account rather than surfacing a truncated
 			// stream with no answer.
@@ -423,7 +486,13 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			logOpenAIFailoverAfterReasoningOutput(ctx, account, "native_sse", upstreamRequestID, "eof")
 			return resultWithUsage(), failoverErr
 		}
+		if terminalFailurePending && !clientDisconnected {
+			terminalOrigin.seal()
+		}
 		flushPending("Client disconnected during final flush, returning collected usage")
+		if sawFailedEvent && !clientDisconnected && pendingBytes() == 0 {
+			terminalOrigin.commit()
+		}
 		if !sawTerminalEvent {
 			if openAIStreamClientOutputStarted(c, clientOutputStarted) && !clientDisconnected {
 				s.recordOpenAIProxyStreamDisconnect(account, errors.New("stream ended before terminal event"), upstreamRequestID)
@@ -440,7 +509,10 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		if scanErr == nil {
 			return nil, nil, false
 		}
-		if errors.Is(scanErr, errOpenAIFirstOutputScannerLimit) && !firstOutputProgressObserved {
+		if nativeRelayHold && !relayCommitStarted.Load() && relayContextErr() != nil {
+			return resultWithUsage(), fmt.Errorf("stream usage incomplete: %w", relayContextErr()), true
+		}
+		if errors.Is(scanErr, errOpenAIFirstOutputScannerLimit) && !firstOutputProgressObserved && (!nativeRelayHold || canRelayReplay()) {
 			logger.LegacyPrintf("service.openai_gateway", "SSE token exceeded guarded first-output limit: account=%d limit=%d error=%v", account.ID, openAIFirstOutputStageMaxBytes+openAIFirstOutputScannerFramingAllowance, scanErr)
 			failoverErr := s.newOpenAIStreamFailoverError(
 				c, account, false, upstreamRequestID, nil,
@@ -449,7 +521,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			failoverErr.SafeToFailoverAfterWrite = true
 			return resultWithUsage(), failoverErr, true
 		}
-		if errors.Is(scanErr, bufio.ErrTooLong) && stageFirstOutput && !firstOutputProgressObserved {
+		if errors.Is(scanErr, bufio.ErrTooLong) && stageFirstOutput && !firstOutputProgressObserved && (!nativeRelayHold || canRelayReplay()) {
 			logger.LegacyPrintf("service.openai_gateway", "SSE line too long before first output: account=%d max_size=%d error=%v", account.ID, maxLineSize, scanErr)
 			failoverErr := s.newOpenAIStreamFailoverError(
 				c, account, false, upstreamRequestID, nil,
@@ -479,7 +551,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			sendErrorEvent("response_too_large")
 			return resultWithUsage(), scanErr, true
 		}
-		if !openAIStreamClientOutputStarted(c, clientOutputStarted) && !eventShouldFlush {
+		if !openAIStreamClientOutputStarted(c, clientOutputStarted) && !eventShouldFlush && (!nativeRelayHold || canRelayReplay()) {
 			msg := "OpenAI stream disconnected before completion"
 			if errText := strings.TrimSpace(scanErr.Error()); errText != "" {
 				msg += ": " + errText
@@ -507,6 +579,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		if data, ok := extractOpenAISSEDataLine(line); ok {
 			dataBytes := []byte(data)
 			eventType := effectiveOpenAISSEEventType(dataBytes, pendingSSEEventType)
+			observeReasoning(dataBytes, eventType)
 			if codexFailureTerminal && sawBareError && !sawResponseFailed &&
 				(eventType == "response.completed" || eventType == "response.done") {
 				// A later successful terminal is authoritative over a pending bare
@@ -571,7 +644,12 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 					})
 				}
 				outputStarted := openAIStreamClientOutputStarted(c, clientOutputStarted)
-				if !outputStarted && !cyberHit {
+				if !outputStarted && !cyberHit && (!nativeRelayHold || canRelayReplay()) {
+					if retrySignal := newOpenAIEncryptedSemanticRetrySignal(c, dataBytes); retrySignal != nil {
+						sawFailedEvent = true
+						streamEarlyErr = retrySignal
+						return
+					}
 					if compactErr := newOpenAICompactFallbackSignal(c, dataBytes, failedMessage); compactErr != nil {
 						sawFailedEvent = true
 						streamEarlyErr = compactErr
@@ -582,7 +660,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				// upstream failed (typically capacity shedding) before any answer.
 				// Replaying on another account is safe for the client, so treat it
 				// like a pre-output failure instead of forwarding the terminal error.
-				failoverAfterReasoning := outputStarted && !answerOutputReached() && !cyberHit && !clientDisconnected &&
+				failoverAfterReasoning := !s.teamoRelayEnabled(c) && outputStarted && !answerOutputReached() && !cyberHit && !clientDisconnected &&
 					account != nil && account.Platform == PlatformOpenAI &&
 					openAIStreamFailedEventFailoverAfterReasoning(dataBytes, eventType, failedMessage)
 				if failoverAfterReasoning {
@@ -612,7 +690,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 							shouldFailover = openAIStreamFailedEventShouldFailover(dataBytes, failedMessage)
 						}
 					}
-					if shouldFailover {
+					if shouldFailover && (!nativeRelayHold || canRelayReplay()) {
 						sawFailedEvent = true
 						streamEarlyErr = s.newOpenAIStreamFailoverErrorWithModel(c, account, false, upstreamRequestID, dataBytes, failedMessage, mappedModel, resp.Header)
 						return
@@ -637,6 +715,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 					}
 				}
 				forceFlushFailedEvent = true
+				if !cyberHit {
+					terminalOrigin.stage(dataBytes, failedMessage)
+				}
 				sawFailedEvent = true
 				terminalFailurePending = !codexFailureTerminal || eventType == "response.failed"
 			}
@@ -703,6 +784,17 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				line = s.replaceModelInSSELine(line, mappedModel, originalModel)
 			}
 			startsClientOutput := forceFlushFailedEvent || openAIStreamDataStartsClientOutput(data, eventType)
+			// Keep upstream progress (and its existing timeout/TTFT semantics)
+			// separate from releasing data to the caller. Only known textual
+			// reasoning may stay held beyond the old progress boundary.
+			releaseClientOutput := startsClientOutput
+			if nativeRelayHold && !relayCommitStarted.Load() && startsClientOutput {
+				if !forceFlushFailedEvent && nativeRelayHoldableReasoning(data, eventType) {
+					releaseClientOutput = false
+				} else if forceFlushFailedEvent || !nativeRelayNonExecutableText(data, eventType) {
+					relayReplayUnsafe = true
+				}
+			}
 			startsVisibleOutput := openAIStreamDataStartsVisibleOutput(data, eventType)
 			if openAIStreamDataStartsAnswerOutput(data, eventType) {
 				pendingAnswerOutput = true
@@ -733,8 +825,8 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 
 			// 写入客户端（客户端断开后继续 drain 上游）
 			if !clientDisconnected && !failureDelivered && !suppressCurrentEvent {
-				shouldFlush := queueDrained && (clientOutputStarted || startsClientOutput)
-				if firstTokenMs == nil && startsVisibleOutput && startsClientOutput {
+				shouldFlush := queueDrained && (clientOutputStarted || releaseClientOutput)
+				if nativeFirstDeliveryNeedsFlush(nativeRelayHold, relayCommitStarted.Load(), firstTokenMs != nil, startsVisibleOutput, releaseClientOutput) {
 					// 保证首个 token 事件尽快出站，避免影响 TTFT。工具参数增量
 					// 是可见输出但被暂存（见 openAIStreamDataStartsClientOutput），
 					// 不能借 TTFT 通道提前出站，否则参数中途失败又漏半截给下游。
@@ -746,6 +838,12 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				} else if _, err := writePendingString("\n"); err != nil {
 					handlePendingWriteError(err)
 				} else {
+					switch eventType {
+					case "response.completed", "response.done":
+						profileTerminal = "complete"
+					case "response.failed", "response.incomplete", "response.cancelled", "response.canceled", "error":
+						profileTerminal = "error"
+					}
 					eventInProgress = true
 				}
 			}
@@ -754,6 +852,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if !guardFirstOutput && firstTokenMs == nil && startsTTFTOutput {
 				ms := int(time.Since(startTime).Milliseconds())
 				firstTokenMs = &ms
+				requestprofile.Mark(c.Request.Context(), "first_semantic", 0)
 				stopFirstOutputTimer()
 			}
 			s.parseSSEUsageBytesWithType(dataBytes, eventType, usage)
@@ -791,6 +890,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if terminalFailurePending && streamEarlyErr == nil {
 				terminalFailurePending = false
 				failureDelivered = true
+				if !clientDisconnected && pendingBytes() == 0 {
+					terminalOrigin.commit()
+				}
 			}
 			return
 		}
@@ -819,11 +921,16 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				handlePendingWriteError(err)
 			} else {
 				eventInProgress = line != ""
+				if line == "" && terminalFailurePending {
+					terminalOrigin.seal()
+				}
 				if shouldFlush {
 					if err := flushBuffered(); err != nil {
 						clientDisconnected = true
 						logger.LegacyPrintf("service.openai_gateway", "Client disconnected during streaming flush, continuing to drain upstream for billing")
 					} else {
+						requestprofile.Delivery(c.Request.Context(), pendingAnswerOutput || answerOutputStarted, profileTerminal)
+						profileTerminal = ""
 						clientOutputStarted = true
 						CompleteErrorRecovery(c)
 						lastDownstreamWriteAt = time.Now()
@@ -833,6 +940,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if line == "" && terminalFailurePending && streamEarlyErr == nil {
 				terminalFailurePending = false
 				failureDelivered = true
+				if !clientDisconnected && pendingBytes() == 0 {
+					terminalOrigin.commit()
+				}
 			}
 		}
 	}
@@ -926,6 +1036,11 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			}
 
 		case <-intervalCh:
+			// A parsed terminal already owns outcome and usage. Idle drain must
+			// not append another error or discard its accounting result.
+			if sawTerminalEvent && time.Since(time.Unix(0, atomic.LoadInt64(&lastReadAt))) >= streamInterval {
+				return finalizeStream()
+			}
 			if failureDelivered {
 				return resultWithUsage(), fmt.Errorf("upstream response failed: %s", failedMessage)
 			}
@@ -955,6 +1070,10 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 					return resultWithUsage(), grokStreamIdleFailoverError(account, streamInterval)
 				}
 			}
+			if nativeRelayHold && canRelayReplay() {
+				_ = resp.Body.Close()
+				return resultWithUsage(), s.newOpenAIStreamFailoverError(c, account, false, upstreamRequestID, nil, "OpenAI stream data interval timeout before delivery")
+			}
 			sendErrorEvent("stream_timeout")
 			return resultWithUsage(), fmt.Errorf("stream data interval timeout")
 
@@ -971,11 +1090,15 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			for ev := range events {
 				markEventProcessed(ev)
 			}
-			return resultWithUsage(), s.newOpenAIFirstOutputTimeoutError(
+			failoverErr := s.newOpenAIFirstOutputTimeoutError(
 				ctx, c, account, opsUpstreamProxyID(account), opsUpstreamProxyName(account),
 				startTime, originalModel, reasoningEffort,
 				firstOutputTimeout, "semantic_output", resp.Header,
 			)
+			if nativeRelayHold && !canRelayReplay() {
+				return resultWithUsage(), fmt.Errorf("stream timeout after replay boundary: %v", failoverErr)
+			}
+			return resultWithUsage(), failoverErr
 
 		case <-keepaliveCh:
 			if clientDisconnected || failureDelivered {

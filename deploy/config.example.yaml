@@ -226,6 +226,10 @@ security:
 # 网关配置
 # =============================================================================
 gateway:
+  # Metadata-only request profiling; disable to stop new traces without changing requests.
+  request_profiling_enabled: false
+  request_profiling_group_ids: []
+  request_profiling_retention_hours: 6
   # Timeout for waiting upstream response headers (seconds)
   # 等待上游响应头超时时间（秒）
   response_header_timeout: 600

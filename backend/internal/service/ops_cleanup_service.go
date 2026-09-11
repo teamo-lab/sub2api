@@ -143,6 +143,8 @@ func (s *OpsCleanupService) Stop() {
 }
 
 func (s *OpsCleanupService) runSettingsSync(ctx context.Context) {
+	profileTicker := time.NewTicker(5 * time.Minute)
+	defer profileTicker.Stop()
 	defer s.settingsSyncWG.Done()
 	ticker := time.NewTicker(opsCleanupSettingsSyncInterval)
 	defer ticker.Stop()
@@ -150,6 +152,12 @@ func (s *OpsCleanupService) runSettingsSync(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-profileTicker.C:
+			if s.cfg != nil && s.cfg.Gateway.RequestProfilingRetentionHours > 0 {
+				if _, err := trimRequestProfiles(ctx, s.db, time.Now().Add(-time.Duration(s.cfg.Gateway.RequestProfilingRetentionHours)*time.Hour)); err != nil && ctx.Err() == nil {
+					logger.LegacyPrintf("service.ops_cleanup", "[RequestProfileCleanup] bounded cleanup failed: %v", err)
+				}
+			}
 		case <-ticker.C:
 			fingerprint := s.readSettingsFingerprint(ctx)
 			s.mu.Lock()

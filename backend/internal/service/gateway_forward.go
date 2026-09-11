@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestprofile"
 	"io"
 	"log/slog"
 	"net/http"
@@ -66,6 +67,7 @@ func retryBackoffDelay(attempt int) time.Duration {
 }
 
 func sleepWithContext(ctx context.Context, d time.Duration) error {
+	defer requestprofile.Start(ctx, "retry_backoff")()
 	if d <= 0 {
 		return nil
 	}
