@@ -12,6 +12,29 @@ spec = importlib.util.spec_from_loader(loader.name, loader)
 m = importlib.util.module_from_spec(spec); loader.exec_module(m)
 
 class DependencyClientTest(unittest.TestCase):
+    def test_required_program_falls_back_to_healthy_container_with_tool(self):
+        container = {
+            'State': {'Running': True, 'Health': {'Status': 'healthy'}},
+            'Config': {'Env': ['DATABASE_HOST=db.internal']},
+        }
+        containers = {
+            'sub2api-worker': container,
+            'sub2api-blue': container,
+        }
+        with patch.object(m, 'inspect', side_effect=lambda name: containers.get(name)), patch.object(
+            m, 'container_has_program', side_effect=lambda name, program: name == 'sub2api-blue'
+        ) as has_program:
+            name, env = m.app_container('psql')
+        self.assertEqual('sub2api-blue', name)
+        self.assertEqual('db.internal', env['DATABASE_HOST'])
+        self.assertEqual([('sub2api-worker', 'psql'), ('sub2api-blue', 'psql')], [call.args for call in has_program.call_args_list])
+
+    def test_required_program_fails_when_no_healthy_container_has_tool(self):
+        container = {'State': {'Running': True, 'Health': {'Status': 'healthy'}}, 'Config': {'Env': []}}
+        with patch.object(m, 'inspect', return_value=container), patch.object(m, 'container_has_program', return_value=False):
+            with self.assertRaisesRegex(RuntimeError, 'no healthy application container with pg_dump'):
+                m.app_container('pg_dump')
+
     def test_external_credentials_never_enter_command_arguments(self):
         values = {'DATABASE_HOST': 'db.internal', 'DATABASE_USER': 'user', 'DATABASE_PASSWORD': 'not-for-logs'}
         with patch.dict(os.environ, {'SUB2API_DEPENDENCY_MODE': 'external'}), patch.object(m, 'app_container', return_value=('sub2api-blue', values)):
