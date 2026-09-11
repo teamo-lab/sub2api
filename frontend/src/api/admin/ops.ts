@@ -98,6 +98,8 @@ export interface OpsThroughputTrendPoint {
   switch_count?: number
   qps: number
   tps: number
+  ttft_p50_ms?: number | null
+  ttft_p90_ms?: number | null
 }
 
 export interface OpsThroughputPlatformBreakdownItem {
