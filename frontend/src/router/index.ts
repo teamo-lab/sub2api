@@ -432,6 +432,18 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/admin/account-ops',
+    name: 'AdminAccountOps',
+    component: () => import('@/views/admin/account-ops/AccountOpsDashboard.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Account Monitoring',
+      titleKey: 'admin.accountOps.title',
+      descriptionKey: 'admin.accountOps.description'
+    }
+  },
+  {
     path: '/admin/audit-logs',
     name: 'AdminAuditLogs',
     component: () => import('@/views/admin/AuditLogView.vue'),

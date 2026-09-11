@@ -595,6 +595,14 @@ func (h *OpsHandler) ListAlertEvents(c *gin.Context) {
 		}
 		filter.GroupID = &id
 	}
+	if v := strings.TrimSpace(c.Query("account_id")); v != "" {
+		id, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || id <= 0 {
+			response.BadRequest(c, "Invalid account_id")
+			return
+		}
+		filter.AccountID = &id
+	}
 	if startTime, endTime, err := parseOpsTimeRange(c, "24h"); err == nil {
 		// Only apply when explicitly provided to avoid surprising default narrowing.
 		if strings.TrimSpace(c.Query("start_time")) != "" || strings.TrimSpace(c.Query("end_time")) != "" || strings.TrimSpace(c.Query("time_range")) != "" {

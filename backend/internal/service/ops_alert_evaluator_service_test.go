@@ -160,7 +160,7 @@ func TestComputeRuleMetric_AccountTempUnscheduledCount(t *testing.T) {
 
 	rule := &OpsAlertRule{MetricType: "account_temp_unscheduled_count"}
 	val, ok := svc.computeRuleMetric(context.Background(), rule, nil,
-		now.Add(-5*time.Minute), now, "", nil)
+		now.Add(-5*time.Minute), now, "", nil, nil)
 
 	require.True(t, ok)
 	require.InDelta(t, 2.0, val, 0.0001, "only 2 accounts have an active temp-unsched window")
@@ -261,7 +261,7 @@ func TestComputeRuleMetricNewIndicators(t *testing.T) {
 			rule := &OpsAlertRule{
 				MetricType: tt.metricType,
 			}
-			gotValue, gotOK := svc.computeRuleMetric(ctx, rule, nil, start, end, platform, tt.groupID)
+			gotValue, gotOK := svc.computeRuleMetric(ctx, rule, nil, start, end, platform, tt.groupID, nil)
 			require.Equal(t, tt.wantOK, gotOK)
 			if !tt.wantOK {
 				return
@@ -269,4 +269,15 @@ func TestComputeRuleMetricNewIndicators(t *testing.T) {
 			require.InDelta(t, tt.wantValue, gotValue, 0.0001)
 		})
 	}
+}
+
+func TestOpsAlertAccountScope(t *testing.T) {
+	_, _, accountID, _ := parseOpsAlertRuleScope(map[string]any{"account_id": float64(42)})
+	require.NotNil(t, accountID)
+	require.Equal(t, int64(42), *accountID)
+
+	dimensions := buildOpsAlertDimensions("openai", nil, accountID)
+	require.Equal(t, int64(42), dimensions["account_id"])
+	require.True(t, supportsAccountScopedAlertMetric("error_rate"))
+	require.False(t, supportsAccountScopedAlertMetric("cpu_usage_percent"))
 }

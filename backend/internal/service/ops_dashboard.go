@@ -28,7 +28,7 @@ func (s *OpsService) GetDashboardOverview(ctx context.Context, filter *OpsDashbo
 	}
 
 	// Resolve query mode (requested via query param, or DB default).
-	filter.QueryMode = s.resolveOpsQueryMode(ctx, filter.QueryMode)
+	filter.QueryMode = s.resolveOpsFilterQueryMode(ctx, filter)
 
 	overview, err := s.opsRepo.GetDashboardOverview(ctx, filter)
 	if err != nil && shouldFallbackOpsPreagg(filter, err) {
@@ -68,6 +68,18 @@ func (s *OpsService) GetDashboardOverview(ctx context.Context, filter *OpsDashbo
 	overview.HealthScore = computeDashboardHealthScore(time.Now().UTC(), overview)
 
 	return overview, nil
+}
+
+func (s *OpsService) resolveOpsFilterQueryMode(ctx context.Context, filter *OpsDashboardFilter) OpsQueryMode {
+	// Account is not a dimension in the ops rollup tables. Falling back to raw
+	// keeps account-scoped results correct even when the caller requests preagg.
+	if filter != nil && filter.AccountID != nil && *filter.AccountID > 0 {
+		return OpsQueryModeRaw
+	}
+	if filter == nil {
+		return s.resolveOpsQueryMode(ctx, "")
+	}
+	return s.resolveOpsQueryMode(ctx, filter.QueryMode)
 }
 
 func (s *OpsService) resolveOpsQueryMode(ctx context.Context, requested OpsQueryMode) OpsQueryMode {

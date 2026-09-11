@@ -49,10 +49,13 @@ ChartJS.register(
 
 const { t } = useI18n()
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   trendData: TrendDataPoint[]
   loading?: boolean
-}>()
+  showCost?: boolean
+}>(), {
+  showCost: true
+})
 
 const isDarkMode = computed(() => {
   return document.documentElement.classList.contains('dark')
@@ -152,6 +155,7 @@ const lineOptions = computed(() => ({
           return `${context.dataset.label}: ${formatTokens(context.raw)}`
         },
         footer: (tooltipItems: any) => {
+          if (!props.showCost) return ''
           const dataIndex = tooltipItems[0]?.dataIndex
           if (dataIndex !== undefined && props.trendData[dataIndex]) {
             const data = props.trendData[dataIndex]

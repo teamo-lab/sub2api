@@ -47,7 +47,11 @@ func (r *opsRepository) GetThroughputTrend(ctx context.Context, filter *service.
 WITH usage_buckets AS (
   SELECT ` + usageBucketExpr + ` AS bucket,
          COUNT(*) AS success_count,
-         COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0) AS token_consumed
+         COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0) AS token_consumed,
+         COALESCE(SUM(input_tokens), 0) AS input_tokens,
+         COALESCE(SUM(output_tokens), 0) AS output_tokens,
+         COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
+         COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens
   FROM usage_logs ul
   ` + usageJoin + `
   ` + usageWhere + `
@@ -81,15 +85,20 @@ combined AS (
     SUM(success_count) AS success_count,
     SUM(error_count) AS error_count,
     SUM(token_consumed) AS token_consumed,
+    SUM(input_tokens) AS input_tokens,
+    SUM(output_tokens) AS output_tokens,
+    SUM(cache_creation_tokens) AS cache_creation_tokens,
+    SUM(cache_read_tokens) AS cache_read_tokens,
     SUM(switch_count) AS switch_count
   FROM (
-    SELECT bucket, success_count, 0 AS error_count, token_consumed, 0 AS switch_count
+    SELECT bucket, success_count, 0 AS error_count, token_consumed,
+           input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, 0 AS switch_count
     FROM usage_buckets
     UNION ALL
-    SELECT bucket, 0, error_count, 0, 0
+    SELECT bucket, 0, error_count, 0, 0, 0, 0, 0, 0
     FROM error_buckets
     UNION ALL
-    SELECT bucket, 0, 0, 0, switch_count
+    SELECT bucket, 0, 0, 0, 0, 0, 0, 0, switch_count
     FROM switch_buckets
   ) t
   GROUP BY bucket
@@ -98,6 +107,10 @@ SELECT
   bucket,
   (success_count + error_count) AS request_count,
   token_consumed,
+  input_tokens,
+  output_tokens,
+  cache_creation_tokens,
+  cache_read_tokens,
   switch_count
 FROM combined
 ORDER BY bucket ASC`
@@ -115,8 +128,9 @@ ORDER BY bucket ASC`
 		var bucket time.Time
 		var requests int64
 		var tokens sql.NullInt64
+		var inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens sql.NullInt64
 		var switches sql.NullInt64
-		if err := rows.Scan(&bucket, &requests, &tokens, &switches); err != nil {
+		if err := rows.Scan(&bucket, &requests, &tokens, &inputTokens, &outputTokens, &cacheCreationTokens, &cacheReadTokens, &switches); err != nil {
 			return nil, err
 		}
 		tokenConsumed := int64(0)
@@ -136,12 +150,16 @@ ORDER BY bucket ASC`
 		tps := roundTo1DP(float64(tokenConsumed) / denom)
 
 		points = append(points, &service.OpsThroughputTrendPoint{
-			BucketStart:   bucket.UTC(),
-			RequestCount:  requests,
-			TokenConsumed: tokenConsumed,
-			SwitchCount:   switchCount,
-			QPS:           qps,
-			TPS:           tps,
+			BucketStart:         bucket.UTC(),
+			RequestCount:        requests,
+			TokenConsumed:       tokenConsumed,
+			InputTokens:         opsNullInt64Value(inputTokens),
+			OutputTokens:        opsNullInt64Value(outputTokens),
+			CacheCreationTokens: opsNullInt64Value(cacheCreationTokens),
+			CacheReadTokens:     opsNullInt64Value(cacheReadTokens),
+			SwitchCount:         switchCount,
+			QPS:                 qps,
+			TPS:                 tps,
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -159,22 +177,25 @@ ORDER BY bucket ASC`
 		platform = strings.TrimSpace(strings.ToLower(filter.Platform))
 	}
 	groupID := (*int64)(nil)
+	accountID := (*int64)(nil)
 	model := ""
 	if filter != nil {
 		groupID = filter.GroupID
+		accountID = filter.AccountID
 		model = strings.TrimSpace(filter.Model)
 	}
 
 	// Drilldown helpers:
 	// - No platform/group: totals by platform
 	// - Platform selected but no group: top groups in that platform
-	if model == "" && platform == "" && (groupID == nil || *groupID <= 0) {
+	accountScoped := accountID != nil && *accountID > 0
+	if !accountScoped && model == "" && platform == "" && (groupID == nil || *groupID <= 0) {
 		items, err := r.getThroughputBreakdownByPlatform(ctx, start, end)
 		if err != nil {
 			return nil, err
 		}
 		byPlatform = items
-	} else if model == "" && platform != "" && (groupID == nil || *groupID <= 0) {
+	} else if !accountScoped && model == "" && platform != "" && (groupID == nil || *groupID <= 0) {
 		items, err := r.getThroughputTopGroupsByPlatform(ctx, start, end, platform, 10)
 		if err != nil {
 			return nil, err
@@ -189,6 +210,13 @@ ORDER BY bucket ASC`
 		ByPlatform: byPlatform,
 		TopGroups:  topGroups,
 	}, nil
+}
+
+func opsNullInt64Value(value sql.NullInt64) int64 {
+	if value.Valid {
+		return value.Int64
+	}
+	return 0
 }
 
 func (r *opsRepository) getThroughputBreakdownByPlatform(ctx context.Context, start, end time.Time) ([]*service.OpsThroughputPlatformBreakdownItem, error) {

@@ -129,6 +129,7 @@ func (r *opsRepository) getDashboardOverviewRaw(ctx context.Context, filter *ser
 		EndTime:   end,
 		Platform:  strings.TrimSpace(filter.Platform),
 		GroupID:   filter.GroupID,
+		AccountID: filter.AccountID,
 
 		SuccessCount:         successCount,
 		ErrorCountTotal:      errorTotal,
@@ -332,6 +333,7 @@ func (r *opsRepository) getDashboardOverviewPreaggregated(ctx context.Context, f
 		EndTime:   end,
 		Platform:  strings.TrimSpace(filter.Platform),
 		GroupID:   filter.GroupID,
+		AccountID: filter.AccountID,
 
 		SuccessCount:         successCount,
 		ErrorCountTotal:      errorTotal,
@@ -999,10 +1001,12 @@ func isQueryTimeoutErr(err error) bool {
 func buildUsageWhere(filter *service.OpsDashboardFilter, start, end time.Time, startIndex int) (join string, where string, args []any, nextIndex int) {
 	platform := ""
 	groupID := (*int64)(nil)
+	accountID := (*int64)(nil)
 	model := ""
 	if filter != nil {
 		platform = strings.TrimSpace(strings.ToLower(filter.Platform))
 		groupID = filter.GroupID
+		accountID = filter.AccountID
 		model = strings.TrimSpace(filter.Model)
 	}
 
@@ -1020,6 +1024,11 @@ func buildUsageWhere(filter *service.OpsDashboardFilter, start, end time.Time, s
 	if groupID != nil && *groupID > 0 {
 		args = append(args, *groupID)
 		clauses = append(clauses, fmt.Sprintf("ul.group_id = $%d", idx))
+		idx++
+	}
+	if accountID != nil && *accountID > 0 {
+		args = append(args, *accountID)
+		clauses = append(clauses, fmt.Sprintf("ul.account_id = $%d", idx))
 		idx++
 	}
 	if platform != "" {
@@ -1043,10 +1052,12 @@ func buildUsageWhere(filter *service.OpsDashboardFilter, start, end time.Time, s
 func buildErrorWhere(filter *service.OpsDashboardFilter, start, end time.Time, startIndex int) (where string, args []any, nextIndex int) {
 	platform := ""
 	groupID := (*int64)(nil)
+	accountID := (*int64)(nil)
 	model := ""
 	if filter != nil {
 		platform = strings.TrimSpace(strings.ToLower(filter.Platform))
 		groupID = filter.GroupID
+		accountID = filter.AccountID
 		model = strings.TrimSpace(filter.Model)
 	}
 
@@ -1066,6 +1077,11 @@ func buildErrorWhere(filter *service.OpsDashboardFilter, start, end time.Time, s
 	if groupID != nil && *groupID > 0 {
 		args = append(args, *groupID)
 		clauses = append(clauses, fmt.Sprintf("group_id = $%d", idx))
+		idx++
+	}
+	if accountID != nil && *accountID > 0 {
+		args = append(args, *accountID)
+		clauses = append(clauses, fmt.Sprintf("account_id = $%d", idx))
 		idx++
 	}
 	if platform != "" {

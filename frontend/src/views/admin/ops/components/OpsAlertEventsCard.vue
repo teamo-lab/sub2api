@@ -10,6 +10,16 @@ import { opsAPI, type AlertEventsQuery } from '@/api/admin/ops'
 import type { AlertEvent } from '../types'
 import { formatDateTime } from '../utils/opsFormatters'
 
+interface Props {
+  accountId?: number | null
+  platform?: string
+  groupId?: number | null
+  timeRangeFilter?: string
+  refreshToken?: number
+}
+
+const props = defineProps<Props>()
+
 const { t } = useI18n()
 const appStore = useAppStore()
 
@@ -82,8 +92,11 @@ const emailSentOptions = computed(() => [
 function buildQuery(overrides: Partial<AlertEventsQuery> = {}): AlertEventsQuery {
   const q: AlertEventsQuery = {
     limit: PAGE_SIZE,
-    time_range: timeRange.value
+    time_range: props.timeRangeFilter || timeRange.value
   }
+  if (typeof props.accountId === 'number' && props.accountId > 0) q.account_id = props.accountId
+  if (props.platform?.trim()) q.platform = props.platform.trim()
+  if (typeof props.groupId === 'number' && props.groupId > 0) q.group_id = props.groupId
   if (severity.value) q.severity = severity.value
   if (status.value) q.status = status.value
   if (emailSent.value === 'true') q.email_sent = true
@@ -187,6 +200,8 @@ function formatDimensionsSummary(event: AlertEvent): string {
   if (platform) parts.push(`platform=${platform}`)
   const groupId = event.dimensions?.group_id
   if (groupId != null && groupId !== '') parts.push(`group_id=${String(groupId)}`)
+  const accountId = event.dimensions?.account_id
+  if (accountId != null && accountId !== '') parts.push(`account_id=${String(accountId)}`)
   const region = getDimensionString(event, 'region')
   if (region) parts.push(`region=${region}`)
   return parts.length ? parts.join(' ') : '-'
@@ -325,6 +340,15 @@ watch([timeRange, severity, status, emailSent], () => {
   loadFirstPage()
 })
 
+watch(
+  () => [props.accountId, props.platform, props.groupId, props.timeRangeFilter, props.refreshToken] as const,
+  () => {
+    events.value = []
+    hasMore.value = true
+    loadFirstPage()
+  }
+)
+
 watch(historyRange, () => {
   if (showDetail.value) loadHistory()
 })
@@ -367,7 +391,7 @@ const empty = computed(() => events.value.length === 0 && !loading.value)
       </div>
 
       <div class="flex flex-wrap items-center gap-2">
-        <Select :model-value="timeRange" :options="timeRangeOptions" class="w-[120px]" @change="timeRange = String($event || '24h')" />
+        <Select v-if="!props.timeRangeFilter" :model-value="timeRange" :options="timeRangeOptions" class="w-[120px]" @change="timeRange = String($event || '24h')" />
         <Select :model-value="severity" :options="severityOptions" class="w-[88px]" @change="severity = String($event || '')" />
         <Select :model-value="status" :options="statusOptions" class="w-[110px]" @change="status = String($event || '')" />
         <Select :model-value="emailSent" :options="emailSentOptions" class="w-[110px]" @change="emailSent = String($event || '')" />
@@ -692,4 +716,3 @@ const empty = computed(() => events.value.length === 0 && !loading.value)
     </BaseDialog>
   </div>
 </template>
-
