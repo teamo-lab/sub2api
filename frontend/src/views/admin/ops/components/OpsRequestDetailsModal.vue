@@ -20,6 +20,8 @@ export interface OpsRequestDetailsPreset {
 interface Props {
   modelValue: boolean
   timeRange: string
+  customStartTime?: string | null
+  customEndTime?: string | null
   preset: OpsRequestDetailsPreset
   platform?: string
   groupId?: number | null
@@ -50,12 +52,18 @@ const pageSize = ref(10)
 const close = () => emit('update:modelValue', false)
 
 const rangeLabel = computed(() => {
+  if (props.timeRange === 'custom' && props.customStartTime && props.customEndTime) {
+    return `${formatDateTime(props.customStartTime)} - ${formatDateTime(props.customEndTime)}`
+  }
   const minutes = parseTimeRangeMinutes(props.timeRange)
   if (minutes >= 60) return t('admin.ops.requestDetails.rangeHours', { n: Math.round(minutes / 60) })
   return t('admin.ops.requestDetails.rangeMinutes', { n: minutes })
 })
 
 function buildTimeParams(): Pick<OpsRequestDetailsParams, 'start_time' | 'end_time'> {
+  if (props.timeRange === 'custom' && props.customStartTime && props.customEndTime) {
+    return { start_time: props.customStartTime, end_time: props.customEndTime }
+  }
   const minutes = parseTimeRangeMinutes(props.timeRange)
   const endTime = new Date()
   const startTime = new Date(endTime.getTime() - minutes * 60 * 1000)
@@ -114,6 +122,8 @@ watch(
 watch(
   () => [
     props.timeRange,
+    props.customStartTime,
+    props.customEndTime,
     props.platform,
     props.groupId,
     props.accountId,
