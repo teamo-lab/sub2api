@@ -638,7 +638,13 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		if gjson.GetBytes(body, "max_completion_tokens").Exists() && (account.Type == AccountTypeAPIKey || account.Platform != PlatformOpenAI) {
 			markPatchDelete("max_completion_tokens")
 		}
-		for _, unsupportedField := range []string{"prompt_cache_retention", "safety_identifier", "prompt_cache_options"} {
+		unsupportedFields := []string{"safety_identifier"}
+		// Public OpenAI-compatible API requests own their cache policy. Do not
+		// silently replace explicit cache boundaries with implicit caching.
+		if !account.IsOpenAIApiKey() {
+			unsupportedFields = append(unsupportedFields, "prompt_cache_retention", "prompt_cache_options")
+		}
+		for _, unsupportedField := range unsupportedFields {
 			if gjson.GetBytes(body, unsupportedField).Exists() {
 				markPatchDelete(unsupportedField)
 			}

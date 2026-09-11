@@ -211,6 +211,9 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 		// we must filter these fields explicitly here — otherwise the upstream
 		// rejects the request with "Unsupported parameter: ...".
 		for _, field := range cursorResponsesUnsupportedFields {
+			if field == "prompt_cache_retention" && account.IsOpenAIApiKey() {
+				continue
+			}
 			if stripped, derr := sjson.DeleteBytes(responsesBody, field); derr == nil {
 				responsesBody = stripped
 			}
@@ -237,6 +240,9 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 			return nil, fmt.Errorf("convert chat completions to responses: %w", err)
 		}
 		responsesReq.Model = upstreamModel
+		if account.UsesOpenAICodexProtocol() {
+			responsesReq.PromptCacheRetention = ""
+		}
 		normalizeResponsesRequestServiceTier(responsesReq)
 		responsesBody, err = json.Marshal(responsesReq)
 		if err != nil {
