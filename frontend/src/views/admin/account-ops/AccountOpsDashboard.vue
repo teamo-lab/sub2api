@@ -476,7 +476,11 @@ async function loadAccounts(search = '') {
   accountSearchController = controller
   accountsLoading.value = true
   try {
-    const response = await adminAPI.accounts.list(1, 50, { search: search.trim(), lite: 'true' }, { signal: controller.signal })
+    const response = await adminAPI.accounts.list(1, 50, {
+      search: search.trim(),
+      group: groupId.value ? String(groupId.value) : undefined,
+      lite: 'true'
+    }, { signal: controller.signal })
     accounts.value = response.items ?? []
   } catch (error: any) {
     if (error?.name !== 'CanceledError' && error?.name !== 'AbortError') console.error('[AccountOps] account search failed', error)
@@ -504,7 +508,10 @@ function onAccountChange(value: string | number | boolean | null) {
 
 function onGroupChange(value: string | number | boolean | null) {
   groupId.value = typeof value === 'number' ? value : parsePositiveInt(value)
+  accountId.value = null
+  selectedAccount.value = null
   model.value = ''
+  void loadAccounts()
 }
 
 function buildParams(): OpsDashboardFilterParams {

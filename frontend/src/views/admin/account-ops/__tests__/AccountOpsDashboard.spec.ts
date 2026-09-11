@@ -107,6 +107,34 @@ describe('AccountOpsDashboard', () => {
     wrapper.unmount()
   })
 
+  it('reloads account options within the selected group', async () => {
+    const wrapper = shallowMount(AccountOpsDashboard, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' }, Icon: true, BaseDialog: true,
+          TokenUsageTrend: true, TrendLineChartCard: true, OpsThroughputTrendChart: true,
+          OpsErrorDistributionChart: true, OpsErrorTrendChart: true, OpsAlertEventsCard: true,
+          OpsErrorDetailsModal: true, OpsErrorDetailModal: true, OpsRequestDetailsModal: true
+        }
+      }
+    })
+
+    await flushPromises()
+    listAccounts.mockClear()
+
+    await wrapper.findAllComponents({ name: 'Select' })[0]!.vm.$emit('change', 7)
+    await flushPromises()
+
+    expect(listAccounts).toHaveBeenCalledWith(
+      1,
+      50,
+      expect.objectContaining({ group: '7', lite: 'true' }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+    expect(wrapper.findAllComponents({ name: 'Select' })[1]!.props('modelValue')).toBeNull()
+    wrapper.unmount()
+  })
+
   it('passes a custom time window to every dashboard query', async () => {
     routeQuery = {
       account_id: '42',
