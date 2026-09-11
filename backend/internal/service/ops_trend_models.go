@@ -13,6 +13,8 @@ type OpsThroughputTrendPoint struct {
 	SwitchCount         int64     `json:"switch_count"`
 	QPS                 float64   `json:"qps"`
 	TPS                 float64   `json:"tps"`
+	TTFTP50MS           *int64    `json:"ttft_p50_ms,omitempty"`
+	TTFTP90MS           *int64    `json:"ttft_p90_ms,omitempty"`
 }
 
 type OpsThroughputPlatformBreakdownItem struct {

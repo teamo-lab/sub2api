@@ -9,12 +9,17 @@
           </div>
 
           <div class="flex flex-wrap items-end gap-3">
+            <label class="block min-w-[190px]">
+              <span class="mb-1 block text-xs font-medium text-gray-500 dark:text-gray-400">{{ t('admin.accountOps.selectGroup') }}</span>
+              <Select :model-value="groupId" :options="groupOptions" searchable class="w-full" @change="onGroupChange" />
+            </label>
+
             <label class="block min-w-[280px]">
               <span class="mb-1 block text-xs font-medium text-gray-500 dark:text-gray-400">{{ t('admin.accountOps.selectAccount') }}</span>
               <Select
                 :model-value="accountId"
                 :options="accountOptions"
-                :placeholder="t('admin.accountOps.selectAccount')"
+                :placeholder="t('admin.accountOps.selectAccountOptional')"
                 :search-placeholder="t('admin.accountOps.searchAccount')"
                 :loading="accountsLoading"
                 searchable
@@ -32,7 +37,7 @@
 
             <label class="block w-[130px]">
               <span class="mb-1 block text-xs font-medium text-gray-500 dark:text-gray-400">{{ t('admin.accountOps.timeRange') }}</span>
-              <Select :model-value="timeRange" :options="timeRangeOptions" @change="timeRange = String($event || '1h') as TimeRange" />
+              <Select :model-value="timeRange" :options="timeRangeOptions" @change="onTimeRangeChange" />
             </label>
 
             <label class="flex h-10 items-center gap-2 text-sm text-gray-600 dark:text-gray-300">
@@ -45,7 +50,7 @@
               class="btn btn-secondary flex h-10 w-10 items-center justify-center p-0"
               :title="t('common.refresh')"
               :aria-label="t('common.refresh')"
-              :disabled="loading || !accountId"
+              :disabled="loading || !hasScope"
               @click="refreshAll"
             >
               <Icon name="refresh" size="md" :class="loading ? 'animate-spin' : ''" />
@@ -59,9 +64,15 @@
           <span>{{ selectedAccount.status }}</span>
           <span v-if="lastUpdated">{{ t('admin.accountOps.lastUpdated', { time: lastUpdated.toLocaleTimeString() }) }}</span>
         </div>
+        <div v-else-if="selectedGroup" class="mt-3 flex flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+          <span class="rounded bg-gray-100 px-2 py-1 font-mono dark:bg-dark-800">#{{ selectedGroup.id }}</span>
+          <span>{{ selectedGroup.name }}</span>
+          <span>{{ selectedGroup.platform }}</span>
+          <span v-if="lastUpdated">{{ t('admin.accountOps.lastUpdated', { time: lastUpdated.toLocaleTimeString() }) }}</span>
+        </div>
       </section>
 
-      <div v-if="!accountId" class="flex min-h-[420px] items-center justify-center border border-dashed border-gray-300 bg-white dark:border-dark-700 dark:bg-dark-900">
+      <div v-if="!hasScope" class="flex min-h-[420px] items-center justify-center border border-dashed border-gray-300 bg-white dark:border-dark-700 dark:bg-dark-900">
         <div class="text-center">
           <Icon name="chart" size="xl" class="mx-auto text-gray-400" />
           <p class="mt-3 text-sm text-gray-500 dark:text-gray-400">{{ t('admin.accountOps.selectAccountHint') }}</p>
@@ -96,20 +107,43 @@
           <OpsThroughputTrendChart
             :points="snapshot?.throughput_trend?.points ?? []"
             :loading="loading"
-            :time-range="timeRange"
+            :time-range="chartTimeRange"
             :fullscreen="false"
             @open-details="openRequestDetails"
           />
         </div>
 
-        <TokenUsageTrend :trend-data="tokenTrend" :loading="loading" :show-cost="false" />
+        <div class="grid grid-cols-1 gap-6 lg:grid-cols-2">
+          <TokenUsageTrend :trend-data="tokenTrend" :loading="loading" :show-cost="false" />
+          <TrendLineChartCard
+            :title="t('admin.accountOps.trends.sla')"
+            :labels="trendLabels"
+            :series="slaTrendSeries"
+            :loading="loading"
+            primary-format="percent"
+          />
+          <TrendLineChartCard
+            :title="t('admin.accountOps.trends.pv')"
+            :labels="trendLabels"
+            :series="pvTrendSeries"
+            :loading="loading"
+            primary-format="number"
+          />
+          <TrendLineChartCard
+            :title="t('admin.accountOps.trends.ttft')"
+            :labels="trendLabels"
+            :series="ttftTrendSeries"
+            :loading="loading"
+            primary-format="milliseconds"
+          />
+        </div>
 
         <div class="grid grid-cols-1 gap-6 lg:grid-cols-2">
           <OpsErrorDistributionChart :data="errorDistribution" :loading="loading" @open-details="openErrorDetails('request')" />
           <OpsErrorTrendChart
             :points="snapshot?.error_trend?.points ?? []"
             :loading="loading"
-            :time-range="timeRange"
+            :time-range="chartTimeRange"
             @open-request-errors="openErrorDetails('request')"
             @open-upstream-errors="openErrorDetails('upstream')"
           />
@@ -119,7 +153,10 @@
           <p class="mb-2 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accountOps.alertScopeHint') }}</p>
           <OpsAlertEventsCard
             :account-id="accountId"
+            :group-id="groupId"
             :time-range-filter="timeRange"
+            :custom-start-time="customStartTime"
+            :custom-end-time="customEndTime"
             :refresh-token="refreshToken"
           />
         </div>
@@ -128,6 +165,9 @@
       <OpsErrorDetailsModal
         :show="showErrorDetails"
         :time-range="timeRange"
+        :custom-start-time="customStartTime"
+        :custom-end-time="customEndTime"
+        :group-id="groupId"
         :account-id="accountId"
         :model="model"
         :error-type="errorType"
@@ -138,11 +178,31 @@
       <OpsRequestDetailsModal
         v-model="showRequestDetails"
         :time-range="timeRange"
+        :custom-start-time="customStartTime"
+        :custom-end-time="customEndTime"
         :preset="requestPreset"
+        :group-id="groupId"
         :account-id="accountId"
         :model="model"
         @open-error-detail="openErrorDetail"
       />
+
+      <BaseDialog :show="showCustomTimeRangeDialog" :title="t('admin.ops.timeRange.custom')" width="narrow" @close="showCustomTimeRangeDialog = false">
+        <div class="space-y-4">
+          <label class="block">
+            <span class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">{{ t('admin.ops.customTimeRange.startTime') }}</span>
+            <input v-model="customStartTimeInput" type="datetime-local" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-dark-600 dark:bg-dark-800 dark:text-white" />
+          </label>
+          <label class="block">
+            <span class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">{{ t('admin.ops.customTimeRange.endTime') }}</span>
+            <input v-model="customEndTimeInput" type="datetime-local" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-dark-600 dark:bg-dark-800 dark:text-white" />
+          </label>
+          <div class="flex justify-end gap-3 pt-2">
+            <button type="button" class="btn btn-secondary" @click="showCustomTimeRangeDialog = false">{{ t('common.cancel') }}</button>
+            <button type="button" class="btn btn-primary" :disabled="!customRangeValid" @click="confirmCustomTimeRange">{{ t('common.confirm') }}</button>
+          </div>
+        </div>
+      </BaseDialog>
     </div>
   </AppLayout>
 </template>
@@ -153,11 +213,13 @@ import { useDebounceFn } from '@vueuse/core'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import AppLayout from '@/components/layout/AppLayout.vue'
+import BaseDialog from '@/components/common/BaseDialog.vue'
 import Select from '@/components/common/Select.vue'
 import Icon from '@/components/icons/Icon.vue'
 import TokenUsageTrend from '@/components/charts/TokenUsageTrend.vue'
+import TrendLineChartCard, { type TrendLineSeries } from '@/components/charts/TrendLineChartCard.vue'
 import { adminAPI } from '@/api'
-import { opsAPI, type OpsDashboardSnapshotV2Response, type OpsErrorDistributionResponse } from '@/api/admin/ops'
+import { opsAPI, type OpsDashboardFilterParams, type OpsDashboardSnapshotV2Response, type OpsErrorDistributionResponse } from '@/api/admin/ops'
 import type { AccountListItem, TrendDataPoint } from '@/types'
 import { formatNumber } from '@/utils/format'
 import OpsThroughputTrendChart from '@/views/admin/ops/components/OpsThroughputTrendChart.vue'
@@ -168,17 +230,23 @@ import OpsErrorDetailsModal from '@/views/admin/ops/components/OpsErrorDetailsMo
 import OpsErrorDetailModal from '@/views/admin/ops/components/OpsErrorDetailModal.vue'
 import OpsRequestDetailsModal, { type OpsRequestDetailsPreset } from '@/views/admin/ops/components/OpsRequestDetailsModal.vue'
 
-type TimeRange = '5m' | '30m' | '1h' | '6h' | '24h'
+type TimeRange = '5m' | '30m' | '1h' | '6h' | '24h' | 'custom'
+type GroupOption = { id: number; name: string; platform: string }
 
 const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
 const accountId = ref<number | null>(parsePositiveInt(route.query.account_id))
+const groupId = ref<number | null>(parsePositiveInt(route.query.group_id))
 const model = ref(typeof route.query.model === 'string' ? route.query.model : '')
-const timeRange = ref<TimeRange>(isTimeRange(route.query.time_range) ? route.query.time_range : '1h')
+const customStartTime = ref(parseISOTime(route.query.start_time))
+const customEndTime = ref(parseISOTime(route.query.end_time))
+const initialTimeRange = isTimeRange(route.query.time_range) ? route.query.time_range : '1h'
+const timeRange = ref<TimeRange>(initialTimeRange === 'custom' && (!customStartTime.value || !customEndTime.value) ? '1h' : initialTimeRange)
 const accounts = ref<AccountListItem[]>([])
 const selectedAccount = ref<AccountListItem | null>(null)
 const accountsLoading = ref(false)
+const groups = ref<GroupOption[]>([])
 const models = ref<string[]>([])
 const snapshot = ref<OpsDashboardSnapshotV2Response | null>(null)
 const errorDistribution = ref<OpsErrorDistributionResponse | null>(null)
@@ -187,6 +255,9 @@ const errorMessage = ref('')
 const lastUpdated = ref<Date | null>(null)
 const autoRefresh = ref(true)
 const refreshToken = ref(0)
+const showCustomTimeRangeDialog = ref(false)
+const customStartTimeInput = ref('')
+const customEndTimeInput = ref('')
 let accountSearchController: AbortController | null = null
 let dashboardController: AbortController | null = null
 let refreshTimer: number | null = null
@@ -205,17 +276,31 @@ function parsePositiveInt(value: unknown): number | null {
 }
 
 function isTimeRange(value: unknown): value is TimeRange {
-  return ['5m', '30m', '1h', '6h', '24h'].includes(String(value))
+  return ['5m', '30m', '1h', '6h', '24h', 'custom'].includes(String(value))
 }
+
+function parseISOTime(value: unknown): string | null {
+  if (typeof value !== 'string' || !value) return null
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString()
+}
+
+const hasScope = computed(() => Boolean(accountId.value || groupId.value))
+const selectedGroup = computed(() => groups.value.find((item) => item.id === groupId.value) ?? null)
+
+const groupOptions = computed(() => [
+  { value: null, label: t('admin.accountOps.noGroupFilter') },
+  ...groups.value.map((group) => ({ value: group.id, label: `${group.name} · #${group.id} · ${group.platform}` }))
+])
 
 const accountOptions = computed(() => {
   const items = selectedAccount.value && !accounts.value.some((item) => item.id === selectedAccount.value?.id)
     ? [selectedAccount.value, ...accounts.value]
     : accounts.value
-  return items.map((account) => ({
+  return [{ value: null, label: t('admin.accountOps.noAccountFilter') }, ...items.map((account) => ({
     value: account.id,
     label: `${account.name} · #${account.id} · ${account.platform}`
-  }))
+  }))]
 })
 
 const modelOptions = computed(() => [
@@ -223,10 +308,15 @@ const modelOptions = computed(() => [
   ...Array.from(new Set([...(model.value ? [model.value] : []), ...models.value])).map((value) => ({ value, label: value }))
 ])
 
-const timeRangeOptions = computed(() => (['5m', '30m', '1h', '6h', '24h'] as const).map((value) => ({
-  value,
-  label: t(`admin.ops.timeRange.${value}`)
-})))
+const timeRangeOptions = computed(() => [
+  ...(['5m', '30m', '1h', '6h', '24h'] as const).map((value) => ({ value, label: t(`admin.ops.timeRange.${value}`) })),
+  {
+    value: 'custom',
+    label: timeRange.value === 'custom' && customStartTime.value && customEndTime.value
+      ? `${t('admin.ops.timeRange.custom')} (${formatCustomTimeRangeLabel(customStartTime.value, customEndTime.value)})`
+      : t('admin.ops.timeRange.custom')
+  }
+])
 
 function formatPercent(value: number | null | undefined): string {
   return `${((value ?? 0) * 100).toFixed(2)}%`
@@ -270,7 +360,7 @@ const metrics = computed(() => {
 })
 
 const tokenTrend = computed<TrendDataPoint[]>(() => (snapshot.value?.throughput_trend?.points ?? []).map((point) => ({
-  date: new Date(point.bucket_start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+  date: formatTrendLabel(point.bucket_start),
   requests: point.request_count,
   input_tokens: point.input_tokens ?? point.token_consumed,
   output_tokens: point.output_tokens ?? 0,
@@ -280,6 +370,105 @@ const tokenTrend = computed<TrendDataPoint[]>(() => (snapshot.value?.throughput_
   cost: 0,
   actual_cost: 0
 })))
+
+const trendLabels = computed(() => (snapshot.value?.throughput_trend?.points ?? []).map((point) => formatTrendLabel(point.bucket_start)))
+
+const pvTrendSeries = computed<TrendLineSeries[]>(() => [{
+  label: t('admin.accountOps.trends.requests'),
+  data: (snapshot.value?.throughput_trend?.points ?? []).map((point) => point.request_count),
+  color: '#3b82f6',
+  fill: true,
+  format: 'number'
+}])
+
+const ttftTrendSeries = computed<TrendLineSeries[]>(() => [
+  {
+    label: 'P50',
+    data: (snapshot.value?.throughput_trend?.points ?? []).map((point) => point.ttft_p50_ms ?? null),
+    color: '#10b981',
+    format: 'milliseconds'
+  },
+  {
+    label: 'P90',
+    data: (snapshot.value?.throughput_trend?.points ?? []).map((point) => point.ttft_p90_ms ?? null),
+    color: '#f59e0b',
+    format: 'milliseconds'
+  }
+])
+
+const slaTrendSeries = computed<TrendLineSeries[]>(() => {
+  const errorsByBucket = new Map((snapshot.value?.error_trend?.points ?? []).map((point) => [point.bucket_start, point]))
+  return [{
+    label: 'SLA',
+    data: (snapshot.value?.throughput_trend?.points ?? []).map((point) => {
+      const errors = errorsByBucket.get(point.bucket_start)
+      const totalErrors = errors?.error_count_total ?? 0
+      const slaErrors = errors?.error_count_sla ?? 0
+      const successes = Math.max(0, point.request_count - totalErrors)
+      const samples = successes + slaErrors
+      return samples > 0 ? (successes / samples) * 100 : null
+    }),
+    color: '#10b981',
+    fill: true,
+    format: 'percent'
+  }]
+})
+
+function formatTrendLabel(value: string): string {
+  const date = new Date(value)
+  const customSpan = customStartTime.value && customEndTime.value
+    ? new Date(customEndTime.value).getTime() - new Date(customStartTime.value).getTime()
+    : 0
+  const includeDate = timeRange.value === '24h' || (timeRange.value === 'custom' && customSpan >= 24 * 60 * 60 * 1000)
+  return date.toLocaleString([], includeDate
+    ? { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }
+    : { hour: '2-digit', minute: '2-digit' })
+}
+
+function formatCustomTimeRangeLabel(startTime: string, endTime: string): string {
+  const format = (value: string) => new Date(value).toLocaleString([], {
+    month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
+  })
+  return `${format(startTime)} ~ ${format(endTime)}`
+}
+
+function toLocalDateTimeInput(value: Date): string {
+  return new Date(value.getTime() - value.getTimezoneOffset() * 60_000).toISOString().slice(0, 16)
+}
+
+const customRangeValid = computed(() => {
+  if (!customStartTimeInput.value || !customEndTimeInput.value) return false
+  const start = new Date(customStartTimeInput.value).getTime()
+  const end = new Date(customEndTimeInput.value).getTime()
+  return Number.isFinite(start) && Number.isFinite(end) && start < end
+})
+
+const chartTimeRange = computed(() => {
+  if (timeRange.value !== 'custom' || !customStartTime.value || !customEndTime.value) return timeRange.value
+  const span = new Date(customEndTime.value).getTime() - new Date(customStartTime.value).getTime()
+  return span >= 24 * 60 * 60 * 1000 ? '24h' : '1h'
+})
+
+function onTimeRangeChange(value: string | number | boolean | null) {
+  const next = String(value || '1h')
+  if (next !== 'custom') {
+    timeRange.value = isTimeRange(next) ? next : '1h'
+    return
+  }
+  const end = customEndTime.value ? new Date(customEndTime.value) : new Date()
+  const start = customStartTime.value ? new Date(customStartTime.value) : new Date(end.getTime() - 60 * 60 * 1000)
+  customStartTimeInput.value = toLocalDateTimeInput(start)
+  customEndTimeInput.value = toLocalDateTimeInput(end)
+  showCustomTimeRangeDialog.value = true
+}
+
+function confirmCustomTimeRange() {
+  if (!customRangeValid.value) return
+  customStartTime.value = new Date(customStartTimeInput.value).toISOString()
+  customEndTime.value = new Date(customEndTimeInput.value).toISOString()
+  timeRange.value = 'custom'
+  showCustomTimeRangeDialog.value = false
+}
 
 async function loadAccounts(search = '') {
   accountSearchController?.abort()
@@ -313,17 +502,33 @@ function onAccountChange(value: string | number | boolean | null) {
   if (nextID && !selectedAccount.value) void restoreSelectedAccount()
 }
 
-function buildParams() {
-  return {
-    time_range: timeRange.value,
+function onGroupChange(value: string | number | boolean | null) {
+  groupId.value = typeof value === 'number' ? value : parsePositiveInt(value)
+  model.value = ''
+}
+
+function buildParams(): OpsDashboardFilterParams {
+  const params: OpsDashboardFilterParams = {
     account_id: accountId.value,
+    group_id: groupId.value,
     model: model.value || undefined,
     mode: 'raw' as const
   }
+  if (timeRange.value === 'custom' && customStartTime.value && customEndTime.value) {
+    params.start_time = customStartTime.value
+    params.end_time = customEndTime.value
+  } else {
+    params.time_range = timeRange.value === 'custom' ? '1h' : timeRange.value
+  }
+  return params
 }
 
 async function refreshAll() {
-  if (!accountId.value) return
+  if (!hasScope.value) {
+    snapshot.value = null
+    errorDistribution.value = null
+    return
+  }
   dashboardController?.abort()
   const controller = new AbortController()
   dashboardController = controller
@@ -355,12 +560,17 @@ const refreshDebounced = useDebounceFn(refreshAll, 120)
 const syncQuery = useDebounceFn(() => {
   const query: Record<string, string> = {}
   if (accountId.value) query.account_id = String(accountId.value)
+  if (groupId.value) query.group_id = String(groupId.value)
   if (model.value) query.model = model.value
   if (timeRange.value !== '1h') query.time_range = timeRange.value
+  if (timeRange.value === 'custom' && customStartTime.value && customEndTime.value) {
+    query.start_time = customStartTime.value
+    query.end_time = customEndTime.value
+  }
   void router.replace({ query })
 }, 120)
 
-watch([accountId, model, timeRange], () => {
+watch([accountId, groupId, model, timeRange, customStartTime, customEndTime], () => {
   syncQuery()
   refreshDebounced()
 })
@@ -381,10 +591,16 @@ function openErrorDetail(id: number) {
 }
 
 onMounted(async () => {
-  await Promise.all([loadAccounts(), restoreSelectedAccount()])
+  await Promise.all([
+    loadAccounts(),
+    restoreSelectedAccount(),
+    adminAPI.groups.getAll().then((items) => {
+      groups.value = items.map((item) => ({ id: item.id, name: item.name, platform: item.platform }))
+    }).catch((error) => console.error('[AccountOps] group load failed', error))
+  ])
   await refreshAll()
   refreshTimer = window.setInterval(() => {
-    if (autoRefresh.value && accountId.value && !document.hidden) void refreshAll()
+    if (autoRefresh.value && hasScope.value && !document.hidden) void refreshAll()
   }, 30_000)
 })
 

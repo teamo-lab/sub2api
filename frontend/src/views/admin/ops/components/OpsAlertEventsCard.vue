@@ -15,6 +15,8 @@ interface Props {
   platform?: string
   groupId?: number | null
   timeRangeFilter?: string
+  customStartTime?: string | null
+  customEndTime?: string | null
   refreshToken?: number
 }
 
@@ -91,8 +93,13 @@ const emailSentOptions = computed(() => [
 
 function buildQuery(overrides: Partial<AlertEventsQuery> = {}): AlertEventsQuery {
   const q: AlertEventsQuery = {
-    limit: PAGE_SIZE,
-    time_range: props.timeRangeFilter || timeRange.value
+    limit: PAGE_SIZE
+  }
+  if (props.timeRangeFilter === 'custom' && props.customStartTime && props.customEndTime) {
+    q.start_time = props.customStartTime
+    q.end_time = props.customEndTime
+  } else {
+    q.time_range = props.timeRangeFilter || timeRange.value
   }
   if (typeof props.accountId === 'number' && props.accountId > 0) q.account_id = props.accountId
   if (props.platform?.trim()) q.platform = props.platform.trim()
@@ -341,7 +348,7 @@ watch([timeRange, severity, status, emailSent], () => {
 })
 
 watch(
-  () => [props.accountId, props.platform, props.groupId, props.timeRangeFilter, props.refreshToken] as const,
+  () => [props.accountId, props.platform, props.groupId, props.timeRangeFilter, props.customStartTime, props.customEndTime, props.refreshToken] as const,
   () => {
     events.value = []
     hasMore.value = true
