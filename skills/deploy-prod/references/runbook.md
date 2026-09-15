@@ -3,7 +3,7 @@
 ## Read-only preflight
 
 ```bash
-ssh -o BatchMode=yes -o ConnectTimeout=10 root@43.159.0.162 \
+ssh -o BatchMode=yes -o ConnectTimeout=10 root@43.154.93.133 \
   '/opt/sub2api/deploy/bin/sub2api-rollout status --json'
 ```
 
