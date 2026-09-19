@@ -570,7 +570,8 @@ func TestOpenAIModelNotFound_DoesNotRuntimeBlockWholeAccount(t *testing.T) {
 	require.True(t, shouldDisable)
 	require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
 	require.Zero(t, repo.tempCalls)
-	require.Len(t, repo.modelRateLimitCalls, 1)
+	require.Empty(t, repo.modelRateLimitCalls)
+	require.False(t, svc.isOpenAIAccountRequestRuntimeBlocked(account, "gpt-5.4"))
 }
 
 func TestOpenAIModelTempUnschedulable_DoesNotRuntimeBlockWholeAccount(t *testing.T) {
