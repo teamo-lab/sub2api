@@ -14,6 +14,33 @@ import (
 // 无关的 404 误判成模型缺失。
 var upstreamModelNotFoundKeywords = []string{"model not found", "unknown model", "not found", "does not exist"}
 
+// Only explicit model errors are exempt; an endpoint 404 or echoed request
+// containing a model name must not bypass the account's existing error policy.
+func isModelNotFoundCooldownExempt(statusCode int, body []byte) bool {
+	if statusCode != http.StatusNotFound {
+		return false
+	}
+	message := string(body)
+	if gjson.ValidBytes(body) {
+		for _, path := range []string{"error.code", "response.error.code", "code"} {
+			if code := strings.TrimSpace(gjson.GetBytes(body, path).String()); code != "" {
+				return strings.EqualFold(code, "model_not_found")
+			}
+		}
+		message = ""
+		for _, path := range []string{"error.message", "response.error.message", "message", "detail"} {
+			if value := gjson.GetBytes(body, path); value.Type == gjson.String && strings.TrimSpace(value.String()) != "" {
+				message = value.String()
+				break
+			}
+		}
+	}
+	message = normalizeModelNotFoundBody([]byte(message))
+	return strings.Contains(message, "model not found") ||
+		strings.Contains(message, "unknown model") ||
+		(strings.Contains(message, "model") && strings.Contains(message, "does not exist"))
+}
+
 func isUpstreamModelNotFoundError(statusCode int, body []byte) bool {
 	if statusCode != http.StatusNotFound {
 		return false
