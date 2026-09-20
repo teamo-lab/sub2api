@@ -295,6 +295,9 @@ const (
 // CheckErrorPolicy 检查自定义错误码和临时不可调度规则。
 // 自定义错误码开启时覆盖后续所有逻辑（包括临时不可调度）。
 func (s *RateLimitService) CheckErrorPolicy(ctx context.Context, account *Account, statusCode int, responseBody []byte, requestedModel ...string) ErrorPolicyResult {
+	if isModelNotFoundCooldownExempt(statusCode, responseBody) {
+		return ErrorPolicySkipped
+	}
 	ctx = withTempUnschedulableModel(ctx, requestedModel)
 	if account.IsCustomErrorCodesEnabled() {
 		if account.ShouldHandleErrorCode(statusCode) {
@@ -325,6 +328,10 @@ func (s *RateLimitService) CheckErrorPolicy(ctx context.Context, account *Accoun
 // HandleUpstreamError 处理上游错误响应，标记账号状态
 // 返回是否应该停止该账号的调度
 func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Account, statusCode int, headers http.Header, responseBody []byte, requestedModel ...string) (shouldDisable bool) {
+	if isModelNotFoundCooldownExempt(statusCode, responseBody) {
+		// Fail this attempt over without persisting account/model health state.
+		return true
+	}
 	ctx = withTempUnschedulableModel(ctx, requestedModel)
 	// Team 联动熔断必须先于池模式/自定义错误码/临时不可调度的各类早退；
 	// 同请求内与 fastpath 调用点的重复触发由方法内去重吸收。
@@ -2384,38 +2391,29 @@ func parseOpenAIImageTryAgainCooldown(body []byte) time.Duration {
 	}
 }
 
-const upstreamModelNotFoundCooldown = 30 * time.Minute
-const upstreamModelNotFoundReason = "upstream_404_model_not_found"
 const upstreamCodexPlanGatedModelCooldown = 30 * time.Minute
 const upstreamCodexPlanGatedModelReason = "upstream_400_codex_plan_gated_model"
 const tempUnschedBodyMaxBytes = 64 << 10
 const tempUnschedMessageMaxBytes = 2048
 
-// HandleUpstreamModelNotFound marks the requested model as temporarily
-// unavailable on the account when the upstream deterministically reports it
-// cannot serve that model: a 404 model-not-found, or the Codex 400 rejecting a
-// plan-gated model on a ChatGPT OAuth account. Returning true tells the caller
-// to fail the current attempt over to another account; the scheduler skips the
-// (account, model) pair via IsSchedulableForModelWithContext until the
-// cooldown expires, instead of re-selecting an account that can never serve
-// the model.
+// HandleUpstreamModelNotFound requests failover for unavailable models.
+// Explicit 404 model-not-found errors are request-local and do not write health
+// state. Other legacy model errors and OAuth plan-gated 400s retain cooldowns.
 func (s *RateLimitService) HandleUpstreamModelNotFound(ctx context.Context, account *Account, requestedModel string, statusCode int, responseBody []byte) bool {
+	if isModelNotFoundCooldownExempt(statusCode, responseBody) {
+		return true
+	}
 	if s == nil || account == nil || s.accountRepo == nil {
 		return false
 	}
 	if !account.ShouldHandleErrorCode(statusCode) {
 		return false
 	}
-	var cooldown time.Duration
-	var reason string
-	switch {
-	case isUpstreamModelNotFoundError(statusCode, responseBody):
-		cooldown, reason = upstreamModelNotFoundCooldown, upstreamModelNotFoundReason
-	case isOpenAIOAuthAccount(account) && isOpenAICodexPlanGatedModelError(statusCode, responseBody):
-		cooldown, reason = upstreamCodexPlanGatedModelCooldown, upstreamCodexPlanGatedModelReason
-	default:
+	if !isOpenAIOAuthAccount(account) || !isOpenAICodexPlanGatedModelError(statusCode, responseBody) {
 		return false
 	}
+	cooldown := upstreamCodexPlanGatedModelCooldown
+	reason := upstreamCodexPlanGatedModelReason
 	modelKey := modelRateLimitKeyForUpstreamModelNotFound(ctx, account, requestedModel)
 	if modelKey == "" {
 		return false
@@ -2537,6 +2535,9 @@ func matchTempUnschedulableRules(account *Account, statusCode int, responseBody 
 }
 
 func (s *RateLimitService) tryTempUnschedulable(ctx context.Context, account *Account, statusCode int, responseBody []byte, requestedModel ...string) bool {
+	if isModelNotFoundCooldownExempt(statusCode, responseBody) {
+		return false
+	}
 	if account == nil {
 		return false
 	}

@@ -45,7 +45,7 @@ func (r *modelNotFoundAccountRepoStub) SetModelRateLimit(ctx context.Context, id
 	return r.modelRateLimitErr
 }
 
-func TestRateLimitService_HandleUpstreamError_ModelNotFoundUsesModelRateLimit(t *testing.T) {
+func TestRateLimitService_HandleUpstreamError_ModelNotFoundSkipsModelRateLimit(t *testing.T) {
 	repo := &modelNotFoundAccountRepoStub{}
 	svc := &RateLimitService{accountRepo: repo}
 	account := openAIModelNotFoundTempAccount()
@@ -61,15 +61,10 @@ func TestRateLimitService_HandleUpstreamError_ModelNotFoundUsesModelRateLimit(t 
 
 	require.True(t, handled)
 	require.Zero(t, repo.tempCalls)
-	require.Len(t, repo.modelRateLimitCalls, 1)
-	call := repo.modelRateLimitCalls[0]
-	require.Equal(t, account.ID, call.accountID)
-	require.Equal(t, "gpt-5.4", call.scope)
-	require.Equal(t, upstreamModelNotFoundReason, call.reason)
-	require.WithinDuration(t, time.Now().Add(upstreamModelNotFoundCooldown), call.resetAt, 5*time.Second)
+	require.Empty(t, repo.modelRateLimitCalls)
 }
 
-func TestRateLimitService_HandleUpstreamError_ModelNotFoundWriteFailureDoesNotTempUnschedule(t *testing.T) {
+func TestRateLimitService_HandleUpstreamError_ModelNotFoundDoesNotAttemptWrite(t *testing.T) {
 	repo := &modelNotFoundAccountRepoStub{modelRateLimitErr: errors.New("write failed")}
 	svc := &RateLimitService{accountRepo: repo}
 	account := openAIModelNotFoundTempAccount()
@@ -85,7 +80,7 @@ func TestRateLimitService_HandleUpstreamError_ModelNotFoundWriteFailureDoesNotTe
 
 	require.True(t, handled)
 	require.Zero(t, repo.tempCalls)
-	require.Len(t, repo.modelRateLimitCalls, 1)
+	require.Empty(t, repo.modelRateLimitCalls)
 }
 
 func TestRateLimitService_HandleUpstreamError_Bare404UsesModelScopedTempUnschedulableWhenModelKnown(t *testing.T) {
@@ -506,8 +501,8 @@ func TestRateLimitService_HandleUpstreamError_CodexPlanGatedImageModelSkipsCoold
 		"映射后的上游模型是图片模型，冷却键会写到 gpt-image-2 上，守卫必须一并识别")
 }
 
-// 404 model-not-found 分支不受守卫影响：即使是图片模型也照常冷却。
-func TestRateLimitService_HandleUpstreamError_ModelNotFoundImageModelStillCoolsDown(t *testing.T) {
+// The explicit 404 exemption applies to image models too, not plan-gated 400s.
+func TestRateLimitService_HandleUpstreamError_ModelNotFoundImageModelSkipsCooldown(t *testing.T) {
 	repo := &modelNotFoundAccountRepoStub{}
 	svc := &RateLimitService{accountRepo: repo}
 	account := openAICodexPlanGatedOAuthAccount()
@@ -522,6 +517,5 @@ func TestRateLimitService_HandleUpstreamError_ModelNotFoundImageModelStillCoolsD
 	)
 
 	require.True(t, handled)
-	require.Len(t, repo.modelRateLimitCalls, 1, "守卫只作用于 codex plan-gated 分支")
-	require.Equal(t, upstreamModelNotFoundReason, repo.modelRateLimitCalls[0].reason)
+	require.Empty(t, repo.modelRateLimitCalls)
 }
