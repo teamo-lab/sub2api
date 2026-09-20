@@ -36,9 +36,10 @@ func isModelNotFoundCooldownExempt(statusCode int, body []byte) bool {
 		}
 	}
 	message = normalizeModelNotFoundBody([]byte(message))
-	return strings.Contains(message, "model not found") ||
+	return (strings.Contains(message, "model") && strings.Contains(message, "not found")) ||
 		strings.Contains(message, "unknown model") ||
-		(strings.Contains(message, "model") && strings.Contains(message, "does not exist"))
+		(strings.Contains(message, "model") && strings.Contains(message, "does not exist")) ||
+		(strings.Contains(message, "model") && strings.Contains(message, "not available"))
 }
 
 func isUpstreamModelNotFoundError(statusCode int, body []byte) bool {

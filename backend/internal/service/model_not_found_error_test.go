@@ -65,6 +65,66 @@ func TestAntigravityModelNotFoundKeepsBare404Fallback(t *testing.T) {
 	}
 }
 
+func TestIsModelNotFoundCooldownExempt(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		body       string
+		want       bool
+	}{
+		{
+			name:       "structured code",
+			statusCode: http.StatusNotFound,
+			body:       `{"error":{"code":"model_not_found"}}`,
+			want:       true,
+		},
+		{
+			name:       "nested structured code",
+			statusCode: http.StatusNotFound,
+			body:       `{"response":{"error":{"code":"model_not_found"}}}`,
+			want:       true,
+		},
+		{
+			name:       "explicit model message",
+			statusCode: http.StatusNotFound,
+			body:       `{"error":{"message":"The requested model was not found"}}`,
+			want:       true,
+		},
+		{
+			name:       "model unavailable for group",
+			statusCode: http.StatusNotFound,
+			body:       `{"error":{"message":"Model \"gpt-6-astra\" is not available for this group"}}`,
+			want:       true,
+		},
+		{
+			name:       "endpoint not found",
+			statusCode: http.StatusNotFound,
+			body:       `{"error":{"message":"endpoint not found"}}`,
+			want:       false,
+		},
+		{
+			name:       "different structured code",
+			statusCode: http.StatusNotFound,
+			body:       `{"error":{"code":"route_not_found","message":"model not found"}}`,
+			want:       false,
+		},
+		{
+			name:       "non 404",
+			statusCode: http.StatusBadGateway,
+			body:       `{"error":{"code":"model_not_found"}}`,
+			want:       false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isModelNotFoundCooldownExempt(tt.statusCode, []byte(tt.body)); got != tt.want {
+				t.Fatalf("isModelNotFoundCooldownExempt() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsOpenAICodexPlanGatedModelError(t *testing.T) {
 	tests := []struct {
 		name       string

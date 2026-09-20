@@ -2391,8 +2391,6 @@ func parseOpenAIImageTryAgainCooldown(body []byte) time.Duration {
 	}
 }
 
-const upstreamModelNotFoundCooldown = 30 * time.Minute
-const upstreamModelNotFoundReason = "upstream_404_model_not_found"
 const upstreamCodexPlanGatedModelCooldown = 30 * time.Minute
 const upstreamCodexPlanGatedModelReason = "upstream_400_codex_plan_gated_model"
 const tempUnschedBodyMaxBytes = 64 << 10
@@ -2411,16 +2409,11 @@ func (s *RateLimitService) HandleUpstreamModelNotFound(ctx context.Context, acco
 	if !account.ShouldHandleErrorCode(statusCode) {
 		return false
 	}
-	var cooldown time.Duration
-	var reason string
-	switch {
-	case isUpstreamModelNotFoundError(statusCode, responseBody):
-		cooldown, reason = upstreamModelNotFoundCooldown, upstreamModelNotFoundReason
-	case isOpenAIOAuthAccount(account) && isOpenAICodexPlanGatedModelError(statusCode, responseBody):
-		cooldown, reason = upstreamCodexPlanGatedModelCooldown, upstreamCodexPlanGatedModelReason
-	default:
+	if !isOpenAIOAuthAccount(account) || !isOpenAICodexPlanGatedModelError(statusCode, responseBody) {
 		return false
 	}
+	cooldown := upstreamCodexPlanGatedModelCooldown
+	reason := upstreamCodexPlanGatedModelReason
 	modelKey := modelRateLimitKeyForUpstreamModelNotFound(ctx, account, requestedModel)
 	if modelKey == "" {
 		return false
