@@ -314,7 +314,7 @@ func openAIModelNotFoundTempAccount() *Account {
 	}
 }
 
-func TestRateLimitService_HandleUpstreamError_CodexPlanGatedModelUsesModelRateLimit(t *testing.T) {
+func TestRateLimitService_HandleUpstreamError_CodexPlanGatedModelSkipsModelRateLimit(t *testing.T) {
 	repo := &modelNotFoundAccountRepoStub{}
 	svc := &RateLimitService{accountRepo: repo}
 	account := openAICodexPlanGatedOAuthAccount()
@@ -330,12 +330,7 @@ func TestRateLimitService_HandleUpstreamError_CodexPlanGatedModelUsesModelRateLi
 
 	require.True(t, handled)
 	require.Zero(t, repo.tempCalls)
-	require.Len(t, repo.modelRateLimitCalls, 1)
-	call := repo.modelRateLimitCalls[0]
-	require.Equal(t, account.ID, call.accountID)
-	require.Equal(t, "gpt-5.6-sol", call.scope)
-	require.Equal(t, upstreamCodexPlanGatedModelReason, call.reason)
-	require.WithinDuration(t, time.Now().Add(upstreamCodexPlanGatedModelCooldown), call.resetAt, 5*time.Second)
+	require.Empty(t, repo.modelRateLimitCalls)
 }
 
 func TestRateLimitService_HandleUpstreamError_CodexPlanGatedModelRespectsModelMapping(t *testing.T) {
@@ -354,11 +349,10 @@ func TestRateLimitService_HandleUpstreamError_CodexPlanGatedModelRespectsModelMa
 	)
 
 	require.True(t, handled)
-	require.Len(t, repo.modelRateLimitCalls, 1)
-	require.Equal(t, "gpt-5.6-sol-upstream", repo.modelRateLimitCalls[0].scope)
+	require.Empty(t, repo.modelRateLimitCalls)
 }
 
-func TestRateLimitService_HandleUpstreamError_CodexPlanGatedModelIgnoresAPIKeyAccount(t *testing.T) {
+func TestRateLimitService_HandleUpstreamError_CodexPlanGatedModelFailsOverAPIKeyAccount(t *testing.T) {
 	repo := &modelNotFoundAccountRepoStub{}
 	svc := &RateLimitService{accountRepo: repo}
 	account := openAICodexPlanGatedOAuthAccount()
@@ -373,7 +367,7 @@ func TestRateLimitService_HandleUpstreamError_CodexPlanGatedModelIgnoresAPIKeyAc
 		"gpt-5.6-sol",
 	)
 
-	require.False(t, handled)
+	require.True(t, handled)
 	require.Empty(t, repo.modelRateLimitCalls)
 }
 
@@ -401,7 +395,7 @@ func TestRateLimitService_HandleUpstreamError_CodexPlanGatedImageModelSkipsCoold
 	}
 }
 
-func TestRateLimitService_HandleUpstreamError_CodexPlanGatedTextModelStillCoolsDown(t *testing.T) {
+func TestRateLimitService_HandleUpstreamError_CodexPlanGatedTextModelSkipsCooldown(t *testing.T) {
 	repo := &modelNotFoundAccountRepoStub{}
 	svc := &RateLimitService{accountRepo: repo}
 	account := openAICodexPlanGatedOAuthAccount()
@@ -416,8 +410,7 @@ func TestRateLimitService_HandleUpstreamError_CodexPlanGatedTextModelStillCoolsD
 	)
 
 	require.True(t, handled)
-	require.Len(t, repo.modelRateLimitCalls, 1, "non-image plan-gated models keep the existing cooldown")
-	require.Equal(t, upstreamCodexPlanGatedModelReason, repo.modelRateLimitCalls[0].reason)
+	require.Empty(t, repo.modelRateLimitCalls)
 }
 
 func openAICodexPlanGatedOAuthAccount() *Account {
@@ -431,14 +424,8 @@ func openAICodexPlanGatedOAuthAccount() *Account {
 	}
 }
 
-// 请求本身就走 /v1/images/* 时必须保留冷却。
-//
-// OAuth 账号的 /v1/images/* 上游同样是 Codex Responses（openai_images_responses.go
-// → handleOpenAIImagesErrorResponse → handleOpenAIAccountUpstreamError →
-// HandleUpstreamModelNotFound），所以这条路径也会命中 plan-gated 分支。账号确实
-// 不具备生图能力时，冷却是唯一的刹车：调度层靠 model_rate_limits 跳过该账号后
-// 快速 503；一旦跳过冷却，每个请求都会完整走一遍号池，对上游形成无上界的 400 放大。
-func TestRateLimitService_HandleUpstreamError_CodexPlanGatedImageModelKeepsCooldownOnImagesEndpoint(t *testing.T) {
+// The explicit 400 exemption also applies on the dedicated images endpoint.
+func TestRateLimitService_HandleUpstreamError_CodexPlanGatedImageModelSkipsCooldownOnImagesEndpoint(t *testing.T) {
 	repo := &modelNotFoundAccountRepoStub{}
 	svc := &RateLimitService{accountRepo: repo}
 	account := openAICodexPlanGatedOAuthAccount()
@@ -453,10 +440,7 @@ func TestRateLimitService_HandleUpstreamError_CodexPlanGatedImageModelKeepsCoold
 	)
 
 	require.True(t, handled)
-	require.Len(t, repo.modelRateLimitCalls, 1,
-		"/v1/images/* 上的 plan-gated 拒绝是真实的能力缺失，必须保留冷却刹车")
-	require.Equal(t, "gpt-image-2", repo.modelRateLimitCalls[0].scope)
-	require.Equal(t, upstreamCodexPlanGatedModelReason, repo.modelRateLimitCalls[0].reason)
+	require.Empty(t, repo.modelRateLimitCalls)
 }
 
 // 仅 WithOpenAIImageGenerationIntent（/v1/responses 因模型名自动置位）不算专用生图
@@ -501,7 +485,7 @@ func TestRateLimitService_HandleUpstreamError_CodexPlanGatedImageModelSkipsCoold
 		"映射后的上游模型是图片模型，冷却键会写到 gpt-image-2 上，守卫必须一并识别")
 }
 
-// The explicit 404 exemption applies to image models too, not plan-gated 400s.
+// The explicit 404 exemption applies to image models too.
 func TestRateLimitService_HandleUpstreamError_ModelNotFoundImageModelSkipsCooldown(t *testing.T) {
 	repo := &modelNotFoundAccountRepoStub{}
 	svc := &RateLimitService{accountRepo: repo}
