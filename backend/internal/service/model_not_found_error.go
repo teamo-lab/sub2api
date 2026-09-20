@@ -14,17 +14,19 @@ import (
 // 无关的 404 误判成模型缺失。
 var upstreamModelNotFoundKeywords = []string{"model not found", "unknown model", "not found", "does not exist"}
 
-// Only explicit model errors are exempt; an endpoint 404 or echoed request
-// containing a model name must not bypass the account's existing error policy.
+// Explicit model-not-found and Codex plan-gated errors are request-local.
+// Inspect error fields only; echoed request content must not bypass policy.
 func isModelNotFoundCooldownExempt(statusCode int, body []byte) bool {
-	if statusCode != http.StatusNotFound {
+	if statusCode != http.StatusNotFound && statusCode != http.StatusBadRequest {
 		return false
 	}
 	message := string(body)
 	if gjson.ValidBytes(body) {
-		for _, path := range []string{"error.code", "response.error.code", "code"} {
-			if code := strings.TrimSpace(gjson.GetBytes(body, path).String()); code != "" {
-				return strings.EqualFold(code, "model_not_found")
+		if statusCode == http.StatusNotFound {
+			for _, path := range []string{"error.code", "response.error.code", "code"} {
+				if code := strings.TrimSpace(gjson.GetBytes(body, path).String()); code != "" {
+					return strings.EqualFold(code, "model_not_found")
+				}
 			}
 		}
 		message = ""
@@ -36,6 +38,9 @@ func isModelNotFoundCooldownExempt(statusCode int, body []byte) bool {
 		}
 	}
 	message = normalizeModelNotFoundBody([]byte(message))
+	if statusCode == http.StatusBadRequest {
+		return strings.Contains(message, openAICodexPlanGatedModelPhrase)
+	}
 	return (strings.Contains(message, "model") && strings.Contains(message, "not found")) ||
 		strings.Contains(message, "unknown model") ||
 		(strings.Contains(message, "model") && strings.Contains(message, "does not exist")) ||
@@ -67,9 +72,8 @@ const openAICodexPlanGatedModelPhrase = "model is not supported when using codex
 
 // isOpenAICodexPlanGatedModelError reports whether the upstream response is the
 // deterministic Codex rejection of a plan-gated model on a ChatGPT account.
-// Unlike transient failures, retrying the same account cannot succeed until the
-// account's plan changes, so callers should treat it like model-not-found and
-// cool the (account, model) pair down instead of re-selecting the account.
+// Retain semantic recognition for stream/failover classification. Explicit HTTP
+// 400s use the request-local exemption above instead of persistent cooldowns.
 func isOpenAICodexPlanGatedModelError(statusCode int, body []byte) bool {
 	if statusCode != http.StatusBadRequest {
 		return false

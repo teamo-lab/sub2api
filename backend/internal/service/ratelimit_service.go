@@ -2397,8 +2397,8 @@ const tempUnschedBodyMaxBytes = 64 << 10
 const tempUnschedMessageMaxBytes = 2048
 
 // HandleUpstreamModelNotFound requests failover for unavailable models.
-// Explicit 404 model-not-found errors are request-local and do not write health
-// state. Other legacy model errors and OAuth plan-gated 400s retain cooldowns.
+// Explicit 404 model-not-found and 400 Codex plan-gated errors are request-local
+// and do not write health state. Other legacy model errors retain their policy.
 func (s *RateLimitService) HandleUpstreamModelNotFound(ctx context.Context, account *Account, requestedModel string, statusCode int, responseBody []byte) bool {
 	if isModelNotFoundCooldownExempt(statusCode, responseBody) {
 		return true

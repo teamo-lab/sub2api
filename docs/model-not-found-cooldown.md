@@ -5,20 +5,26 @@ response error envelope) is a request-local upstream failure. Without a code,
 explicit model-not-found / unknown-model / model-does-not-exist messages also
 qualify. Arbitrary echoed request fields are not used for classification.
 
+HTTP 400 explicitly stating `model is not supported when using Codex` is also
+exempt. This includes error messages in `detail`, `error.message`,
+`response.error.message`, `message`, or plain text, for OAuth and API-key relay
+accounts. Ordinary validation, context-window and missing-tool-output 400s are
+not exempt. Only recognized error fields count, not echoed request input.
+
 - Do not write model rate limits, temporary unschedulability, account errors,
   or the OpenAI runtime block for this failure, even when a custom 404 rule
   would otherwise match.
 - Keep the error and the existing bounded next-account failover. Disable
   same-account pool retries for this failure; the request's failed-account set
   excludes an attempted account and `MaxAccountSwitches` remains the limit.
-- Ordinary endpoint 404s, 401s, 429s, 5xx errors, and plan-gated Codex 400s
-  retain their existing policy.
+- Ordinary endpoint 404s, other 400s, 401s, 429s and 5xx errors retain their
+  existing policy.
 - This does not make an unavailable upstream model available. New client
   requests may try the same account again; watch upstream 404 volume.
 
 ## Rollout and existing state
 
-This code change does not automatically erase stored cooldowns. Deploy and
+This code change does not automatically erase stored 404 or Codex 400 cooldowns. Deploy and
 verify the new version before any approved cleanup; otherwise older instances
 can recreate the state. Existing 30-minute model cooldowns can expire naturally.
 

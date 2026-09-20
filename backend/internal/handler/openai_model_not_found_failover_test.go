@@ -16,6 +16,20 @@ import (
 )
 
 func TestOpenAIResponses_ModelNotFoundSkipsPoolRetryAndExhaustsMaxSwitches(t *testing.T) {
+	assertModelErrorBoundedFailover(t, http.StatusNotFound, `{"error":{"code":"model_not_found","message":"model not found"}}`, false)
+}
+
+func TestOpenAIResponses_CodexPlanGatedSkipsPoolRetryAndExhaustsMaxSwitches(t *testing.T) {
+	t.Run("non_streaming", func(t *testing.T) {
+		assertModelErrorBoundedFailover(t, http.StatusBadRequest, `{"detail":"The 'gpt-6-astra' model is not supported when using Codex with a ChatGPT account."}`, false)
+	})
+	t.Run("streaming", func(t *testing.T) {
+		assertModelErrorBoundedFailover(t, http.StatusBadRequest, `{"detail":"The 'gpt-6-astra' model is not supported when using Codex with a ChatGPT account."}`, true)
+	})
+}
+
+func assertModelErrorBoundedFailover(t *testing.T, statusCode int, body string, streaming bool) {
+	t.Helper()
 	gin.SetMode(gin.TestMode)
 	groupID := int64(4203)
 	accounts := []service.Account{
@@ -27,7 +41,7 @@ func TestOpenAIResponses_ModelNotFoundSkipsPoolRetryAndExhaustsMaxSwitches(t *te
 				"base_url":                     "https://api.example.test",
 				"pool_mode":                    true,
 				"pool_mode_retry_count":        float64(1),
-				"pool_mode_retry_status_codes": []any{float64(http.StatusNotFound)},
+				"pool_mode_retry_status_codes": []any{float64(statusCode)},
 			},
 			Extra: map[string]any{"openai_passthrough": true},
 		},
@@ -47,7 +61,7 @@ func TestOpenAIResponses_ModelNotFoundSkipsPoolRetryAndExhaustsMaxSwitches(t *te
 	cfg.Gateway.MaxAccountSwitches = 1
 
 	accountRepo := &openAIWSFailoverHandlerAccountRepoStub{accounts: accounts}
-	upstream := &openAIHTTPPassthroughFailoverUpstream{statusCode: http.StatusNotFound, errorBody: `{"error":{"code":"model_not_found","message":"model not found"}}`}
+	upstream := &openAIHTTPPassthroughFailoverUpstream{statusCode: statusCode, errorBody: body}
 	billingCacheSvc := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
 	t.Cleanup(billingCacheSvc.Stop)
 	gatewaySvc := service.NewOpenAIGatewayService(
@@ -88,7 +102,11 @@ func TestOpenAIResponses_ModelNotFoundSkipsPoolRetryAndExhaustsMaxSwitches(t *te
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{"model":"gpt-5.2","input":"hello","stream":false}`))
+	stream := "false"
+	if streaming {
+		stream = "true"
+	}
+	c.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{"model":"gpt-6-astra","input":"hello","stream":`+stream+`}`))
 	c.Request.Header.Set("Content-Type", "application/json")
 	c.Set(string(middleware.ContextKeyAPIKey), &service.APIKey{
 		ID: 1803, GroupID: &groupID,
