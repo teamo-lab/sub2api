@@ -251,6 +251,30 @@ func (s *ProxyRepoSuite) TestListActiveWithAccountCount() {
 	s.Require().Equal(int64(2), withCounts[1].AccountCount)
 }
 
+func (s *ProxyRepoSuite) TestListActiveWithAccountCount_ActiveStatusOnly() {
+	p := s.mustCreateProxyWithTimes("active-count", service.StatusActive, time.Now())
+	empty := s.mustCreateProxyWithTimes("empty", service.StatusActive, time.Now())
+	for _, name := range []string{"active", "disabled", "error", "deleted"} {
+		s.mustInsertAccount(name, &p.ID)
+	}
+	_, err := s.tx.ExecContext(s.ctx, "UPDATE accounts SET status = name WHERE name IN ('disabled', 'error')")
+	s.Require().NoError(err)
+	_, err = s.tx.ExecContext(s.ctx, "UPDATE accounts SET deleted_at = NOW() WHERE name = 'deleted'")
+	s.Require().NoError(err)
+	proxies, err := s.repo.ListActiveWithAccountCount(s.ctx)
+	s.Require().NoError(err)
+	s.Require().Len(proxies, 2)
+	for _, item := range proxies {
+		if item.ID == p.ID {
+			s.Require().Equal(int64(3), item.AccountCount)
+			s.Require().Equal(int64(1), item.ActiveAccountCount)
+		} else {
+			s.Require().Equal(empty.ID, item.ID)
+			s.Require().Zero(item.ActiveAccountCount)
+		}
+	}
+}
+
 // --- Combined original test ---
 
 func (s *ProxyRepoSuite) TestExistsByHostPortAuth_And_AccountCountAggregates() {
