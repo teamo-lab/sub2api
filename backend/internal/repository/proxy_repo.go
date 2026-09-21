@@ -389,6 +389,10 @@ func (r *proxyRepository) buildProxyWithAccountCountResult(ctx context.Context, 
 	if err != nil {
 		return nil, nil, err
 	}
+	activeCounts, err := r.getAccountCountsForProxies(ctx, true)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	result := make([]service.ProxyWithAccountCount, 0, len(proxies))
 	for i := range proxies {
@@ -397,8 +401,9 @@ func (r *proxyRepository) buildProxyWithAccountCountResult(ctx context.Context, 
 			continue
 		}
 		result = append(result, service.ProxyWithAccountCount{
-			Proxy:        *proxyOut,
-			AccountCount: counts[proxyOut.ID],
+			Proxy:              *proxyOut,
+			AccountCount:       counts[proxyOut.ID],
+			ActiveAccountCount: activeCounts[proxyOut.ID],
 		})
 	}
 
@@ -522,7 +527,17 @@ func (r *proxyRepository) ListAccountSummariesByProxyID(ctx context.Context, pro
 
 // GetAccountCountsForProxies returns a map of proxy ID to account count for all proxies
 func (r *proxyRepository) GetAccountCountsForProxies(ctx context.Context) (counts map[int64]int64, err error) {
-	rows, err := r.sql.QueryContext(ctx, "SELECT proxy_id, COUNT(*) AS count FROM accounts WHERE proxy_id IS NOT NULL AND deleted_at IS NULL GROUP BY proxy_id")
+	return r.getAccountCountsForProxies(ctx, false)
+}
+
+func (r *proxyRepository) getAccountCountsForProxies(ctx context.Context, activeOnly bool) (counts map[int64]int64, err error) {
+	query := "SELECT proxy_id, COUNT(*) AS count FROM accounts WHERE proxy_id IS NOT NULL AND deleted_at IS NULL"
+	var args []any
+	if activeOnly {
+		query += " AND status = $1"
+		args = append(args, service.StatusActive)
+	}
+	rows, err := r.sql.QueryContext(ctx, query+" GROUP BY proxy_id", args...)
 	if err != nil {
 		return nil, err
 	}
@@ -562,6 +577,10 @@ func (r *proxyRepository) ListActiveWithAccountCount(ctx context.Context) ([]ser
 	if err != nil {
 		return nil, err
 	}
+	activeCounts, err := r.getAccountCountsForProxies(ctx, true)
+	if err != nil {
+		return nil, err
+	}
 
 	// Build result with account counts
 	result := make([]service.ProxyWithAccountCount, 0, len(proxies))
@@ -571,8 +590,9 @@ func (r *proxyRepository) ListActiveWithAccountCount(ctx context.Context) ([]ser
 			continue
 		}
 		result = append(result, service.ProxyWithAccountCount{
-			Proxy:        *proxyOut,
-			AccountCount: counts[proxyOut.ID],
+			Proxy:              *proxyOut,
+			AccountCount:       counts[proxyOut.ID],
+			ActiveAccountCount: activeCounts[proxyOut.ID],
 		})
 	}
 
