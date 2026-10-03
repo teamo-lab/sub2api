@@ -57,14 +57,74 @@ func ResponsesToAnthropicRequest(req *ResponsesRequest) (*AnthropicRequest, erro
 		out.OutputConfig = &AnthropicOutputConfig{Effort: effort}
 		// Enable thinking for non-low efforts
 		if effort != "low" {
-			out.Thinking = &AnthropicThinking{
-				Type:         "enabled",
-				BudgetTokens: defaultThinkingBudget(effort),
-			}
+			out.Thinking = anthropicThinkingForEffort(req.Model, effort)
 		}
 	}
 
 	return out, nil
+}
+
+// anthropicThinkingForEffort returns the thinking config used when a reasoning
+// effort turns thinking on. Claude Opus 4.7+ and Sonnet 5+ accept only adaptive
+// thinking — their upstreams reject `type: "enabled"` + budget_tokens with a 400
+// ("requires adaptive thinking") — so they get `adaptive` and rely on
+// output_config.effort. Older models keep the manual budget.
+func anthropicThinkingForEffort(model, effort string) *AnthropicThinking {
+	if claudeRequiresAdaptiveThinking(model) {
+		return &AnthropicThinking{Type: "adaptive"}
+	}
+	return &AnthropicThinking{
+		Type:         "enabled",
+		BudgetTokens: defaultThinkingBudget(effort),
+	}
+}
+
+// claudeRequiresAdaptiveThinking reports whether a Claude model only accepts
+// adaptive thinking: Opus 4.7 and newer, Sonnet 5 and newer.
+func claudeRequiresAdaptiveThinking(model string) bool {
+	if major, minor, ok := claudeFamilyVersion(model, "opus"); ok {
+		return major > 4 || (major == 4 && minor >= 7)
+	}
+	if major, _, ok := claudeFamilyVersion(model, "sonnet"); ok {
+		return major >= 5
+	}
+	return false
+}
+
+// claudeFamilyVersion parses "claude-<family>-<major>[-<minor>]..." into
+// (major, minor), ignoring case and trailing tags such as "[1m]". A missing
+// minor, or a date snapshot in its place ("claude-opus-4-20250514"), counts as 0.
+func claudeFamilyVersion(model, family string) (int, int, bool) {
+	rest, found := strings.CutPrefix(strings.ToLower(model), "claude-"+family+"-")
+	if !found {
+		return 0, 0, false
+	}
+	parts := strings.FieldsFunc(rest, func(r rune) bool { return r == '-' || r == '.' })
+	if len(parts) == 0 {
+		return 0, 0, false
+	}
+	major, digits := leadingInt(parts[0])
+	if digits == 0 {
+		return 0, 0, false
+	}
+	minor := 0
+	if len(parts) > 1 {
+		if value, d := leadingInt(parts[1]); d > 0 && d <= 2 {
+			minor = value
+		}
+	}
+	return major, minor, true
+}
+
+// leadingInt parses the leading decimal digits of s, returning the value and
+// how many digits were read.
+func leadingInt(s string) (int, int) {
+	value, digits := 0, 0
+	for digits < len(s) && s[digits] >= '0' && s[digits] <= '9' {
+		value = value*10 + int(s[digits]-'0')
+		digits++
+	}
+	return value, digits
 }
 
 // defaultThinkingBudget returns a sensible thinking budget based on effort level.
