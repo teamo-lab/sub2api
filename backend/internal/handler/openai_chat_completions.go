@@ -266,6 +266,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 		writerSizeBeforeForward := c.Writer.Size()
 		adjustedSizeBeforeForward := service.OpenAICompactKeepaliveAdjustedWrittenSize(c)
 		forwardAttempts++
+		endRecoveryAttempt := service.BeginErrorRecoveryAttempt(c)
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
 				if accountReleaseFunc != nil {
@@ -274,6 +275,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			}()
 			return h.gatewayService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody, promptCacheKey, "")
 		}()
+		endRecoveryAttempt(err)
 		upstreamFacts := service.OpenAIUpstreamAttemptFactsFromContext(c.Request.Context())
 		h.gatewayService.ObserveOpenAIStickyBurstResult(
 			c.Request.Context(), apiKey.GroupID, sessionHash, account.ID, reqModel,

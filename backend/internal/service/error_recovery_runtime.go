@@ -39,6 +39,8 @@ type errorRecoveryState struct {
 	deadline   time.Time
 	output     bool
 	written    bool
+	running    int
+	expired    bool
 	retries    map[int64]int
 	switches   int
 	code       string
@@ -162,9 +164,16 @@ func applyErrorRecovery(c *gin.Context, account *Account, requestedModel string,
 		s.timer = time.AfterFunc(time.Until(s.deadline), func() {
 			s.mu.Lock()
 			defer s.mu.Unlock()
-			if !s.output {
-				cancel()
+			if s.output {
+				return
 			}
+			// The budget only stops new retries and waits. A running attempt is left
+			// alone; its end callback finishes recovery once it stops running.
+			if s.running > 0 {
+				s.expired = true
+				return
+			}
+			cancel()
 		})
 		s.stopParent = context.AfterFunc(parent, func() {
 			s.mu.Lock()
@@ -218,6 +227,39 @@ func applyErrorRecovery(c *gin.Context, account *Account, requestedModel string,
 	}
 	return ErrorRecoverySwitch
 }
+
+// BeginErrorRecoveryAttempt marks one upstream attempt as running and returns
+// its end callback, which takes the attempt's error. An expired budget never
+// interrupts the running attempt: a successful attempt completes recovery even
+// without semantic output; a failed one cancels the recovery wait so the
+// caller's budget check returns recovery_exhausted.
+func BeginErrorRecoveryAttempt(c *gin.Context) (end func(err error)) {
+	s := recoveryState(c)
+	if s == nil {
+		return func(error) {}
+	}
+	s.mu.Lock()
+	s.running++
+	s.mu.Unlock()
+	return func(err error) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.running--
+		if s.output {
+			return
+		}
+		if err == nil {
+			s.output = true
+			s.timer.Stop()
+			s.stopParent()
+			return
+		}
+		if s.running == 0 && s.expired {
+			s.cancel()
+		}
+	}
+}
+
 func RecoveryBudgetExpired(c *gin.Context) bool {
 	s := recoveryState(c)
 	if s == nil {

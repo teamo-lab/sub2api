@@ -37,19 +37,14 @@ type openAIEncryptedRetryBudget struct {
 	output     bool
 }
 
-// This is a separate attempt-local budget, not a new error-rule state. A stricter
-// outer recovery deadline wins and its budget is never renewed or overwritten.
-func newOpenAIEncryptedRetryBudget(c *gin.Context, parent context.Context, maximum time.Duration) *openAIEncryptedRetryBudget {
+// This is a separate attempt-local budget, not a new error-rule state. It runs
+// inside one upstream attempt, so an outer recovery deadline does not shorten it
+// (that budget never interrupts a running attempt) and is never renewed or
+// overwritten by it.
+func newOpenAIEncryptedRetryBudget(parent context.Context, maximum time.Duration) *openAIEncryptedRetryBudget {
 	deadline := time.Now().Add(maximum)
 	if existing, ok := parent.Deadline(); ok && existing.Before(deadline) {
 		deadline = existing
-	}
-	if outer := recoveryState(c); outer != nil {
-		outer.mu.Lock()
-		if !outer.output && outer.deadline.Before(deadline) {
-			deadline = outer.deadline
-		}
-		outer.mu.Unlock()
 	}
 	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
 	ctx = context.WithValue(ctx, recoveryContextKey{}, true)
@@ -72,7 +67,7 @@ func openAIEncryptedSemanticRetryContext(c *gin.Context, original context.Contex
 		return original
 	}
 	if state.budget == nil {
-		state.budget = newOpenAIEncryptedRetryBudget(c, original, openAIEncryptedSemanticRetryBudget)
+		state.budget = newOpenAIEncryptedRetryBudget(original, openAIEncryptedSemanticRetryBudget)
 	}
 	return state.budget.ctx
 }

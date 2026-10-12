@@ -71,6 +71,65 @@ func TestErrorRecoveryDeadlineCancelsWaitingAttempt(t *testing.T) {
 	require.Equal(t, 503, w.Code)
 	require.Contains(t, w.Body.String(), "server_is_overloaded")
 }
+func TestErrorRecoveryDeadlineDoesNotInterruptRunningAttempt(t *testing.T) {
+	c, _, a, e := recoveryFixture(t, "apikey", 0, 1)
+	require.Equal(t, ErrorRecoverySwitch, ApplyErrorRecovery(c, a, "gpt", e))
+	end := BeginErrorRecoveryAttempt(c)
+	time.Sleep(1100 * time.Millisecond)
+	require.NoError(t, c.Request.Context().Err(), "running attempt cancelled by budget")
+	CompleteErrorRecovery(c)
+	end(nil)
+	require.NoError(t, c.Request.Context().Err())
+	require.False(t, RecoveryBudgetExpired(c))
+	require.False(t, WriteRecoveryBudgetError(c))
+}
+func TestErrorRecoveryExpiredRunningAttemptSuccessWithoutOutput(t *testing.T) {
+	c, w, a, e := recoveryFixture(t, "apikey", 0, 1)
+	require.Equal(t, ErrorRecoverySwitch, ApplyErrorRecovery(c, a, "gpt", e))
+	end := BeginErrorRecoveryAttempt(c)
+	time.Sleep(1100 * time.Millisecond)
+	end(nil)
+	require.NoError(t, c.Request.Context().Err())
+	require.False(t, WriteRecoveryBudgetError(c))
+	require.Empty(t, w.Body.String())
+}
+func TestErrorRecoveryExpiredRunningAttemptStopsAfterFailure(t *testing.T) {
+	c, w, a, e := recoveryFixture(t, "apikey", 0, 2)
+	require.Equal(t, ErrorRecoverySwitch, ApplyErrorRecovery(c, a, "gpt", e))
+	end := BeginErrorRecoveryAttempt(c)
+	time.Sleep(1100 * time.Millisecond)
+	require.NoError(t, c.Request.Context().Err())
+	end(e)
+	select {
+	case <-c.Request.Context().Done():
+	case <-time.After(time.Second):
+		t.Fatal("recovery wait not cancelled after the expired attempt failed")
+	}
+	a.ID = 2
+	require.Equal(t, ErrorRecoveryStop, ApplyErrorRecovery(c, a, "gpt", e))
+	require.True(t, WriteRecoveryBudgetError(c))
+	require.Equal(t, 503, w.Code)
+	require.Contains(t, w.Body.String(), `"recovery_exhausted":true`)
+}
+func TestErrorRecoveryClientCancellationStopsRunningAttempt(t *testing.T) {
+	c, _, a, e := recoveryFixture(t, "apikey", 0, 1)
+	ctx, cancel := context.WithCancel(c.Request.Context())
+	c.Request = c.Request.WithContext(ctx)
+	ApplyErrorRecovery(c, a, "gpt", e)
+	end := BeginErrorRecoveryAttempt(c)
+	defer end(context.Canceled)
+	cancel()
+	select {
+	case <-c.Request.Context().Done():
+	case <-time.After(time.Second):
+		t.Fatal("client cancellation did not reach the running attempt")
+	}
+}
+func TestBeginErrorRecoveryAttemptWithoutStateIsNoop(t *testing.T) {
+	c, _, _, _ := recoveryFixture(t, "apikey", 0, 1)
+	BeginErrorRecoveryAttempt(c)(nil)
+	require.Nil(t, recoveryState(c))
+}
 func TestErrorRecoveryOutputDisarmsBudget(t *testing.T) {
 	c, _, a, e := recoveryFixture(t, "apikey", 0, 1)
 	ApplyErrorRecovery(c, a, "gpt", e)
