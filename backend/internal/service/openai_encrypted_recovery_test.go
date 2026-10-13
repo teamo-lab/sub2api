@@ -612,3 +612,28 @@ func TestOpenAIEncryptedRecoveryNonStreamingRecordsProvenanceFromItemEvents(t *t
 	require.Len(t, upstream.bodies, 2)
 	require.Empty(t, encTestInputCiphers(upstream.bodies[1]))
 }
+
+// 失败尝试里出现的输出密文不得记为来历：每次尝试开始时清空，只记录最终成功的那次。
+func TestOpenAIEncryptedRecoveryProvenanceOnlyFromSuccessfulAttempt(t *testing.T) {
+	const fromFailed = "gAAAAemitted-by-failed-attempt-FF=="
+	const fromSuccess = "gAAAAemitted-by-successful-retry-SS=="
+	h, _ := newEncTestHarness(nil)
+	c, _ := encTestContext(62)
+	account := encTestAccount(1094, "on", nil)
+	r := h.svc.armOpenAIEncryptedRecovery(c, account, "prov-attempt")
+	require.NotNil(t, r)
+	item := func(cipher string) []byte {
+		return []byte(`{"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_x","summary":[],"encrypted_content":"` + cipher + `"}}`)
+	}
+	r.beginAttempt([]byte(`{}`))
+	r.observeOutput(item(fromFailed), "response.output_item.done")
+	r.beginAttempt([]byte(`{}`))
+	r.observeOutput(item(fromSuccess), "response.output_item.done")
+	h.svc.settleOpenAIEncryptedRecovery(c, account, nil)
+
+	state, err := h.store.LoadOpenAIEncryptedRecoveryState(context.Background(),
+		OpenAIEncryptedRecoveryKey{GroupID: 62, SessionHash: "prov-attempt", AccountID: 1094},
+		[]string{openAIEncryptedContentDigest(fromFailed), openAIEncryptedContentDigest(fromSuccess)})
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{openAIEncryptedContentDigest(fromSuccess): "host:zero.example.com#1094"}, state.Provenance)
+}
