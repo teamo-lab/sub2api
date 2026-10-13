@@ -684,13 +684,18 @@ func (r *openAIEncryptedRecovery) decide(c *gin.Context, rej openAIEncryptedReje
 		legacyTried = true
 	}
 	switch {
-	case r.retried:
+	case r.retried && r.retryPending && r.retryAccountID == r.key.AccountID:
+		// 本账号剥离重试后仍被拒：只熔断执行过剥离重试的这个账号。
 		d.reason = "rejected_after_retry"
 		if r.key.valid() && r.store != nil {
 			_ = r.store.MarkOpenAIEncryptedUnrecoverable(ctx, r.key, r.ttl)
 			r.metric(ctx, "circuit_open")
 		}
 		r.settleRetry(ctx, "rejected_again")
+	case r.retried:
+		// 剥离重试发生在别的账号上（随后 failover 到这里）：不再重试，
+		// 也不污染本账号的持久熔断状态。
+		d.reason = "already_retried"
 	case plan.failFast:
 		d.reason = plan.reason
 	case legacyTried:
@@ -715,10 +720,19 @@ func (r *openAIEncryptedRecovery) decide(c *gin.Context, rej openAIEncryptedReje
 			break
 		}
 		if r.store != nil {
-			if allowed, err := r.store.AllowOpenAIEncryptedRetry(ctx, r.key.AccountID, r.retryPerMin, time.Now()); err == nil && !allowed {
+			// 令牌桶用独立的超时上下文，不受前面 lineage/指标调用耗时影响；存储
+			// 故障时 fail closed（不重试、直接 failover），不能绕过账号级预算。
+			bucketCtx, bucketCancel := r.storeContext()
+			allowed, err := r.store.AllowOpenAIEncryptedRetry(bucketCtx, r.key.AccountID, r.retryPerMin, time.Now())
+			bucketCancel()
+			if err != nil || !allowed {
 				d.reason = "rate_limited"
+				if err != nil {
+					d.reason = "rate_limit_unavailable"
+					r.logf("rate_limit_error", "cause=%s", truncateString(err.Error(), 200))
+				}
 				d.failover = true
-				r.metric(ctx, "rate_limited")
+				r.metric(ctx, d.reason)
 				break
 			}
 		}

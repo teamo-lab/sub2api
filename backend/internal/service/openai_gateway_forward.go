@@ -1373,6 +1373,20 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		} else {
 			nonStreamResult, err := s.handleNonStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel)
 			if err != nil {
+				if retryBody, retry := consumeOpenAIEncryptedSemanticRetry(c, body, err, account); retry {
+					_ = resp.Body.Close()
+					body = retryBody
+					requestView = newOpenAIRequestView(body)
+					reqBody = nil
+					httpInvalidEncryptedContentRetryTried = true
+					continue
+				}
+				var encryptedFailover *openAIEncryptedRecoveryFailoverSignal
+				if errors.As(err, &encryptedFailover) {
+					_ = resp.Body.Close()
+					return nil, s.newOpenAIAccountFailoverError(account, http.StatusBadRequest, resp.Header,
+						encryptedFailover.payload, encryptedFailover.message, false, false)
+				}
 				if signal, ok := asOpenAICompactFallbackSignal(err); ok {
 					if retryBody, fallbackModel, retry := s.prepareOpenAICompactFallbackRetry(
 						c, account, requestedModel, body, http.StatusBadRequest, signal.message, signal.payload, compactModelFallbackRetried,

@@ -515,3 +515,77 @@ func TestOpenAIEncryptedRecoveryOffKeepsLegacyBehavior(t *testing.T) {
 	require.Zero(t, encTestMetric(h.store, "invalid_encrypted_content", 1094, "off"))
 	require.Nil(t, openAIEncryptedRecoveryFor(c))
 }
+
+// stream=false 也会收到 HTTP 200 + SSE response.failed：同样剥离重试并记 lineage。
+func TestOpenAIEncryptedRecoveryNonStreamingSSEFailure(t *testing.T) {
+	h, upstream := newEncTestHarness(nil,
+		encTestSSE(http.StatusOK, encTestFailedSSE(encTestFragmentMessage)),
+		encTestSSE(http.StatusOK, encTestOKSSE("")),
+		encTestSSE(http.StatusOK, encTestOKSSE("")),
+	)
+	account := encTestAccount(1094, "on", nil)
+	body := []byte(strings.Replace(string(encTestKABody("nonstream", encTestForeignCipher)), `"stream":true`, `"stream":false`, 1))
+	c, recorder := encTestContext(62)
+	_, err := h.svc.Forward(context.Background(), c, account, body)
+	require.NoError(t, err)
+	require.Len(t, upstream.bodies, 2)
+	require.Empty(t, encTestInputCiphers(upstream.bodies[1]))
+	require.NotContains(t, recorder.Body.String(), "invalid_encrypted_content")
+	require.Equal(t, int64(1), encTestMetric(h.store, "strip_retry", 1094, "on", "result=success"))
+
+	// lineage 已写入：下一轮直接预剥。
+	c2, _ := encTestContext(62)
+	_, err = h.svc.Forward(context.Background(), c2, account, body)
+	require.NoError(t, err)
+	require.Len(t, upstream.bodies, 3)
+	require.Empty(t, encTestInputCiphers(upstream.bodies[2]))
+}
+
+// 账号 A 剥离重试后出错 failover 到 B：B 的首次拒绝不得写熔断。
+func TestOpenAIEncryptedRecoveryCrossAccountDoesNotTripOtherCircuit(t *testing.T) {
+	h, upstream := newEncTestHarness(nil,
+		encTestSSE(http.StatusOK, encTestFailedSSE(encTestFragmentMessage)),
+		encTestJSON(http.StatusServiceUnavailable, `{"error":{"type":"server_error","message":"upstream unavailable"}}`),
+		encTestSSE(http.StatusOK, encTestFailedSSE(encTestFragmentMessage)),
+	)
+	body := encTestKABody("cross-account", encTestForeignCipher)
+	c, recorder := encTestContext(62)
+	_, err := h.svc.Forward(context.Background(), c, encTestAccount(1094, "on", nil), body)
+	require.Error(t, err)
+	require.Len(t, upstream.bodies, 2)
+	require.Equal(t, int64(1), encTestMetric(h.store, "strip_retry", 1094, "on", "result=error"))
+
+	_, err = h.svc.Forward(context.Background(), c, encTestAccount(2000, "on", nil), body)
+	require.Error(t, err)
+	require.Len(t, upstream.bodies, 3)
+	require.Equal(t, OpenAIEncryptedRecoveryHeaderExhausted, recorder.Header().Get(OpenAIEncryptedRecoveryHeader))
+	require.Equal(t, int64(1), encTestMetric(h.store, "fail_fast", 2000, "on", "reason=already_retried"))
+	require.Zero(t, encTestMetric(h.store, "circuit_open", 2000, "on"))
+	state, err := h.store.LoadOpenAIEncryptedRecoveryState(context.Background(),
+		OpenAIEncryptedRecoveryKey{GroupID: 62, SessionHash: h.svc.GenerateSessionHash(c, body), AccountID: 2000}, nil)
+	require.NoError(t, err)
+	require.False(t, state.Unrecoverable)
+}
+
+type encTestFailingBucketStore struct {
+	*memoryOpenAIEncryptedRecoveryStore
+}
+
+func (encTestFailingBucketStore) AllowOpenAIEncryptedRetry(context.Context, int64, int, time.Time) (bool, error) {
+	return false, errors.New("redis: i/o timeout")
+}
+
+// 令牌桶存储故障时 fail closed：不重试，直接 failover。
+func TestOpenAIEncryptedRecoveryTokenBucketStoreErrorFailsClosed(t *testing.T) {
+	h, upstream := newEncTestHarness(nil,
+		encTestSSE(http.StatusOK, encTestFailedSSE(encTestFragmentMessage)),
+		encTestSSE(http.StatusOK, encTestOKSSE("")),
+	)
+	h.svc.openaiEncryptedRecoveryStore = encTestFailingBucketStore{h.store}
+	c, _ := encTestContext(62)
+	_, err := h.svc.Forward(context.Background(), c, encTestAccount(1094, "on", nil), encTestKABody("bucket-down", encTestForeignCipher))
+	var failover *UpstreamFailoverError
+	require.True(t, errors.As(err, &failover), "got %v", err)
+	require.Len(t, upstream.bodies, 1)
+	require.Equal(t, int64(1), encTestMetric(h.store, "rate_limit_unavailable", 1094, "on"))
+}
