@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"net/http/httptest"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -124,6 +125,34 @@ func TestErrorRecoveryClientCancellationStopsRunningAttempt(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("client cancellation did not reach the running attempt")
 	}
+}
+func TestErrorRecoveryRunningAttemptCeiling(t *testing.T) {
+	t.Run("hung attempt cancelled at ceiling", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			c, _, a, e := recoveryFixture(t, "apikey", 0, 1)
+			require.Equal(t, ErrorRecoverySwitch, ApplyErrorRecovery(c, a, "gpt", e))
+			end := BeginErrorRecoveryAttempt(c)
+			time.Sleep(recoveryRunningAttemptCeiling - time.Second)
+			require.NoError(t, c.Request.Context().Err())
+			time.Sleep(2 * time.Second)
+			require.Error(t, c.Request.Context().Err())
+			end(context.Canceled)
+			require.True(t, RecoveryBudgetExpired(c))
+		})
+	})
+	t.Run("output before ceiling is kept", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			c, _, a, e := recoveryFixture(t, "apikey", 0, 1)
+			require.Equal(t, ErrorRecoverySwitch, ApplyErrorRecovery(c, a, "gpt", e))
+			end := BeginErrorRecoveryAttempt(c)
+			time.Sleep(recoveryRunningAttemptCeiling - time.Second)
+			CompleteErrorRecovery(c)
+			time.Sleep(2 * time.Second)
+			require.NoError(t, c.Request.Context().Err())
+			end(nil)
+			require.False(t, RecoveryBudgetExpired(c))
+		})
+	})
 }
 func TestBeginErrorRecoveryAttemptWithoutStateIsNoop(t *testing.T) {
 	c, _, _, _ := recoveryFixture(t, "apikey", 0, 1)

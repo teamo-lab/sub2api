@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -208,21 +209,22 @@ func TestErrorRecoveryHandlerBudgetKeepsRunningAttemptOutput(t *testing.T) {
 	}
 }
 
-// A hung attempt is no longer cut by the budget; the client's own cancellation
-// (or a first-output timeout) still ends it.
-func TestErrorRecoveryHandlerBudgetDoesNotCancelHungAttempt(t *testing.T) {
+// A hung attempt is not cut at the budget deadline. With no client timeout and
+// no first-output timeout configured, the running-attempt ceiling still ends it.
+func TestErrorRecoveryHandlerHungAttemptEndsAtCeiling(t *testing.T) {
 	u := &recoveryUpstream{hang: true}
 	h := newOpenAIResponsesFailoverTestHandler(t, u, "apikey")
 	rule := &model.ErrorPassthroughRule{ID: 9, Enabled: true, Name: "test", MatchMode: "all", Platforms: []string{"openai"}, ErrorCodes: []int{503}, PassthroughCode: true, PassthroughBody: true, RecoveryPolicy: &model.ErrorRecoveryPolicy{Mode: "limited", AccountTypes: []string{"apikey"}, UpstreamCodes: []string{"server_is_overloaded"}, AccountSwitches: 1, BudgetSeconds: 1}}
 	h.errorPassthroughService = service.NewErrorPassthroughService(recoveryRuleRepo{rule: rule}, nil)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	c, _ := newOpenAIResponsesFailoverTestContext(t, ctx)
-	start := time.Now()
-	h.Responses(c)
-	require.Equal(t, []int64{1, 2}, u.calls)
-	require.GreaterOrEqual(t, time.Since(start), 1900*time.Millisecond)
-	require.Less(t, time.Since(start), 5*time.Second)
+	synctest.Test(t, func(t *testing.T) {
+		c, w := newOpenAIResponsesFailoverTestContext(t, nil)
+		start := time.Now()
+		h.Responses(c)
+		require.Equal(t, []int64{1, 2}, u.calls)
+		require.Equal(t, 300*time.Second, time.Since(start))
+		require.Equal(t, 503, w.Code)
+		require.True(t, gjson.GetBytes(w.Body.Bytes(), "error.recovery_exhausted").Bool())
+	})
 }
 
 func TestErrorRecoveryHandlerNoNextAccountPreservesError(t *testing.T) {

@@ -228,11 +228,20 @@ func applyErrorRecovery(c *gin.Context, account *Account, requestedModel string,
 	return ErrorRecoverySwitch
 }
 
+// recoveryRunningAttemptCeiling bounds an attempt that has run this long without
+// output after its recovery budget expired, so a hung upstream cannot hold the
+// connection and account slot forever when the client never disconnects. It
+// matches the router's default first-response timeout: a client that waits
+// longer than this is rare, and a configured first-output timeout still applies.
+const recoveryRunningAttemptCeiling = 300 * time.Second
+
 // BeginErrorRecoveryAttempt marks one upstream attempt as running and returns
-// its end callback, which takes the attempt's error. An expired budget never
-// interrupts the running attempt: a successful attempt completes recovery even
+// its end callback, which takes the attempt's error. An expired budget does not
+// interrupt the running attempt: a successful attempt completes recovery even
 // without semantic output; a failed one cancels the recovery wait so the
-// caller's budget check returns recovery_exhausted.
+// caller's budget check returns recovery_exhausted. Only an attempt still without
+// output recoveryRunningAttemptCeiling after it started, with the budget already
+// expired, is cancelled.
 func BeginErrorRecoveryAttempt(c *gin.Context) (end func(err error)) {
 	s := recoveryState(c)
 	if s == nil {
@@ -241,7 +250,15 @@ func BeginErrorRecoveryAttempt(c *gin.Context) (end func(err error)) {
 	s.mu.Lock()
 	s.running++
 	s.mu.Unlock()
+	hangGuard := time.AfterFunc(recoveryRunningAttemptCeiling, func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if !s.output && !time.Now().Before(s.deadline) {
+			s.cancel()
+		}
+	})
 	return func(err error) {
+		hangGuard.Stop()
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.running--
