@@ -1594,6 +1594,8 @@ func openAIStreamFailedEventSemanticStatus(payload []byte, message string) int {
 		}
 	}
 	switch {
+	case code == "invalid_encrypted_content":
+		return http.StatusBadRequest
 	case strings.Contains(combined, "rate_limit"):
 		return http.StatusTooManyRequests
 	case strings.Contains(errType, "invalid_request"):
@@ -1744,6 +1746,11 @@ func openAIStreamFailedEventShouldFailover(payload []byte, message string) bool 
 		return true
 	}
 	semanticStatus := openAIStreamFailureStatus(payload, message)
+	if openAIStreamFailedEventErrorCode(payload) == "invalid_encrypted_content" {
+		// The same opaque function result cannot be repaired by another account.
+		// Safe summary recovery is attempted by the caller before this decision.
+		return false
+	}
 	if semanticStatus == http.StatusForbidden {
 		return openAIStream403AccountFailure(payload, message)
 	}

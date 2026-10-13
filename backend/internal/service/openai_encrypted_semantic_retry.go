@@ -214,6 +214,16 @@ func openAIEncryptedSemanticRetryStateFor(c *gin.Context) *openAIEncryptedSemant
 	return state
 }
 
+func isOpenAIEncryptedFunctionOutputRejection(payload []byte) bool {
+	for _, prefix := range []string{"error", "response.error"} {
+		if gjson.GetBytes(payload, prefix+".code").String() == "invalid_encrypted_content" &&
+			strings.Contains(strings.ToLower(gjson.GetBytes(payload, prefix+".message").String()), "encrypted function output") {
+			return true
+		}
+	}
+	return false
+}
+
 func newOpenAIEncryptedSemanticRetrySignal(c *gin.Context, payload []byte) error {
 	state := openAIEncryptedSemanticRetryStateFor(c)
 	if state == nil || !state.eligible || state.tried || c.Request == nil || c.Request.Context().Err() != nil {
@@ -225,6 +235,9 @@ func newOpenAIEncryptedSemanticRetrySignal(c *gin.Context, payload []byte) error
 			return nil
 		}
 		payload = terminal
+	}
+	if isOpenAIEncryptedFunctionOutputRejection(payload) {
+		return nil
 	}
 	for _, path := range []string{"error.code", "response.error.code"} {
 		if gjson.GetBytes(payload, path).String() == "invalid_encrypted_content" {

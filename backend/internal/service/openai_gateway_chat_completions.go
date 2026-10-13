@@ -345,61 +345,82 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 		return nil, fmt.Errorf("get access token: %w", err)
 	}
 
-	// 6. Build upstream request
-	upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
-	var headerGuard *openAIFirstOutputHeaderGuard
-	if firstOutputTimeout > 0 {
-		upstreamCtx, headerGuard = newOpenAIFirstOutputHeaderGuard(
-			upstreamCtx, releaseUpstreamCtx, startTime.Add(firstOutputTimeout),
-		)
-	}
-	upstreamReq, err := s.buildUpstreamRequest(upstreamCtx, c, account, responsesBody, token, true, promptCacheKey, false)
-	if headerGuard == nil {
-		releaseUpstreamCtx()
-	}
-	if err != nil {
-		if headerGuard != nil {
+	// Rebuild each attempt so header timeouts retain the original deadline.
+	retryState := openAIResponsesRejectedFieldRetryStateForRequest(c, responsesBody)
+	var resp *http.Response
+	for {
+		// 6. Build upstream request
+		upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
+		var headerGuard *openAIFirstOutputHeaderGuard
+		if firstOutputTimeout > 0 {
+			upstreamCtx, headerGuard = newOpenAIFirstOutputHeaderGuard(
+				upstreamCtx, releaseUpstreamCtx, startTime.Add(firstOutputTimeout),
+			)
+		}
+		upstreamReq, err := s.buildUpstreamRequest(upstreamCtx, c, account, responsesBody, token, true, promptCacheKey, false)
+		if headerGuard == nil {
+			releaseUpstreamCtx()
+		}
+		if err != nil {
+			if headerGuard != nil {
+				headerGuard.close()
+			}
+			return nil, fmt.Errorf("build upstream request: %w", err)
+		}
+
+		if promptCacheKey != "" {
+			apiKeyID := getAPIKeyIDFromContext(c)
+			sessionKey := promptCacheKey
+			if !compatPromptCacheTenantIsolated {
+				sessionKey = isolateOpenAIUpstreamSessionID(apiKeyID, codexAccountIdentitySource(c, account), promptCacheKey)
+			}
+			upstreamReq.Header.Set("session_id", generateSessionUUID(sessionKey))
+		}
+
+		// 7. Send request
+		proxyURL := ""
+		if account.ProxyID != nil && account.Proxy != nil {
+			proxyURL = account.Proxy.URL()
+		}
+		upstreamStartedAt := time.Now()
+		resp, err = s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+		SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStartedAt).Milliseconds())
+		if headerGuard != nil && headerGuard.stopHeaderWait() {
+			if resp != nil && resp.Body != nil {
+				_ = resp.Body.Close()
+			}
 			headerGuard.close()
+			return nil, s.newOpenAIFirstOutputTimeoutError(
+				ctx, c, account, opsUpstreamProxyID(account), opsUpstreamProxyName(account),
+				startTime, originalModel, reasoningEffort,
+				firstOutputTimeout, "response_headers", nil,
+			)
 		}
-		return nil, fmt.Errorf("build upstream request: %w", err)
-	}
-
-	if promptCacheKey != "" {
-		apiKeyID := getAPIKeyIDFromContext(c)
-		sessionKey := promptCacheKey
-		if !compatPromptCacheTenantIsolated {
-			sessionKey = isolateOpenAIUpstreamSessionID(apiKeyID, codexAccountIdentitySource(c, account), promptCacheKey)
+		if err != nil {
+			if headerGuard != nil {
+				headerGuard.close()
+			}
+			return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)
 		}
-		upstreamReq.Header.Set("session_id", generateSessionUUID(sessionKey))
-	}
-
-	// 7. Send request
-	proxyURL := ""
-	if account.ProxyID != nil && account.Proxy != nil {
-		proxyURL = account.Proxy.URL()
-	}
-	upstreamStartedAt := time.Now()
-	resp, err := s.doOpenAIUpstream(upstreamReq, proxyURL, account)
-	SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStartedAt).Milliseconds())
-	if headerGuard != nil && headerGuard.stopHeaderWait() {
-		if resp != nil && resp.Body != nil {
+		if headerGuard != nil {
+			resp.Body = &openAIRequestContextReadCloser{ReadCloser: resp.Body, cleanup: headerGuard.close}
+		}
+		if resp.StatusCode != http.StatusBadRequest {
+			break
+		}
+		respBody, _ := s.readOpenAIUpstreamError(resp)
+		retryBody, reason, changed, retryErr := normalizeOpenAIResponsesRejectedFieldRetryBody(resp.StatusCode, responsesBody, respBody)
+		if retryErr != nil {
 			_ = resp.Body.Close()
+			return nil, fmt.Errorf("normalize chat Responses field retry body: %w", retryErr)
 		}
-		headerGuard.close()
-		return nil, s.newOpenAIFirstOutputTimeoutError(
-			ctx, c, account, opsUpstreamProxyID(account), opsUpstreamProxyName(account),
-			startTime, originalModel, reasoningEffort,
-			firstOutputTimeout, "response_headers", nil,
-		)
-	}
-	if err != nil {
-		if headerGuard != nil {
-			headerGuard.close()
+		if !changed || !retryState.Allow(retryBody) {
+			break
 		}
-		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)
-	}
-	if headerGuard != nil {
-		resp.Body = &openAIRequestContextReadCloser{ReadCloser: resp.Body, cleanup: headerGuard.close}
+		_ = resp.Body.Close()
+		responsesBody = retryBody
+		logger.L().Info("openai chat_completions: retrying rejected Responses field",
+			zap.Int64("account_id", account.ID), zap.String("reason", reason))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
