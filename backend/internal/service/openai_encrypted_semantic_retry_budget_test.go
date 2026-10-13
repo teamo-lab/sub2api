@@ -59,14 +59,20 @@ func TestOpenAIEncryptedRetryOwnBudgetBoundsSecondAttempt(t *testing.T) {
 
 type encryptedOutputRecorder struct {
 	*httptest.ResponseRecorder
-	reached chan struct{}
-	once    sync.Once
+	reached  chan struct{}
+	once     sync.Once
+	onOutput func()
 }
 
 func (r *encryptedOutputRecorder) Write(p []byte) (int, error) {
 	n, err := r.ResponseRecorder.Write(p)
 	if strings.Contains(string(p), "delivered answer") {
-		r.once.Do(func() { close(r.reached) })
+		r.once.Do(func() {
+			if r.onOutput != nil {
+				r.onOutput()
+			}
+			close(r.reached)
+		})
 	}
 	return n, err
 }
@@ -80,6 +86,16 @@ func TestOpenAIEncryptedRetryDisarmsAfterSemanticOutput(t *testing.T) {
 			outcome := make(chan error, 1)
 			calls := 0
 			var budget *openAIEncryptedRetryBudget
+			recorder.onOutput = func() {
+				// The client disconnects while the first semantic bytes are still
+				// being written, before the writer returns. Give the cancellation
+				// hook time to run; it must find the budget already disarmed.
+				cancel()
+				select {
+				case <-budget.ctx.Done():
+				case <-time.After(50 * time.Millisecond):
+				}
+			}
 			upstream := &encryptedBudgetUpstream{do: func(r *http.Request) (*http.Response, error) {
 				calls++
 				if calls == 1 {
@@ -95,17 +111,9 @@ func TestOpenAIEncryptedRetryDisarmsAfterSemanticOutput(t *testing.T) {
 						outcome <- errors.New("semantic output was not delivered")
 						return
 					}
-					// The stream marks output right after the flush that reached the
-					// client; cancelling in between is a race the test does not model.
-					if !waitEncryptedRetryOutputMarked(budget, 300*time.Millisecond) {
-						outcome <- errors.New("semantic output was not marked")
-						return
-					}
 					// After output, both client cancellation and the short test budget
 					// must leave the successful stream available for normal draining.
-					// The drain outlives the whole budget, so its timer would fire here.
-					cancel()
-					time.Sleep(200 * time.Millisecond)
+					time.Sleep(time.Until(budget.deadline) + 20*time.Millisecond)
 					if err := r.Context().Err(); err != nil {
 						outcome <- err
 						_ = writer.CloseWithError(err)
@@ -131,18 +139,6 @@ func TestOpenAIEncryptedRetryDisarmsAfterSemanticOutput(t *testing.T) {
 			require.Contains(t, recorder.Body.String(), "response.completed")
 		})
 	}
-}
-
-func waitEncryptedRetryOutputMarked(budget *openAIEncryptedRetryBudget, timeout time.Duration) bool {
-	for deadline := time.Now().Add(timeout); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
-		budget.mu.Lock()
-		output := budget.output
-		budget.mu.Unlock()
-		if output {
-			return true
-		}
-	}
-	return false
 }
 
 func TestOpenAIEncryptedRetryDoesNotReplaceExistingRecoveryBudget(t *testing.T) {

@@ -355,6 +355,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				applyAttemptResponseHeaders()
 			}
 			if shouldFlush {
+				completeOpenAIEncryptedSemanticRetry(c)
 				if err := flushBuffered(); err != nil {
 					clientDisconnected = true
 					logger.LegacyPrintf("service.openai_gateway", "Client disconnected during streaming flush, continuing to drain upstream for billing")
@@ -391,6 +392,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		}
 		errorEventSent = true
 		payload := `{"type":"error","sequence_number":0,"error":{"type":"upstream_error","message":` + strconv.Quote(reason) + `,"code":` + strconv.Quote(reason) + `}}`
+		completeOpenAIEncryptedSemanticRetry(c)
 		if err := flushBuffered(); err != nil {
 			clientDisconnected = true
 			return
@@ -432,6 +434,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		if clientDisconnected || pendingBytes() == 0 {
 			return
 		}
+		completeOpenAIEncryptedSemanticRetry(c)
 		if err := flushBuffered(); err != nil {
 			clientDisconnected = true
 			logger.LegacyPrintf("service.openai_gateway", "%s", disconnectMessage)
@@ -926,6 +929,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 					terminalOrigin.seal()
 				}
 				if shouldFlush {
+					completeOpenAIEncryptedSemanticRetry(c)
 					if err := flushBuffered(); err != nil {
 						clientDisconnected = true
 						logger.LegacyPrintf("service.openai_gateway", "Client disconnected during streaming flush, continuing to drain upstream for billing")

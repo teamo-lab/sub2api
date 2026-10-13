@@ -72,6 +72,10 @@ func openAIEncryptedSemanticRetryContext(c *gin.Context, original context.Contex
 	return state.budget.ctx
 }
 
+// Stream writers call this before writing semantic output, not only after the
+// write returns: a write may reach the client before it returns, and a client
+// cancellation landing in between would otherwise abort the drain. A write that
+// then fails leaves the stream draining for billing, as after any output.
 func completeOpenAIEncryptedSemanticRetry(c *gin.Context) {
 	state := openAIEncryptedSemanticRetryStateFor(c)
 	if state == nil || state.budget == nil {
