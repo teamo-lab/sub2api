@@ -760,8 +760,10 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	lineageGroupID := getOpenAIGroupIDFromContext(c)
 	lineageEntryBody := body
 	lineageSessionHash := ""
-	// 加密恢复引擎（mode=on）按账号维护 Redis lineage，接管旧的进程内会话级剥离。
-	encryptedRecoveryOn := account.OpenAIEncryptedRecoveryMode(lineageGroupID) == OpenAIEncryptedRecoveryModeOn
+	// 加密恢复引擎（mode=on）按账号维护 Redis lineage，接管 HTTP 路径上旧的进程内
+	// 会话级剥离；WS 路径不经过该引擎，保留旧逻辑。
+	encryptedRecoveryOn := wsDecision.Transport != OpenAIUpstreamTransportResponsesWebsocketV2 &&
+		account.OpenAIEncryptedRecoveryMode(lineageGroupID) == OpenAIEncryptedRecoveryModeOn
 	if stateStore := s.getOpenAIWSStateStore(); !encryptedRecoveryOn && stateStore != nil && stateStore.HasAnySessionInvalidEncryptedContent() {
 		lineageSessionHash = s.GenerateSessionHash(c, body)
 		if invalidDigests := stateStore.GetSessionInvalidEncryptedContentDigests(lineageGroupID, lineageSessionHash); len(invalidDigests) > 0 {
