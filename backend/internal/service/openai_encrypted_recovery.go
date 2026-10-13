@@ -851,6 +851,20 @@ func (r *openAIEncryptedRecovery) addOutputItem(item gjson.Result) {
 	r.outputDigests[openAIEncryptedContentDigest(cipher.String())] = struct{}{}
 }
 
+// observeOpenAIEncryptedRecoverySSEBody 扫描整段 SSE（stream=false 收到 SSE 时）。
+func observeOpenAIEncryptedRecoverySSEBody(c *gin.Context, body string) {
+	r := armedOpenAIEncryptedRecovery(c)
+	if r == nil || !strings.Contains(body, `"encrypted_content"`) {
+		return
+	}
+	forEachOpenAISSEFrame(body, func(eventType string, data []byte) {
+		if eventType == "" {
+			eventType = gjson.GetBytes(data, "type").String()
+		}
+		r.observeOutput(data, eventType)
+	})
+}
+
 func observeOpenAIEncryptedRecoveryOutput(c *gin.Context, data []byte, eventType string) {
 	if r := armedOpenAIEncryptedRecovery(c); r != nil {
 		r.observeOutput(data, eventType)

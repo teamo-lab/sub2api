@@ -1873,7 +1873,9 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 
 	usage := s.parseSSEUsageFromBody(bodyText)
 	if ok {
-		observeOpenAIEncryptedRecoveryOutput(c, finalResponse, "")
+		// 直接扫描 SSE 帧记录密文来历：terminal output 可能为空，reasoning 密文
+		// 只出现在先前的 output_item.done 事件里。
+		observeOpenAIEncryptedRecoverySSEBody(c, bodyText)
 		if parsedUsage, parsed := extractOpenAIUsageFromJSONBytes(finalResponse); parsed {
 			*usage = parsedUsage
 		}

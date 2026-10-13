@@ -589,3 +589,26 @@ func TestOpenAIEncryptedRecoveryTokenBucketStoreErrorFailsClosed(t *testing.T) {
 	require.Len(t, upstream.bodies, 1)
 	require.Equal(t, int64(1), encTestMetric(h.store, "rate_limit_unavailable", 1094, "on"))
 }
+
+// stream=false 收到 SSE 且 terminal output 为空时，仍从 output_item.done 记录来历。
+func TestOpenAIEncryptedRecoveryNonStreamingRecordsProvenanceFromItemEvents(t *testing.T) {
+	const generated = "gAAAAgenerated-in-nonstream-sse-ZZ=="
+	h, upstream := newEncTestHarness(nil,
+		encTestSSE(http.StatusOK, encTestOKSSE(generated)),
+		encTestSSE(http.StatusOK, encTestOKSSE("")),
+	)
+	nonStream := func(body []byte) []byte {
+		return []byte(strings.Replace(string(body), `"stream":true`, `"stream":false`, 1))
+	}
+	c, _ := encTestContext(62)
+	_, err := h.svc.Forward(context.Background(), c, encTestAccount(1094, "on", nil), nonStream(encTestKABody("ns-prov")))
+	require.NoError(t, err)
+
+	other := encTestAccount(3000, "on", nil)
+	other.Credentials["base_url"] = "https://other-vendor.example.net/v1"
+	c2, _ := encTestContext(62)
+	_, err = h.svc.Forward(context.Background(), c2, other, nonStream(encTestKABody("ns-prov", generated)))
+	require.NoError(t, err)
+	require.Len(t, upstream.bodies, 2)
+	require.Empty(t, encTestInputCiphers(upstream.bodies[1]))
+}
