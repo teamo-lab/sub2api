@@ -570,6 +570,8 @@ func (r *openAIEncryptedRecovery) beginAttempt(body []byte) {
 	r.body = body
 	r.decided = false
 	r.decision = openAIEncryptedRecoveryDecision{}
+	// 只记录最终成功那次尝试的输出密文来历。
+	r.outputDigests = nil
 }
 
 func (r *openAIEncryptedRecovery) storeContext() (context.Context, context.CancelFunc) {
