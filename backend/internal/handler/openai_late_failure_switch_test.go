@@ -88,13 +88,21 @@ func (u *lateFailureUpstream) Do(req *http.Request, _ string, id int64, _ int) (
 	n := len(u.calls)
 	u.mu.Unlock()
 	if id == u.primaryID && n > 1 {
-		<-req.Context().Done()
-		return nil, req.Context().Err()
+		// The same-account retry fails late. The recovery budget expires while it
+		// runs but no longer cuts it; recovery stops once the retry has failed.
+		select {
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		case <-time.After(sameAccountRetryFailsAfter):
+		}
 	}
 	failure := "data: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_fixture_A\",\"status\":\"failed\",\"error\":{\"code\":\"upstream_error\",\"message\":\"synthetic long upstream failure\"}}}\n\n"
 	if id == u.primaryID {
 		if u.answerBeforeFailure {
 			failure = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"committed fixture answer\",\"output_index\":0,\"content_index\":0}\n\n" + failure
+		}
+		if n > 1 {
+			return &http.Response{StatusCode: u.failureStatusCode(), Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(failure))}, nil
 		}
 		body := &lateFailureBody{reader: strings.NewReader(failure), delay: u.firstDelay, onRead: func() {
 			u.firstFailureAt = time.Now()
@@ -102,16 +110,23 @@ func (u *lateFailureUpstream) Do(req *http.Request, _ string, id int64, _ int) (
 				u.cancelAtFirstFailure()
 			}
 		}}
-		status := 200
-		if u.failureStatus != 0 {
-			status = u.failureStatus
-		}
-		return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: body}, nil
+		return &http.Response{StatusCode: u.failureStatusCode(), Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: body}, nil
 	}
 	time.Sleep(2 * time.Second)
 	body := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"B rescued this request\",\"output_index\":0,\"content_index\":0}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_fixture_B\",\"object\":\"response\",\"created_at\":1700000000,\"model\":\"gpt-5.6-sol\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"B rescued this request\"}]}],\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}}\n\n"
 	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
 }
+
+// sameAccountRetryFailsAfter outlasts every fixture budget (at most 120s).
+const sameAccountRetryFailsAfter = 150 * time.Second
+
+func (u *lateFailureUpstream) failureStatusCode() int {
+	if u.failureStatus != 0 {
+		return u.failureStatus
+	}
+	return 200
+}
+
 func (u *lateFailureUpstream) ids() []int64 {
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -274,7 +289,7 @@ func TestOpenAILateFailureSwitchHandler_RealRule4Counterexample(t *testing.T) {
 						require.Equal(t, 502, w.Code)
 						require.True(t, gjson.GetBytes(w.Body.Bytes(), "error.recovery_exhausted").Bool())
 						require.Equal(t, int64(4), gjson.GetBytes(w.Body.Bytes(), "error.recovery_rule_id").Int())
-						require.Equal(t, 5*time.Minute+30*time.Second, elapsed)
+						require.Equal(t, 5*time.Minute+500*time.Millisecond+sameAccountRetryFailsAfter, elapsed)
 						require.Equal(t, 500*time.Millisecond, u.calls[1].At.Sub(u.firstFailureAt))
 					} else {
 						require.Equal(t, []int64{22, 23}, u.ids())
@@ -304,11 +319,7 @@ func TestOpenAILateFailureSwitchHandler_ScopeAndDuration(t *testing.T) {
 					} else {
 						require.Equal(t, []int64{u.primaryID, u.primaryID}, u.ids())
 						require.Equal(t, 502, w.Code)
-						budget := 30 * time.Second
-						if scenario == "budget_above_floor" {
-							budget = 120 * time.Second
-						}
-						require.Equal(t, u.firstDelay+budget, elapsed)
+						require.Equal(t, u.firstDelay+500*time.Millisecond+sameAccountRetryFailsAfter, elapsed)
 						require.True(t, gjson.GetBytes(w.Body.Bytes(), "error.recovery_exhausted").Bool())
 					}
 				})

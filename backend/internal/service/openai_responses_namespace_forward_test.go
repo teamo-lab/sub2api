@@ -292,3 +292,16 @@ func TestOpenAIGatewayService_APIKeyDefaultRepairsMissingCallNamespace(t *testin
 	require.Len(t, upstream.bodies, 1)
 	require.Equal(t, "collaboration", gjson.GetBytes(upstream.bodies[0], "input.0.namespace").String())
 }
+
+func TestForwardPreservesNamespacesDeclaredInAdditionalTools(t *testing.T) {
+	for _, ns := range []string{``, `,"namespace":"demo"`} {
+		body := []byte(`{"model":"gpt-6-astra","stream":false,"input":[{"type":"additional_tools","role":"developer","tools":[{"type":"namespace","name":"demo","description":"Test tools","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]}]},{"type":"function_call","name":"lookup","call_id":"c1","arguments":"{}"` + ns + `},{"type":"function_call_output","call_id":"c1","output":"42"}]}`)
+		upstream := &httpUpstreamRecorder{responses: []*http.Response{newOpenAIRejectedFieldTestResponse(http.StatusOK, namespaceForwardOKResponse)}}
+		result, err := newOpenAIRejectedFieldTestService(upstream).Forward(context.Background(), newOpenAIRejectedFieldTestContext(body), newOpenAIRejectedFieldTestAccount(), body)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		require.Len(t, upstream.bodies, 1)
+		require.Equal(t, "demo", gjson.GetBytes(upstream.bodies[0], "input.1.namespace").String())
+		require.Equal(t, "42", gjson.GetBytes(upstream.bodies[0], "input.2.output").String())
+	}
+}

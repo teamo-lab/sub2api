@@ -46,7 +46,7 @@ func TestOpenAIEncryptedRetryOwnBudgetBoundsSecondAttempt(t *testing.T) {
 			svc, c, recorder, account := encryptedBudgetFixture(t, passthrough, parent, upstream)
 			initializeOpenAIEncryptedSemanticRetry(c, account, []byte(encryptedRetryBudgetRequest))
 			// Inject a shorter instance of the same timer; production uses 30s.
-			openAIEncryptedSemanticRetryStateFor(c).budget = newOpenAIEncryptedRetryBudget(c, parent, 20*time.Millisecond)
+			openAIEncryptedSemanticRetryStateFor(c).budget = newOpenAIEncryptedRetryBudget(parent, 20*time.Millisecond)
 			_, err := svc.Forward(parent, c, account, []byte(encryptedRetryBudgetRequest))
 			require.Error(t, err)
 			require.True(t, canceled)
@@ -113,7 +113,7 @@ func TestOpenAIEncryptedRetryDisarmsAfterSemanticOutput(t *testing.T) {
 			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(parent)
 			SetOpenAIClientTransport(c, OpenAIClientTransportHTTP)
 			initializeOpenAIEncryptedSemanticRetry(c, account, []byte(encryptedRetryBudgetRequest))
-			openAIEncryptedSemanticRetryStateFor(c).budget = newOpenAIEncryptedRetryBudget(c, parent, 30*time.Millisecond)
+			openAIEncryptedSemanticRetryStateFor(c).budget = newOpenAIEncryptedRetryBudget(parent, 30*time.Millisecond)
 			result, err := svc.Forward(parent, c, account, []byte(encryptedRetryBudgetRequest))
 			require.NoError(t, err)
 			require.NoError(t, <-outcome)
@@ -129,18 +129,15 @@ func TestOpenAIEncryptedRetryDoesNotReplaceExistingRecoveryBudget(t *testing.T) 
 	require.Equal(t, ErrorRecoverySwitch, ApplyErrorRecovery(c, account, "gpt", failure))
 	outer := recoveryState(c)
 	originalDeadline := outer.deadline
-	budget := newOpenAIEncryptedRetryBudget(c, c.Request.Context(), openAIEncryptedSemanticRetryBudget)
+	budget := newOpenAIEncryptedRetryBudget(c.Request.Context(), openAIEncryptedSemanticRetryBudget)
 	defer budget.cancel()
 	defer budget.timer.Stop()
 	defer budget.stopParent()
 	require.Same(t, outer, recoveryState(c))
 	require.Equal(t, originalDeadline, outer.deadline)
-	require.Equal(t, originalDeadline, budget.deadline)
-	uncapped := newOpenAIEncryptedRetryBudget(nil, context.Background(), openAIEncryptedSemanticRetryBudget)
-	defer uncapped.cancel()
-	defer uncapped.timer.Stop()
-	defer uncapped.stopParent()
-	require.InDelta(t, 30, time.Until(uncapped.deadline).Seconds(), 0.2)
+	// The encrypted retry runs inside one attempt; the shorter outer budget
+	// (1s in the fixture) must not cut it short.
+	require.InDelta(t, 30, time.Until(budget.deadline).Seconds(), 0.2)
 }
 
 func TestOpenAIEncryptedRetryMetadataTimeoutWritesOneTerminal(t *testing.T) {
@@ -180,7 +177,7 @@ func TestOpenAIEncryptedRetryMetadataTimeoutWritesOneTerminal(t *testing.T) {
 				svc, c, recorder, account := encryptedBudgetFixture(t, passthrough, parent, upstream)
 				requestContext = c
 				initializeOpenAIEncryptedSemanticRetry(c, account, []byte(encryptedRetryBudgetRequest))
-				openAIEncryptedSemanticRetryStateFor(c).budget = newOpenAIEncryptedRetryBudget(c, parent, 20*time.Millisecond)
+				openAIEncryptedSemanticRetryStateFor(c).budget = newOpenAIEncryptedRetryBudget(parent, 20*time.Millisecond)
 				_, err := svc.Forward(parent, c, account, []byte(encryptedRetryBudgetRequest))
 				require.Error(t, err)
 				require.True(t, <-canceled)
@@ -216,7 +213,7 @@ func TestOpenAIEncryptedRetryBudgetDoesNotAppendToCommittedHTTPError(t *testing.
 			parent := context.Background()
 			svc, c, recorder, account := encryptedBudgetFixture(t, passthrough, parent, upstream)
 			initializeOpenAIEncryptedSemanticRetry(c, account, []byte(encryptedRetryBudgetRequest))
-			openAIEncryptedSemanticRetryStateFor(c).budget = newOpenAIEncryptedRetryBudget(c, parent, 20*time.Millisecond)
+			openAIEncryptedSemanticRetryStateFor(c).budget = newOpenAIEncryptedRetryBudget(parent, 20*time.Millisecond)
 			_, err := svc.Forward(parent, c, account, []byte(encryptedRetryBudgetRequest))
 			require.Error(t, err)
 			require.Equal(t, 2, calls)

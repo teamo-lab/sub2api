@@ -5,7 +5,7 @@ description: Deploy Sub2API to the 43 production server through its managed blue
 
 # Deploy Sub2API Production
 
-Target only `root@43.159.0.162` and `/opt/sub2api/deploy`. Another host is outside this skill.
+Target only `root@43.154.93.133` and `/opt/sub2api/deploy`. Another host is outside this skill.
 
 Read [references/runbook.md](references/runbook.md) before any live deployment, promotion, completion, or rollback. Status/audit requests may use read-only checks without deployment authorization.
 

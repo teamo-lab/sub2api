@@ -111,7 +111,7 @@ func TestNativeRelayEncryptedBudgetClosesHeldReasoningAndWritesOneTerminal(t *te
 				c.Writer.Flush()
 			}
 			initializeOpenAIEncryptedSemanticRetry(c, account, []byte(encryptedRetryBudgetRequest))
-			budget := newOpenAIEncryptedRetryBudget(c, parent, 40*time.Millisecond)
+			budget := newOpenAIEncryptedRetryBudget(parent, 40*time.Millisecond)
 			originalDeadline := budget.deadline
 			openAIEncryptedSemanticRetryStateFor(c).budget = budget
 			started := time.Now()

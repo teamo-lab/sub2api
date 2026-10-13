@@ -302,3 +302,22 @@ func TestRepairOpenAIResponsesToolCallNamespaces(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, plain, same)
 }
+
+func TestRepairAndKeepNamespacesFromInputToolDeclarations(t *testing.T) {
+	for _, carrier := range []string{"additional_tools", "tool_search_output"} {
+		for _, ns := range []string{``, `,"namespace":null`, `,"namespace":""`, `,"namespace":"demo"`} {
+			body := []byte(`{"input":[{"type":"` + carrier + `","tools":[{"type":"namespace","name":"demo","tools":[{"type":"function","name":"lookup"}]}]},{"type":"function_call","name":"lookup","arguments":"{}"` + ns + `}]}`)
+			repaired, err := repairOpenAIResponsesToolCallNamespaces(body)
+			require.NoError(t, err)
+			require.Equal(t, "demo", gjson.GetBytes(repaired, "input.1.namespace").String())
+			require.True(t, shouldKeepOpenAIResponsesToolCallNamespaces(newOpenAIRejectedFieldTestAccount(), OpenAIUpstreamTransportHTTPSSE, false, false, repaired))
+		}
+	}
+}
+
+func TestInputToolNamespaceRepairDoesNotGuessConflicts(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"function","name":"lookup"}],"input":[{"type":"additional_tools","tools":[{"type":"namespace","name":"demo","tools":[{"type":"function","name":"lookup"}]}]},{"type":"function_call","name":"lookup","arguments":"{}"}]}`)
+	repaired, err := repairOpenAIResponsesToolCallNamespaces(body)
+	require.NoError(t, err)
+	require.Equal(t, body, repaired)
+}

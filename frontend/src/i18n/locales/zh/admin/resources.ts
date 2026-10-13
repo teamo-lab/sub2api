@@ -111,6 +111,7 @@ export default {
       urlCopied: '代理 URL 已复制',
       allProtocols: '全部协议',
       allStatus: '全部状态',
+      currentActiveAccounts: '活跃账号数：{count}',
       searchProxies: '搜索代理...',
       protocols: {
         http: 'HTTP',

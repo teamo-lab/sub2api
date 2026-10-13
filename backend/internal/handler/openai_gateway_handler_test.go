@@ -1968,16 +1968,26 @@ type openAIHTTPPassthroughFailoverUpstream struct {
 	service.HTTPUpstream
 	mu         sync.Mutex
 	accountIDs []int64
+	statusCode int
+	errorBody  string
 }
 
 func (u *openAIHTTPPassthroughFailoverUpstream) Do(_ *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
 	u.mu.Lock()
 	u.accountIDs = append(u.accountIDs, accountID)
 	u.mu.Unlock()
+	status := u.statusCode
+	if status == 0 {
+		status = http.StatusBadGateway
+	}
+	body := u.errorBody
+	if body == "" {
+		body = `{"error":{"message":"temporary upstream failure"}}`
+	}
 	return &http.Response{
-		StatusCode: http.StatusBadGateway,
+		StatusCode: status,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
-		Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"temporary upstream failure"}}`)),
+		Body:       io.NopCloser(strings.NewReader(body)),
 	}, nil
 }
 

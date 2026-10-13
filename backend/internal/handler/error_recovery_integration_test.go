@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -32,6 +33,7 @@ type recoveryUpstream struct {
 	typeOnly        bool
 	sseHTTPError    bool
 	succeedOnSecond bool
+	secondDelay     time.Duration
 	firstSSEPayload string
 	firstSSEPrefix  string
 }
@@ -39,6 +41,11 @@ type recoveryUpstream struct {
 func (u *recoveryUpstream) Do(req *http.Request, _ string, id int64, _ int) (*http.Response, error) {
 	u.calls = append(u.calls, id)
 	if u.succeedOnSecond && id == 2 {
+		select {
+		case <-time.After(u.secondDelay):
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		}
 		body := `{"id":"resp_recovered","object":"response","model":"gpt-5.1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}`
 		contentType := "application/json"
 		if u.sse {
@@ -159,22 +166,17 @@ func TestErrorRecoveryHandlerAttemptsAndDeadline(t *testing.T) {
 	for _, tc := range []struct {
 		name, kind string
 		retries    int
-		hang, sse  bool
+		sse        bool
 		want       []int64
 	}{
-		{"apikey_json", "apikey", 0, false, false, []int64{1, 2}},
-		{"oauth_json", "oauth", 1, false, false, []int64{1, 1, 2, 2}},
-		{"oauth_sse", "oauth", 1, false, true, []int64{1, 1, 2, 2}},
-		{"apikey_deadline", "apikey", 0, true, false, []int64{1, 2}},
+		{"apikey_json", "apikey", 0, false, []int64{1, 2}},
+		{"oauth_json", "oauth", 1, false, []int64{1, 1, 2, 2}},
+		{"oauth_sse", "oauth", 1, true, []int64{1, 1, 2, 2}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			u := &recoveryUpstream{hang: tc.hang, sse: tc.sse}
+			u := &recoveryUpstream{sse: tc.sse}
 			h := newOpenAIResponsesFailoverTestHandler(t, u, tc.kind)
-			budget := 10
-			if tc.hang {
-				budget = 1
-			}
-			rule := &model.ErrorPassthroughRule{ID: 9, Enabled: true, Name: "test", MatchMode: "all", Platforms: []string{"openai"}, ErrorCodes: []int{503}, PassthroughCode: true, PassthroughBody: true, RecoveryPolicy: &model.ErrorRecoveryPolicy{Mode: "limited", AccountTypes: []string{tc.kind}, UpstreamCodes: []string{"server_is_overloaded"}, SameAccountRetries: tc.retries, AccountSwitches: 1, BudgetSeconds: budget}}
+			rule := &model.ErrorPassthroughRule{ID: 9, Enabled: true, Name: "test", MatchMode: "all", Platforms: []string{"openai"}, ErrorCodes: []int{503}, PassthroughCode: true, PassthroughBody: true, RecoveryPolicy: &model.ErrorRecoveryPolicy{Mode: "limited", AccountTypes: []string{tc.kind}, UpstreamCodes: []string{"server_is_overloaded"}, SameAccountRetries: tc.retries, AccountSwitches: 1, BudgetSeconds: 10}}
 			h.errorPassthroughService = service.NewErrorPassthroughService(recoveryRuleRepo{rule: rule}, nil)
 			c, w := newOpenAIResponsesFailoverTestContext(t, nil)
 			start := time.Now()
@@ -186,6 +188,43 @@ func TestErrorRecoveryHandlerAttemptsAndDeadline(t *testing.T) {
 			require.True(t, gjson.GetBytes(w.Body.Bytes(), "error.recovery_exhausted").Bool())
 		})
 	}
+}
+
+// The budget stops new retries and waits only. An attempt already running on
+// the switched account keeps going past the deadline and its output is kept.
+func TestErrorRecoveryHandlerBudgetKeepsRunningAttemptOutput(t *testing.T) {
+	for _, sse := range []bool{false, true} {
+		t.Run(map[bool]string{false: "json", true: "sse"}[sse], func(t *testing.T) {
+			u := &recoveryUpstream{sse: sse, succeedOnSecond: true, secondDelay: 1500 * time.Millisecond}
+			h := newOpenAIResponsesFailoverTestHandler(t, u, "apikey")
+			rule := &model.ErrorPassthroughRule{ID: 9, Enabled: true, Name: "test", MatchMode: "all", Platforms: []string{"openai"}, ErrorCodes: []int{503}, PassthroughCode: true, PassthroughBody: true, RecoveryPolicy: &model.ErrorRecoveryPolicy{Mode: "limited", AccountTypes: []string{"apikey"}, UpstreamCodes: []string{"server_is_overloaded"}, AccountSwitches: 1, BudgetSeconds: 1}}
+			h.errorPassthroughService = service.NewErrorPassthroughService(recoveryRuleRepo{rule: rule}, nil)
+			c, w := newOpenAIResponsesFailoverTestContext(t, nil)
+			h.Responses(c)
+			require.Equal(t, []int64{1, 2}, u.calls)
+			require.Equal(t, http.StatusOK, w.Code)
+			require.Contains(t, w.Body.String(), "resp_recovered")
+			require.NotContains(t, w.Body.String(), "recovery_exhausted")
+		})
+	}
+}
+
+// A hung attempt is not cut at the budget deadline. With no client timeout and
+// no first-output timeout configured, the running-attempt ceiling still ends it.
+func TestErrorRecoveryHandlerHungAttemptEndsAtCeiling(t *testing.T) {
+	u := &recoveryUpstream{hang: true}
+	h := newOpenAIResponsesFailoverTestHandler(t, u, "apikey")
+	rule := &model.ErrorPassthroughRule{ID: 9, Enabled: true, Name: "test", MatchMode: "all", Platforms: []string{"openai"}, ErrorCodes: []int{503}, PassthroughCode: true, PassthroughBody: true, RecoveryPolicy: &model.ErrorRecoveryPolicy{Mode: "limited", AccountTypes: []string{"apikey"}, UpstreamCodes: []string{"server_is_overloaded"}, AccountSwitches: 1, BudgetSeconds: 1}}
+	h.errorPassthroughService = service.NewErrorPassthroughService(recoveryRuleRepo{rule: rule}, nil)
+	synctest.Test(t, func(t *testing.T) {
+		c, w := newOpenAIResponsesFailoverTestContext(t, nil)
+		start := time.Now()
+		h.Responses(c)
+		require.Equal(t, []int64{1, 2}, u.calls)
+		require.Equal(t, 300*time.Second, time.Since(start))
+		require.Equal(t, 503, w.Code)
+		require.True(t, gjson.GetBytes(w.Body.Bytes(), "error.recovery_exhausted").Bool())
+	})
 }
 
 func TestErrorRecoveryHandlerNoNextAccountPreservesError(t *testing.T) {

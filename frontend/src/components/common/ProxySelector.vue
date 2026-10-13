@@ -118,6 +118,13 @@
               </div>
             </div>
 
+            <span
+              v-if="proxy.active_account_count !== undefined"
+              class="inline-flex flex-shrink-0 items-center rounded bg-gray-100 px-2 py-1 text-xs tabular-nums text-gray-600 dark:bg-dark-600 dark:text-gray-400"
+            >
+              {{ t('admin.proxies.currentActiveAccounts', { count: proxy.active_account_count }) }}
+            </span>
+
             <!-- Individual test button -->
             <button
               type="button"

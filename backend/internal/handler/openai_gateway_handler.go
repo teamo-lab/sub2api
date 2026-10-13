@@ -792,6 +792,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		// reasoning item（含耦合的 id/summary），避免非透传上游 400 拒绝 Kiro reasoning 形态。
 		attemptBody := h.deriveOpenAIForwardAttemptBody(reqLog, forwardBody, account, &passthroughFailoverState)
 		forwardAttempts++
+		endRecoveryAttempt := service.BeginErrorRecoveryAttempt(c)
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
 				if accountReleaseFunc != nil {
@@ -800,6 +801,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			}()
 			return h.gatewayService.Forward(c.Request.Context(), c, account, attemptBody)
 		}()
+		endRecoveryAttempt(err)
 		upstreamFacts := service.OpenAIUpstreamAttemptFactsFromContext(c.Request.Context())
 		h.gatewayService.ObserveOpenAIStickyBurstResult(
 			c.Request.Context(), apiKey.GroupID, sessionHash, account.ID, reqModel,
@@ -1395,6 +1397,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		// 应用渠道模型映射到请求体
 		forwardBody := mappedBodyForMessages(channelMappingMsg.Mapped, channelMappingMsg.MappedModel)
 		writerSizeBeforeForward := c.Writer.Size()
+		endRecoveryAttempt := service.BeginErrorRecoveryAttempt(c)
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
 				if accountReleaseFunc != nil {
@@ -1403,6 +1406,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			}()
 			return h.gatewayService.ForwardAsAnthropic(c.Request.Context(), c, account, forwardBody, promptCacheKey, defaultMappedModel)
 		}()
+		endRecoveryAttempt(err)
 		h.gatewayService.ObserveOpenAIStickyBurstResult(
 			c.Request.Context(), apiKey.GroupID, sessionHash, account.ID, currentRoutingModel,
 			selection.StickyBurstBypass, err == nil && openAIForwardSucceededForScheduling(result), err,

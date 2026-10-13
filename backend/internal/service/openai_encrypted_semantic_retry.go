@@ -37,19 +37,14 @@ type openAIEncryptedRetryBudget struct {
 	output     bool
 }
 
-// This is a separate attempt-local budget, not a new error-rule state. A stricter
-// outer recovery deadline wins and its budget is never renewed or overwritten.
-func newOpenAIEncryptedRetryBudget(c *gin.Context, parent context.Context, maximum time.Duration) *openAIEncryptedRetryBudget {
+// This is a separate attempt-local budget, not a new error-rule state. It runs
+// inside one upstream attempt, so an outer recovery deadline does not shorten it
+// (that budget never interrupts a running attempt) and is never renewed or
+// overwritten by it.
+func newOpenAIEncryptedRetryBudget(parent context.Context, maximum time.Duration) *openAIEncryptedRetryBudget {
 	deadline := time.Now().Add(maximum)
 	if existing, ok := parent.Deadline(); ok && existing.Before(deadline) {
 		deadline = existing
-	}
-	if outer := recoveryState(c); outer != nil {
-		outer.mu.Lock()
-		if !outer.output && outer.deadline.Before(deadline) {
-			deadline = outer.deadline
-		}
-		outer.mu.Unlock()
 	}
 	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
 	ctx = context.WithValue(ctx, recoveryContextKey{}, true)
@@ -72,7 +67,7 @@ func openAIEncryptedSemanticRetryContext(c *gin.Context, original context.Contex
 		return original
 	}
 	if state.budget == nil {
-		state.budget = newOpenAIEncryptedRetryBudget(c, original, openAIEncryptedSemanticRetryBudget)
+		state.budget = newOpenAIEncryptedRetryBudget(original, openAIEncryptedSemanticRetryBudget)
 	}
 	return state.budget.ctx
 }
@@ -132,7 +127,11 @@ func finishOpenAIEncryptedSemanticRetry(c *gin.Context) error {
 	return errors.New(message)
 }
 
-type openAIEncryptedSemanticRetrySignal struct{}
+type openAIEncryptedSemanticRetrySignal struct {
+	// retryBody 由加密恢复引擎（mode=on）给出；为空时走原有 summary 修复。
+	retryBody []byte
+	reason    string
+}
 
 func (*openAIEncryptedSemanticRetrySignal) Error() string {
 	return "upstream rejected encrypted reasoning before output"
@@ -206,6 +205,10 @@ func initializeOpenAIEncryptedSemanticRetry(c *gin.Context, account *Account, bo
 	if state.tried || account == nil || !account.IsOpenAI() {
 		return
 	}
+	if armedOpenAIEncryptedRecovery(c).on() {
+		// 加密恢复引擎接管该账号：原有 summary 修复不再并行触发。
+		return
+	}
 	_, eligible := openAIEncryptedReasoningSummaryRetryPaths(body)
 	state.eligible = eligible
 }
@@ -219,7 +222,22 @@ func openAIEncryptedSemanticRetryStateFor(c *gin.Context) *openAIEncryptedSemant
 	return state
 }
 
+func isOpenAIEncryptedFunctionOutputRejection(payload []byte) bool {
+	for _, prefix := range []string{"error", "response.error"} {
+		if gjson.GetBytes(payload, prefix+".code").String() == "invalid_encrypted_content" &&
+			strings.Contains(strings.ToLower(gjson.GetBytes(payload, prefix+".message").String()), "encrypted function output") {
+			return true
+		}
+	}
+	return false
+}
+
 func newOpenAIEncryptedSemanticRetrySignal(c *gin.Context, payload []byte) error {
+	if c != nil && c.Request != nil && c.Request.Context().Err() == nil {
+		if handled, signal := openAIEncryptedRecoverySignal(c, payload); handled {
+			return signal
+		}
+	}
 	state := openAIEncryptedSemanticRetryStateFor(c)
 	if state == nil || !state.eligible || state.tried || c.Request == nil || c.Request.Context().Err() != nil {
 		return nil
@@ -230,6 +248,9 @@ func newOpenAIEncryptedSemanticRetrySignal(c *gin.Context, payload []byte) error
 			return nil
 		}
 		payload = terminal
+	}
+	if isOpenAIEncryptedFunctionOutputRejection(payload) {
+		return nil
 	}
 	for _, path := range []string{"error.code", "response.error.code"} {
 		if gjson.GetBytes(payload, path).String() == "invalid_encrypted_content" {
@@ -246,7 +267,12 @@ func consumeOpenAIEncryptedSemanticRetry(c *gin.Context, body []byte, failure er
 		return body, false
 	}
 	state.tried = true
-	retryBody, changed := openAIEncryptedReasoningSummaryRetryBody(body)
+	retryBody, changed := signal.retryBody, len(signal.retryBody) > 0
+	message := "invalid_encrypted_content: stripping rejected reasoning (" + signal.reason + ") for one retry"
+	if !changed {
+		retryBody, changed = openAIEncryptedReasoningSummaryRetryBody(body)
+		message = "invalid_encrypted_content: preserving reasoning summary for one retry"
+	}
 	if !changed {
 		return body, false
 	}
@@ -258,7 +284,7 @@ func consumeOpenAIEncryptedSemanticRetry(c *gin.Context, body []byte, failure er
 	}
 	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 		Platform: account.Platform, AccountID: account.ID, UpstreamStatusCode: 400,
-		Kind: "same_account_retry", Message: "invalid_encrypted_content: preserving reasoning summary for one retry",
+		Kind: "same_account_retry", Message: message,
 		Detail: `{"error":{"code":"invalid_encrypted_content","type":"invalid_request_error"}}`,
 	})
 	return retryBody, true

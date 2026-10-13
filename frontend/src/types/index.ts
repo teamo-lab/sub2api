@@ -934,6 +934,7 @@ export interface Proxy {
   password?: string | null
   status: 'active' | 'inactive' | 'expired'
   account_count?: number // Number of accounts using this proxy
+  active_account_count?: number // Active, non-deleted accounts using this proxy
   latency_ms?: number
   latency_status?: 'success' | 'failed'
   latency_message?: string

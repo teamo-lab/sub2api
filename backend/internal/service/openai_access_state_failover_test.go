@@ -112,6 +112,19 @@ func TestOpenAIHTTPAccessStateDoesNotTrustBadRequestMessage(t *testing.T) {
 	require.False(t, err.IsCredentialFailure())
 }
 
+func TestOpenAIModelNotFoundFailoverIsRequestLocal(t *testing.T) {
+	body := []byte(`{"error":{"code":"model_not_found","message":"model not found"}}`)
+	account := &Account{Type: AccountTypeOAuth}
+	svc := &OpenAIGatewayService{}
+
+	require.True(t, svc.shouldFailoverOpenAIUpstreamResponse(http.StatusNotFound, "", body))
+	require.True(t, shouldFailoverOpenAIPassthroughResponse(account, http.StatusNotFound, body))
+
+	err := newOpenAIUpstreamFailoverError(http.StatusNotFound, nil, body, "model not found", true)
+	require.False(t, err.RetryableOnSameAccount)
+	require.False(t, err.RequestScopedTransient)
+}
+
 func TestOpenAIHTTPAccessStateBadRequestDoesNotDisableAccount(t *testing.T) {
 	repo := &openAIStream403AccountRepo{}
 	svc := &OpenAIGatewayService{rateLimitService: &RateLimitService{accountRepo: repo}}

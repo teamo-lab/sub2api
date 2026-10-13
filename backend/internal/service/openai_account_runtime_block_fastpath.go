@@ -97,6 +97,9 @@ func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Cont
 	if isOpenAIGPTContentAuditRejection(account, firstNonEmpty(canonicalModel...), statusCode, responseBody) {
 		return false
 	}
+	if isModelNotFoundCooldownExempt(statusCode, responseBody) {
+		return true // Request-local failover, never a shared scheduling block.
+	}
 	if account != nil && account.Platform == PlatformGrok && isGrokContentPolicyRejection(statusCode, responseBody) {
 		return false
 	}

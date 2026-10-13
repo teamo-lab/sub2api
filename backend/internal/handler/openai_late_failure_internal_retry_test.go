@@ -37,10 +37,15 @@ func (u *internalRetryCounterexampleUpstream) Do(req *http.Request, _ string, id
 	n := len(u.ids)
 	if id == 22 {
 		if n > 2 {
-			<-req.Context().Done()
-			return nil, req.Context().Err()
+			// The same-account retry fails late; the recovery budget no longer cuts it.
+			select {
+			case <-req.Context().Done():
+				return nil, req.Context().Err()
+			case <-time.After(sameAccountRetryFailsAfter):
+			}
+		} else {
+			time.Sleep(35 * time.Second)
 		}
-		time.Sleep(35 * time.Second)
 		status := http.StatusBadGateway
 		payload := `{"error":{"type":"upstream_error","code":"upstream_error","message":"synthetic second short upstream failure"}}`
 		if u.route == "chat/completions" {
@@ -123,7 +128,7 @@ func TestOpenAILateFailureSwitchHandler_InternalRetriesDoNotQualify(t *testing.T
 						require.Equal(t, "/v1/chat/completions", u.paths[1])
 					}
 					require.Equal(t, []int64{22, 22, 22}, u.ids, "two 35-second dispatches must not qualify as one >=60-second attempt")
-					require.Equal(t, 100*time.Second, elapsed)
+					require.Equal(t, 70*time.Second+500*time.Millisecond+sameAccountRetryFailsAfter, elapsed)
 					require.Equal(t, 3, service.OpenAIUpstreamAttemptFactsFromContext(c.Request.Context()).Count)
 					t.Logf("route=%s enabled=%t wire_attempts=%v paths=%v A_wire_waits=[35s,35s] aggregate=70s elapsed=%s status=%d", route, enabled, u.ids, u.paths, elapsed, w.Code)
 				})
