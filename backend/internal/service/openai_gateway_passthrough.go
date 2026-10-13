@@ -2272,6 +2272,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			return
 		}
 		frame := buildOpenAIResponseFailedSSE(responseID, originalModel, bareErrorPayload, failedMessage)
+		completeOpenAIEncryptedSemanticRetry(c)
 		n, err := fmt.Fprint(w, frame)
 		terminalOrigin.observeWrite(n, len(frame), err)
 		if err != nil {
@@ -2547,6 +2548,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 					continue
 				}
 			}
+			completeOpenAIEncryptedSemanticRetry(c)
 			n, err := fmt.Fprintln(w, line)
 			terminalOrigin.observeWrite(n, len(line)+1, err)
 			if err != nil {
