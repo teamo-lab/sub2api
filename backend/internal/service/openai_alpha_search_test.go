@@ -656,3 +656,23 @@ func TestIsOpenAIAlphaSearchEndpointUnsupported(t *testing.T) {
 	require.False(t, isOpenAIAlphaSearchEndpointUnsupported(oauth, http.StatusNotFound))
 	require.False(t, isOpenAIAlphaSearchEndpointUnsupported(nil, http.StatusNotFound))
 }
+
+func TestAlphaSearchKnownResponsesProviderFallsBackOnMissingEndpoint(t *testing.T) {
+	body := []byte(`{"model":"gpt-6-astra","commands":{"search_query":[{"q":"OpenAI"}]}}`)
+	c := newOpenAIRejectedFieldTestContext(body)
+	c.Request.URL.Path = "/v1/alpha/search"
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		newOpenAIRejectedFieldTestResponse(404, `{"error":{"message":"Invalid URL (POST /v1/alpha/search)"}}`),
+		newOpenAIRejectedFieldTestResponse(200, alphaSearchResponsesSSE("Found official website")),
+	}}
+	account := newOpenAIRejectedFieldTestAccount()
+	result, err := newOpenAIRejectedFieldTestService(upstream).ForwardAlphaSearch(context.Background(), c, account, body)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, 1, result.WebSearchCalls)
+	require.Len(t, upstream.bodies, 2)
+	require.Equal(t, "https://compat.example/v1/responses", upstream.lastReq.URL.String())
+	require.Equal(t, "web_search", gjson.GetBytes(upstream.bodies[1], "tools.0.type").String())
+	require.NotContains(t, upstream.lastReq.URL.String(), "chatgpt.com")
+	require.Equal(t, http.StatusOK, c.Writer.Status())
+}

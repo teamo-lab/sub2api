@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )
@@ -87,6 +88,13 @@ func (s *OpenAIGatewayService) ForwardAlphaSearch(ctx context.Context, c *gin.Co
 	respBody, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, openAITooLargeError)
 	if err != nil {
 		return nil, fmt.Errorf("read alpha search response: %w", err)
+	}
+
+	// Some API-key providers expose hosted web_search only through Responses.
+	// Use it only after an explicit endpoint rejection and known support.
+	if isOpenAIAlphaSearchEndpointUnsupported(account, resp.StatusCode) &&
+		openai_compat.ResolveResponsesSupport(account.Extra) == openai_compat.ResponsesSupportYes {
+		return s.forwardAlphaSearchViaResponsesWebSearch(ctx, c, account, body, token, proxyURL, requestedModel, upstreamModel)
 	}
 
 	if resp.StatusCode >= http.StatusBadRequest {
@@ -228,6 +236,9 @@ func openAIAlphaSearchSchedulingModel(account *Account, requestedModel string) s
 }
 
 func (s *OpenAIGatewayService) buildOpenAIAlphaSearchResponsesWebSearchRequest(ctx context.Context, c *gin.Context, account *Account, alphaBody []byte, body []byte, token string) (*http.Request, error) {
+	if account.IsOpenAIApiKey() {
+		return s.buildUpstreamRequest(ctx, c, account, body, token, true, "", false)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, chatgptCodexURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err

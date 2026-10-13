@@ -21,7 +21,7 @@ var (
 	openAIResponsesRejectedStatusParamPattern     = regexp.MustCompile(`(?i)^input\[(\d+)\]\.status$`)
 	openAIResponsesRejectedContentParamPattern    = regexp.MustCompile(`(?i)^input\[(\d+)\]\.content$`)
 	openAIResponsesRejectedCacheParamPattern      = regexp.MustCompile(`(?i)^input\[(\d+)\]\.prompt_cache_breakpoint$`)
-	openAIResponsesRejectedMessageParamPattern    = regexp.MustCompile(`(?i)(?:unknown|unsupported)[ _-]+parameter\s*(?::|=|is)?\s*["']?(max_output_tokens|truncation|input\[\d+\]\.(?:namespace|status))(?:["']|\b)`)
+	openAIResponsesRejectedMessageParamPattern    = regexp.MustCompile(`(?i)(?:unknown|unsupported)[ _-]+parameter\s*(?::|=|is)?\s*["']?(max_output_tokens|truncation|temperature|input\[\d+\]\.(?:namespace|status))(?:["']|$|\s|[.:](?:\s|$))`)
 	openAIResponsesInvalidTypeMessageParamPattern = regexp.MustCompile(`(?i)invalid[ _-]+type\s+for\s+["']?(input\[\d+\]\.content)(?:["']|\b)[^\n]*\b(?:got|received)\s+null\b`)
 	openAIResponsesMaxZeroContentMessagePattern   = regexp.MustCompile(`(?i)invalid\s+["']?(input\[\d+\]\.content)["']?\s*:\s*array too long\.[^\n]*maximum length 0\b`)
 	openAIResponsesCacheModelRejectionPattern     = regexp.MustCompile(`(?i)["']?(prompt_cache_breakpoint|input\[\d+\]\.prompt_cache_breakpoint)["']?\s+is\s+not\s+supported\s+on\s+this\s+model\b`)
@@ -162,6 +162,15 @@ func normalizeOpenAIResponsesRejectedFieldRetryBody(statusCode int, body, respon
 		}
 		if index, ok := openAIResponsesRejectedStatusIndex(param); ok {
 			return removeOpenAIResponsesRejectedStatusAtIndex(body, index)
+		}
+		// Preserve sampling settings unless this upstream explicitly rejects the
+		// top-level field. Setting temperature to zero still sends the field.
+		if param == "temperature" && gjson.GetBytes(body, "temperature").Exists() {
+			retryBody, err := sjson.DeleteBytes(body, "temperature")
+			if err != nil {
+				return nil, "", false, fmt.Errorf("delete rejected temperature: %w", err)
+			}
+			return retryBody, "temperature parameter rejection", true, nil
 		}
 		if param == "max_output_tokens" && gjson.GetBytes(body, "max_output_tokens").Exists() {
 			retryBody, err := sjson.DeleteBytes(body, "max_output_tokens")

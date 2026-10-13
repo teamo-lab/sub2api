@@ -173,18 +173,36 @@ func shouldKeepOpenAIResponsesToolCallNamespaces(
 	return !shouldFlattenOpenAIResponsesNamespaces(account, transport, passthroughEnabled, compactPath)
 }
 
-func hasOpenAIResponsesNamespaceToolDeclaration(body []byte) bool {
-	tools := gjson.GetBytes(body, "tools")
-	if !tools.IsArray() {
-		return false
+// Visit protocol-defined tool declarations only, never arbitrary tool output JSON.
+// Codex Lite carries namespaces in additional_tools; deferred tools also appear
+// in tool_search_output. Both have the same identity semantics as top-level tools.
+func visitOpenAIResponsesToolDeclarations(body []byte, visit func(gjson.Result)) {
+	visitTools := func(tools gjson.Result) {
+		if !tools.IsArray() {
+			return
+		}
+		tools.ForEach(func(_, tool gjson.Result) bool { visit(tool); return true })
 	}
-	found := false
-	tools.ForEach(func(_, tool gjson.Result) bool {
-		if strings.EqualFold(strings.TrimSpace(tool.Get("type").String()), "namespace") {
-			found = true
-			return false
+	visitTools(gjson.GetBytes(body, "tools"))
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return
+	}
+	input.ForEach(func(_, item gjson.Result) bool {
+		switch item.Get("type").String() {
+		case "additional_tools", "tool_search_output":
+			visitTools(item.Get("tools"))
 		}
 		return true
+	})
+}
+
+func hasOpenAIResponsesNamespaceToolDeclaration(body []byte) bool {
+	found := false
+	visitOpenAIResponsesToolDeclarations(body, func(tool gjson.Result) {
+		if strings.EqualFold(strings.TrimSpace(tool.Get("type").String()), "namespace") {
+			found = true
+		}
 	})
 	return found
 }
@@ -338,15 +356,14 @@ func repairOpenAIResponsesToolCallNamespaces(body []byte) ([]byte, error) {
 	if !bytes.Contains(body, []byte(`"namespace"`)) {
 		return body, nil
 	}
-	tools := gjson.GetBytes(body, "tools")
 	input := gjson.GetBytes(body, "input")
-	if !tools.IsArray() || !input.IsArray() {
+	if !input.IsArray() {
 		return body, nil
 	}
 	topLevel := map[string]bool{}
 	owner := map[string]string{}
 	ambiguous := map[string]bool{}
-	tools.ForEach(func(_, tool gjson.Result) bool {
+	visitOpenAIResponsesToolDeclarations(body, func(tool gjson.Result) {
 		typ := strings.TrimSpace(tool.Get("type").String())
 		name := strings.TrimSpace(tool.Get("name").String())
 		switch typ {
@@ -356,7 +373,7 @@ func repairOpenAIResponsesToolCallNamespaces(body []byte) ([]byte, error) {
 			}
 		case "namespace":
 			if name == "" {
-				return true
+				return
 			}
 			tool.Get("tools").ForEach(func(_, child gjson.Result) bool {
 				childName := strings.TrimSpace(child.Get("name").String())
@@ -370,7 +387,6 @@ func repairOpenAIResponsesToolCallNamespaces(body []byte) ([]byte, error) {
 				return true
 			})
 		}
-		return true
 	})
 	if len(owner) == 0 {
 		return body, nil
@@ -384,7 +400,9 @@ func repairOpenAIResponsesToolCallNamespaces(body []byte) ([]byte, error) {
 		if !item.IsObject() || !isOpenAIResponsesToolCallItemType(item.Get("type").String()) {
 			return true
 		}
-		if item.Get("namespace").Exists() {
+		namespaceValue := item.Get("namespace")
+		if namespaceValue.Exists() && namespaceValue.Type != gjson.Null &&
+			(namespaceValue.Type != gjson.String || strings.TrimSpace(namespaceValue.String()) != "") {
 			return true
 		}
 		name := strings.TrimSpace(item.Get("name").String())
