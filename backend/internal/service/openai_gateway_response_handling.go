@@ -596,6 +596,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				suppressCurrentEvent = true
 			}
 			observer.ObserveOpenAI(dataBytes, eventType)
+			observeOpenAIEncryptedRecoveryOutput(c, dataBytes, eventType)
 			// 初始上游 data 的 type 只解析一次：原始值保持终止事件的精确匹配，规范化值供后续分支复用。
 			if openAIStreamEventIsTerminalWithType(data, eventType) {
 				sawTerminalEvent = true
@@ -1741,6 +1742,7 @@ func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, r
 		observeOpenAISSEBody(observer, string(body))
 	} else {
 		observer.ObserveOpenAI(body, strings.TrimSpace(gjson.GetBytes(body, "type").String()))
+		observeOpenAIEncryptedRecoveryOutput(c, body, "")
 	}
 
 	// Detect SSE responses for ALL account types via Content-Type header.
@@ -1854,6 +1856,11 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 		if msg == "" {
 			msg = "Upstream compact response failed"
 		}
+		// stream=false 同样会收到 HTTP 200 + SSE response.failed：接入同一恢复决策。
+		// 仅加密恢复引擎（mode != off）参与；原有 summary 修复保持只在流式路径。
+		if handled, recoverySignal := openAIEncryptedRecoverySignal(c, terminalPayload); handled && recoverySignal != nil {
+			return nil, recoverySignal
+		}
 		if compactErr := newOpenAICompactFallbackSignal(c, terminalPayload, msg); compactErr != nil {
 			return nil, compactErr
 		}
@@ -1866,6 +1873,9 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 
 	usage := s.parseSSEUsageFromBody(bodyText)
 	if ok {
+		// 直接扫描 SSE 帧记录密文来历：terminal output 可能为空，reasoning 密文
+		// 只出现在先前的 output_item.done 事件里。
+		observeOpenAIEncryptedRecoverySSEBody(c, bodyText)
 		if parsedUsage, parsed := extractOpenAIUsageFromJSONBytes(finalResponse); parsed {
 			*usage = parsedUsage
 		}
