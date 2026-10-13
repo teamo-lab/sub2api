@@ -463,6 +463,8 @@ type OpenAIGatewayService struct {
 	agentIdentityTaskMu            sync.Mutex
 	openaiWSPool                   *openAIWSConnPool
 	openaiWSStateStore             OpenAIWSStateStore
+	openaiEncryptedRecoveryOnce    sync.Once
+	openaiEncryptedRecoveryStore   OpenAIEncryptedRecoveryStore
 	openaiScheduler                OpenAIAccountScheduler
 	openaiWSPassthroughDialer      openAIWSClientDialer
 	openaiWSSessionPreemptions     openAIWSSessionPreemptRegistry

@@ -127,7 +127,11 @@ func finishOpenAIEncryptedSemanticRetry(c *gin.Context) error {
 	return errors.New(message)
 }
 
-type openAIEncryptedSemanticRetrySignal struct{}
+type openAIEncryptedSemanticRetrySignal struct {
+	// retryBody 由加密恢复引擎（mode=on）给出；为空时走原有 summary 修复。
+	retryBody []byte
+	reason    string
+}
 
 func (*openAIEncryptedSemanticRetrySignal) Error() string {
 	return "upstream rejected encrypted reasoning before output"
@@ -201,6 +205,10 @@ func initializeOpenAIEncryptedSemanticRetry(c *gin.Context, account *Account, bo
 	if state.tried || account == nil || !account.IsOpenAI() {
 		return
 	}
+	if armedOpenAIEncryptedRecovery(c).on() {
+		// 加密恢复引擎接管该账号：原有 summary 修复不再并行触发。
+		return
+	}
 	_, eligible := openAIEncryptedReasoningSummaryRetryPaths(body)
 	state.eligible = eligible
 }
@@ -225,6 +233,11 @@ func isOpenAIEncryptedFunctionOutputRejection(payload []byte) bool {
 }
 
 func newOpenAIEncryptedSemanticRetrySignal(c *gin.Context, payload []byte) error {
+	if c != nil && c.Request != nil && c.Request.Context().Err() == nil {
+		if handled, signal := openAIEncryptedRecoverySignal(c, payload); handled {
+			return signal
+		}
+	}
 	state := openAIEncryptedSemanticRetryStateFor(c)
 	if state == nil || !state.eligible || state.tried || c.Request == nil || c.Request.Context().Err() != nil {
 		return nil
@@ -254,7 +267,12 @@ func consumeOpenAIEncryptedSemanticRetry(c *gin.Context, body []byte, failure er
 		return body, false
 	}
 	state.tried = true
-	retryBody, changed := openAIEncryptedReasoningSummaryRetryBody(body)
+	retryBody, changed := signal.retryBody, len(signal.retryBody) > 0
+	message := "invalid_encrypted_content: stripping rejected reasoning (" + signal.reason + ") for one retry"
+	if !changed {
+		retryBody, changed = openAIEncryptedReasoningSummaryRetryBody(body)
+		message = "invalid_encrypted_content: preserving reasoning summary for one retry"
+	}
 	if !changed {
 		return body, false
 	}
@@ -266,7 +284,7 @@ func consumeOpenAIEncryptedSemanticRetry(c *gin.Context, body []byte, failure er
 	}
 	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 		Platform: account.Platform, AccountID: account.ID, UpstreamStatusCode: 400,
-		Kind: "same_account_retry", Message: "invalid_encrypted_content: preserving reasoning summary for one retry",
+		Kind: "same_account_retry", Message: message,
 		Detail: `{"error":{"code":"invalid_encrypted_content","type":"invalid_request_error"}}`,
 	})
 	return retryBody, true
