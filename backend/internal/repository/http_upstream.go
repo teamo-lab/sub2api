@@ -212,6 +212,7 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 	if err != nil {
 		return nil, err
 	}
+	req, abort := withUpstreamAbort(req)
 
 	// 执行请求
 	client := s.httpClientForUpstreamRequest(entry.client, req)
@@ -220,6 +221,7 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 	resp, err := servertiming.Do(client, profiledRequest)
 	finishProfile(resp, err)
 	if err != nil {
+		abort()
 		s.recordOpenAIHTTP2Failure(profile, entry.protocolMode, entry.proxyKey, err)
 		// 请求失败，立即减少计数
 		atomic.AddInt64(&entry.inFlight, -1)
@@ -233,10 +235,10 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 
 	// 包装响应体，在关闭时自动减少计数并更新时间戳
 	// 这确保了流式响应（如 SSE）在完全读取前不会被淘汰
-	resp.Body = wrapTrackedBody(resp.Body, func() {
+	resp.Body = wrapTrackedBody(resp, func() {
 		atomic.AddInt64(&entry.inFlight, -1)
 		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
-	})
+	}, abort)
 
 	return resp, nil
 }
@@ -279,6 +281,7 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 		slog.Debug("tls_fingerprint_acquire_client_failed", "account_id", accountID, "error", err)
 		return nil, err
 	}
+	req, abort := withUpstreamAbort(req)
 
 	client := s.httpClientForUpstreamRequest(entry.client, req)
 	client = httpClientWithGrokAccessDeniedFallback(client)
@@ -286,6 +289,7 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 	resp, err := servertiming.Do(client, profiledRequest)
 	finishProfile(resp, err)
 	if err != nil {
+		abort()
 		atomic.AddInt64(&entry.inFlight, -1)
 		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
 		slog.Debug("tls_fingerprint_request_failed", "account_id", accountID, "error", err)
@@ -294,10 +298,10 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 
 	decompressResponseBody(resp)
 
-	resp.Body = wrapTrackedBody(resp.Body, func() {
+	resp.Body = wrapTrackedBody(resp, func() {
 		atomic.AddInt64(&entry.inFlight, -1)
 		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
-	})
+	}, abort)
 
 	return resp, nil
 }
@@ -1436,38 +1440,141 @@ func buildUpstreamTransportWithTLSFingerprint(settings poolSettings, proxyURL *u
 	return transport, nil
 }
 
+// trackedCloseReadGrace 是 Close 时等待进行中的 Read 自然返回的上限。
+// 业务层读到 response.completed 就 Close，此时后台扫描 goroutine 通常还在等流尾；
+// 上游一般在 completed 后 0.1s 内结束流，给 1s 足够让连接正常回池。
+const trackedCloseReadGrace = time.Second
+
+// trackedCloseAbortWait 是取消请求后等待卡住的 Read 返回的上限，只作兜底，正常立即返回。
+const trackedCloseAbortWait = 5 * time.Second
+
 // trackedBody 带跟踪功能的响应体包装器
 // 在 Close 时执行回调，用于更新请求计数
+//
+// 对 HTTP/1.x 响应还负责让 Close 不与进行中的 Read 并发：go1.27 的 Transport 在
+// 「未读到 EOF 就 Close」时会就地排空连接并放回连接池，若此时另一个 goroutine 正卡在
+// Read 里，它随后读到 EOF 会永久等在连接共享的 eofc 上，抢走这条连接上后续响应的信号，
+// 使后续请求的读和 Close 一直卡到上游关闭空闲连接（生产上 SB 约 75s 起，连接一直被复用就更久）。
+// HTTP/2 的 Close 只重置单个 stream，不受影响，保持原样。
 type trackedBody struct {
 	io.ReadCloser // 原始响应体
 	once          sync.Once
 	onClose       func() // 关闭时的回调函数
+	abort         context.CancelFunc
+	guardRead     bool
+
+	mu      sync.Mutex
+	closing bool
+	reading int
+	idle    chan struct{} // reading 归零时关闭；只在 Close 需要等待时创建
+}
+
+func (b *trackedBody) Read(p []byte) (int, error) {
+	if !b.guardRead {
+		return b.ReadCloser.Read(p)
+	}
+	b.mu.Lock()
+	if b.closing {
+		b.mu.Unlock()
+		return 0, http.ErrBodyReadAfterClose
+	}
+	b.reading++
+	b.mu.Unlock()
+
+	n, err := b.ReadCloser.Read(p)
+
+	b.mu.Lock()
+	b.reading--
+	if b.reading == 0 && b.idle != nil {
+		close(b.idle)
+		b.idle = nil
+	}
+	b.mu.Unlock()
+	return n, err
 }
 
 // Close 关闭响应体并执行回调
 // 使用 sync.Once 确保回调只执行一次
 func (b *trackedBody) Close() error {
+	if b.guardRead {
+		b.waitReadersBeforeClose()
+	}
 	err := b.ReadCloser.Close()
+	if b.abort != nil {
+		b.abort()
+	}
 	if b.onClose != nil {
 		b.once.Do(b.onClose)
 	}
 	return err
 }
 
+// waitReadersBeforeClose 拒绝新的 Read，并等进行中的 Read 返回：先给上游 trackedCloseReadGrace
+// 自然结束流（连接可复用）；仍未返回就取消请求，让 Transport 丢弃这条连接，读随即出错返回。
+func (b *trackedBody) waitReadersBeforeClose() {
+	b.mu.Lock()
+	b.closing = true
+	if b.reading == 0 {
+		b.mu.Unlock()
+		return
+	}
+	if b.idle == nil {
+		b.idle = make(chan struct{})
+	}
+	idle := b.idle
+	b.mu.Unlock()
+
+	grace := time.NewTimer(trackedCloseReadGrace)
+	defer grace.Stop()
+	select {
+	case <-idle:
+		return
+	case <-grace.C:
+	}
+	if b.abort != nil {
+		b.abort()
+	}
+	abortWait := time.NewTimer(trackedCloseAbortWait)
+	defer abortWait.Stop()
+	select {
+	case <-idle:
+	case <-abortWait.C:
+		slog.Warn("upstream_body_close_reader_stuck", "wait", trackedCloseReadGrace+trackedCloseAbortWait)
+	}
+}
+
 // wrapTrackedBody 包装响应体以跟踪关闭事件
 // 用于在响应体关闭时更新 inFlight 计数
 //
 // 参数:
-//   - body: 原始响应体
+//   - resp: 上游响应，包装其 Body
 //   - onClose: 关闭时的回调函数
+//   - abort: 取消本次上游请求；Close 时调用，读卡住时提前调用以丢弃连接
 //
 // 返回:
 //   - io.ReadCloser: 包装后的响应体
-func wrapTrackedBody(body io.ReadCloser, onClose func()) io.ReadCloser {
-	if body == nil {
-		return body
+func wrapTrackedBody(resp *http.Response, onClose func(), abort context.CancelFunc) io.ReadCloser {
+	if resp.Body == nil {
+		if abort != nil {
+			abort()
+		}
+		return resp.Body
 	}
-	return &trackedBody{ReadCloser: body, onClose: onClose}
+	return &trackedBody{
+		ReadCloser: resp.Body,
+		onClose:    onClose,
+		abort:      abort,
+		guardRead:  resp.ProtoMajor < 2,
+	}
+}
+
+// withUpstreamAbort 给上游请求挂一个可取消的子 context，交给 trackedBody 在 Close 时使用。
+func withUpstreamAbort(req *http.Request) (*http.Request, context.CancelFunc) {
+	if req == nil {
+		return nil, func() {}
+	}
+	ctx, cancel := context.WithCancel(req.Context())
+	return req.WithContext(ctx), cancel
 }
 
 // decompressResponseBody 根据 Content-Encoding 解压响应体。
