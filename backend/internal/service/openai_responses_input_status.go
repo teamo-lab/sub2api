@@ -58,38 +58,45 @@ func backfillOpenAIResponsesInputItemStatus(body []byte) ([]byte, bool, error) {
 		return body, false, nil
 	}
 
-	items := make([][]byte, 0)
-	needsBackfill := make([]bool, 0)
-	hasBackfill := false
+	// 先只记录需要补的下标；大多数请求不含这些类型，不必拷贝整段 input。
+	needsBackfill := make(map[int]struct{})
+	itemCount := 0
 	input.ForEach(func(_, item gjson.Result) bool {
-		missing := false
 		if item.IsObject() && openAIResponsesInputItemRequiresStatus(item.Get("type").String()) {
-			status := item.Get("status")
-			missing = !status.Exists() || status.Type == gjson.Null
+			if status := item.Get("status"); !status.Exists() || status.Type == gjson.Null {
+				needsBackfill[itemCount] = struct{}{}
+			}
 		}
-		items = append(items, []byte(item.Raw))
-		needsBackfill = append(needsBackfill, missing)
-		hasBackfill = hasBackfill || missing
+		itemCount++
 		return true
 	})
-	if !hasBackfill {
+	if len(needsBackfill) == 0 {
 		return body, false, nil
 	}
 
-	rebuiltInput := make([]byte, 0, len(input.Raw)+len(items)*len(`,"status":"completed"`))
+	rebuiltInput := make([]byte, 0, len(input.Raw)+len(needsBackfill)*len(`,"status":"completed"`))
 	rebuiltInput = append(rebuiltInput, '[')
-	for index, itemBody := range items {
-		if needsBackfill[index] {
-			var err error
-			itemBody, err = sjson.SetBytes(itemBody, "status", openAIResponsesInputBackfilledStatus)
-			if err != nil {
-				return nil, false, fmt.Errorf("set input.%d.status: %w", index, err)
-			}
-		}
+	index := 0
+	var setErr error
+	input.ForEach(func(_, item gjson.Result) bool {
 		if index > 0 {
 			rebuiltInput = append(rebuiltInput, ',')
 		}
-		rebuiltInput = append(rebuiltInput, itemBody...)
+		if _, ok := needsBackfill[index]; ok {
+			itemBody, err := sjson.Set(item.Raw, "status", openAIResponsesInputBackfilledStatus)
+			if err != nil {
+				setErr = fmt.Errorf("set input.%d.status: %w", index, err)
+				return false
+			}
+			rebuiltInput = append(rebuiltInput, itemBody...)
+		} else {
+			rebuiltInput = append(rebuiltInput, item.Raw...)
+		}
+		index++
+		return true
+	})
+	if setErr != nil {
+		return nil, false, setErr
 	}
 	rebuiltInput = append(rebuiltInput, ']')
 
