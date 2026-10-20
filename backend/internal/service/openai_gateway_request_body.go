@@ -1109,6 +1109,14 @@ func normalizeOpenAIResponsesWebSocketCompatibilityBody(body []byte, account *Ac
 			normalized = next
 			changed = true
 		}
+		if account.IsOpenAIResponsesInputStatusBackfillEnabled() {
+			if next, backfilledStatus, err := backfillOpenAIResponsesInputItemStatus(normalized); err != nil {
+				return body, false, err
+			} else if backfilledStatus {
+				normalized = next
+				changed = true
+			}
+		}
 	}
 	if sanitized, idsChanged, err := sanitizeOpenAIResponsesInputItemIDs(normalized); err != nil {
 		return body, false, fmt.Errorf("sanitize websocket Responses input item IDs: %w", err)
