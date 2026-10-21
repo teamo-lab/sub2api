@@ -208,6 +208,14 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			body = normalized
 			originalBody = normalized
 		}
+		if account.IsOpenAIResponsesInputStatusBackfillEnabled() {
+			if normalized, changed, normalizeErr := backfillOpenAIResponsesInputItemStatus(body); normalizeErr != nil {
+				return nil, normalizeErr
+			} else if changed {
+				body = normalized
+				originalBody = normalized
+			}
+		}
 		requestView = newOpenAIRequestView(body)
 		reqModel, reqStream, promptCacheKey = requestView.Model, requestView.Stream, requestView.PromptCacheKey
 		originalModel = reqModel
@@ -760,8 +768,10 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	lineageGroupID := getOpenAIGroupIDFromContext(c)
 	lineageEntryBody := body
 	lineageSessionHash := ""
-	// 加密恢复引擎（mode=on）按账号维护 Redis lineage，接管旧的进程内会话级剥离。
-	encryptedRecoveryOn := account.OpenAIEncryptedRecoveryMode(lineageGroupID) == OpenAIEncryptedRecoveryModeOn
+	// 加密恢复引擎（mode=on）按账号维护 Redis lineage，接管 HTTP 路径上旧的进程内
+	// 会话级剥离；WS 路径不经过该引擎，保留旧逻辑。
+	encryptedRecoveryOn := wsDecision.Transport != OpenAIUpstreamTransportResponsesWebsocketV2 &&
+		account.OpenAIEncryptedRecoveryMode(lineageGroupID) == OpenAIEncryptedRecoveryModeOn
 	if stateStore := s.getOpenAIWSStateStore(); !encryptedRecoveryOn && stateStore != nil && stateStore.HasAnySessionInvalidEncryptedContent() {
 		lineageSessionHash = s.GenerateSessionHash(c, body)
 		if invalidDigests := stateStore.GetSessionInvalidEncryptedContentDigests(lineageGroupID, lineageSessionHash); len(invalidDigests) > 0 {
@@ -1371,6 +1381,20 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		} else {
 			nonStreamResult, err := s.handleNonStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel)
 			if err != nil {
+				if retryBody, retry := consumeOpenAIEncryptedSemanticRetry(c, body, err, account); retry {
+					_ = resp.Body.Close()
+					body = retryBody
+					requestView = newOpenAIRequestView(body)
+					reqBody = nil
+					httpInvalidEncryptedContentRetryTried = true
+					continue
+				}
+				var encryptedFailover *openAIEncryptedRecoveryFailoverSignal
+				if errors.As(err, &encryptedFailover) {
+					_ = resp.Body.Close()
+					return nil, s.newOpenAIAccountFailoverError(account, http.StatusBadRequest, resp.Header,
+						encryptedFailover.payload, encryptedFailover.message, false, false)
+				}
 				if signal, ok := asOpenAICompactFallbackSignal(err); ok {
 					if retryBody, fallbackModel, retry := s.prepareOpenAICompactFallbackRetry(
 						c, account, requestedModel, body, http.StatusBadRequest, signal.message, signal.payload, compactModelFallbackRetried,

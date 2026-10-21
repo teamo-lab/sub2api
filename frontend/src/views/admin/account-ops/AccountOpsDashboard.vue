@@ -114,14 +114,6 @@
         </div>
 
         <div class="grid grid-cols-1 gap-6 lg:grid-cols-2">
-          <TokenUsageTrend :trend-data="tokenTrend" :loading="loading" :show-cost="false" />
-          <TrendLineChartCard
-            :title="t('admin.accountOps.trends.sla')"
-            :labels="trendLabels"
-            :series="slaTrendSeries"
-            :loading="loading"
-            primary-format="percent"
-          />
           <TrendLineChartCard
             :title="t('admin.accountOps.trends.pv')"
             :labels="trendLabels"
@@ -130,13 +122,29 @@
             primary-format="number"
           />
           <TrendLineChartCard
+            :title="t('admin.accountOps.trends.sla')"
+            :labels="trendLabels"
+            :series="slaTrendSeries"
+            :loading="loading"
+            primary-format="percent"
+          />
+          <TrendLineChartCard
             :title="t('admin.accountOps.trends.ttft')"
             :labels="trendLabels"
             :series="ttftTrendSeries"
             :loading="loading"
             primary-format="milliseconds"
           />
+          <TrendLineChartCard
+            :title="t('admin.accountOps.trends.duration')"
+            :labels="trendLabels"
+            :series="durationTrendSeries"
+            :loading="loading"
+            primary-format="milliseconds"
+          />
         </div>
+
+        <TokenUsageTrend :trend-data="tokenTrend" :loading="loading" :show-cost="false" chart-height-class="h-[420px]" />
 
         <div class="grid grid-cols-1 gap-6 lg:grid-cols-2">
           <OpsErrorDistributionChart :data="errorDistribution" :loading="loading" @open-details="openErrorDetails('request')" />
@@ -391,6 +399,21 @@ const ttftTrendSeries = computed<TrendLineSeries[]>(() => [
   {
     label: 'P90',
     data: (snapshot.value?.throughput_trend?.points ?? []).map((point) => point.ttft_p90_ms ?? null),
+    color: '#f59e0b',
+    format: 'milliseconds'
+  }
+])
+
+const durationTrendSeries = computed<TrendLineSeries[]>(() => [
+  {
+    label: 'P50',
+    data: (snapshot.value?.throughput_trend?.points ?? []).map((point) => point.duration_p50_ms ?? null),
+    color: '#10b981',
+    format: 'milliseconds'
+  },
+  {
+    label: 'P90',
+    data: (snapshot.value?.throughput_trend?.points ?? []).map((point) => point.duration_p90_ms ?? null),
     color: '#f59e0b',
     format: 'milliseconds'
   }

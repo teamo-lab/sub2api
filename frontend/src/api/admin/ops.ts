@@ -100,6 +100,8 @@ export interface OpsThroughputTrendPoint {
   tps: number
   ttft_p50_ms?: number | null
   ttft_p90_ms?: number | null
+  duration_p50_ms?: number | null
+  duration_p90_ms?: number | null
 }
 
 export interface OpsThroughputPlatformBreakdownItem {

@@ -6,6 +6,7 @@
     :loading="loading"
     primary-format="compact"
     :tooltip-footer="tooltipFooter"
+    :chart-height-class="chartHeightClass"
   />
 </template>
 
@@ -21,8 +22,10 @@ const props = withDefaults(defineProps<{
   trendData: TrendDataPoint[]
   loading?: boolean
   showCost?: boolean
+  chartHeightClass?: string
 }>(), {
-  showCost: true
+  showCost: true,
+  chartHeightClass: 'h-48'
 })
 
 const labels = computed(() => props.trendData.map((item) => item.date))

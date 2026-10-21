@@ -355,6 +355,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				applyAttemptResponseHeaders()
 			}
 			if shouldFlush {
+				completeOpenAIEncryptedSemanticRetry(c)
 				if err := flushBuffered(); err != nil {
 					clientDisconnected = true
 					logger.LegacyPrintf("service.openai_gateway", "Client disconnected during streaming flush, continuing to drain upstream for billing")
@@ -391,6 +392,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		}
 		errorEventSent = true
 		payload := `{"type":"error","sequence_number":0,"error":{"type":"upstream_error","message":` + strconv.Quote(reason) + `,"code":` + strconv.Quote(reason) + `}}`
+		completeOpenAIEncryptedSemanticRetry(c)
 		if err := flushBuffered(); err != nil {
 			clientDisconnected = true
 			return
@@ -432,6 +434,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		if clientDisconnected || pendingBytes() == 0 {
 			return
 		}
+		completeOpenAIEncryptedSemanticRetry(c)
 		if err := flushBuffered(); err != nil {
 			clientDisconnected = true
 			logger.LegacyPrintf("service.openai_gateway", "%s", disconnectMessage)
@@ -926,6 +929,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 					terminalOrigin.seal()
 				}
 				if shouldFlush {
+					completeOpenAIEncryptedSemanticRetry(c)
 					if err := flushBuffered(); err != nil {
 						clientDisconnected = true
 						logger.LegacyPrintf("service.openai_gateway", "Client disconnected during streaming flush, continuing to drain upstream for billing")
@@ -1856,6 +1860,11 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 		if msg == "" {
 			msg = "Upstream compact response failed"
 		}
+		// stream=false 同样会收到 HTTP 200 + SSE response.failed：接入同一恢复决策。
+		// 仅加密恢复引擎（mode != off）参与；原有 summary 修复保持只在流式路径。
+		if handled, recoverySignal := openAIEncryptedRecoverySignal(c, terminalPayload); handled && recoverySignal != nil {
+			return nil, recoverySignal
+		}
 		if compactErr := newOpenAICompactFallbackSignal(c, terminalPayload, msg); compactErr != nil {
 			return nil, compactErr
 		}
@@ -1868,6 +1877,9 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 
 	usage := s.parseSSEUsageFromBody(bodyText)
 	if ok {
+		// 直接扫描 SSE 帧记录密文来历：terminal output 可能为空，reasoning 密文
+		// 只出现在先前的 output_item.done 事件里。
+		observeOpenAIEncryptedRecoverySSEBody(c, bodyText)
 		if parsedUsage, parsed := extractOpenAIUsageFromJSONBytes(finalResponse); parsed {
 			*usage = parsedUsage
 		}

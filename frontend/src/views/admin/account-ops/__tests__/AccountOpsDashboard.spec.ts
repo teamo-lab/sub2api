@@ -166,13 +166,14 @@ describe('AccountOpsDashboard', () => {
     wrapper.unmount()
   })
 
-  it('maps SLA, PV, and TTFT bucket values into three shared trend cards', async () => {
+  it('lays out PV|SLA, TTFT|duration latency cards, then a full-width token trend', async () => {
     getSnapshot.mockResolvedValue({
       overview: {},
       throughput_trend: {
         points: [{
           bucket_start: '2026-09-10T00:00:00.000Z', request_count: 10, token_consumed: 100,
-          input_tokens: 60, output_tokens: 40, qps: 1, tps: 10, ttft_p50_ms: 240, ttft_p90_ms: 810
+          input_tokens: 60, output_tokens: 40, qps: 1, tps: 10, ttft_p50_ms: 240, ttft_p90_ms: 810,
+          duration_p50_ms: 3200, duration_p90_ms: 9100
         }]
       },
       error_trend: {
@@ -197,10 +198,17 @@ describe('AccountOpsDashboard', () => {
     await flushPromises()
 
     const cards = wrapper.findAllComponents(TrendLineChartCard)
-    expect(cards).toHaveLength(3)
-    expect(cards[0]?.props('series')[0].data[0]).toBeCloseTo((8 / 9) * 100)
-    expect(cards[1]?.props('series')[0].data).toEqual([10])
+    expect(cards).toHaveLength(4)
+    expect(cards[0]?.props('series')[0].data).toEqual([10])
+    expect(cards[1]?.props('series')[0].data[0]).toBeCloseTo((8 / 9) * 100)
     expect(cards[2]?.props('series').map((item: any) => item.data[0])).toEqual([240, 810])
+    expect(cards[3]?.props('title')).toBe('admin.accountOps.trends.duration')
+    expect(cards[3]?.props('series').map((item: any) => item.data[0])).toEqual([3200, 9100])
+
+    const tokenTrend = wrapper.findComponent({ name: 'TokenUsageTrend' })
+    expect(tokenTrend.exists()).toBe(true)
+    expect(tokenTrend.props('chartHeightClass')).toBe('h-[420px]')
+    expect(tokenTrend.element.parentElement?.classList.contains('lg:grid-cols-2')).toBe(false)
     wrapper.unmount()
   })
 })

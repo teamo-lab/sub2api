@@ -19,6 +19,7 @@ export default {
       sla: 'SLA trend',
       pv: 'PV trend',
       ttft: 'TTFT P50 / P90 trend',
+      duration: 'Total duration P50 / P90 trend',
       requests: 'Requests'
     },
     metrics: {
