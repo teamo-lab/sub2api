@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestGetThroughputTrendIncludesTTFTPercentiles(t *testing.T) {
+func TestGetThroughputTrendIncludesLatencyPercentiles(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
@@ -21,12 +21,12 @@ func TestGetThroughputTrendIncludesTTFTPercentiles(t *testing.T) {
 	bucket := start.Add(10 * time.Minute)
 	accountID := int64(42)
 
-	mock.ExpectQuery(regexp.QuoteMeta("ttft_p50_ms,\n  ttft_p90_ms\nFROM combined")).
+	mock.ExpectQuery(regexp.QuoteMeta("ttft_p50_ms,\n  ttft_p90_ms,\n  duration_p50_ms,\n  duration_p90_ms\nFROM combined")).
 		WithArgs(start, end, accountID, start, end, accountID).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"bucket", "request_count", "token_consumed", "input_tokens", "output_tokens",
-			"cache_creation_tokens", "cache_read_tokens", "switch_count", "ttft_p50_ms", "ttft_p90_ms",
-		}).AddRow(bucket, int64(8), int64(1000), int64(600), int64(300), int64(50), int64(50), int64(1), int64(240), int64(810)))
+			"cache_creation_tokens", "cache_read_tokens", "switch_count", "ttft_p50_ms", "ttft_p90_ms", "duration_p50_ms", "duration_p90_ms",
+		}).AddRow(bucket, int64(8), int64(1000), int64(600), int64(300), int64(50), int64(50), int64(1), int64(240), int64(810), int64(3200), int64(9100)))
 	repo := &opsRepository{db: db}
 	result, err := repo.GetThroughputTrend(context.Background(), &service.OpsDashboardFilter{
 		StartTime: start,
@@ -49,5 +49,9 @@ func TestGetThroughputTrendIncludesTTFTPercentiles(t *testing.T) {
 	require.NotNil(t, point.TTFTP90MS)
 	require.Equal(t, int64(240), *point.TTFTP50MS)
 	require.Equal(t, int64(810), *point.TTFTP90MS)
+	require.NotNil(t, point.DurationP50MS)
+	require.NotNil(t, point.DurationP90MS)
+	require.Equal(t, int64(3200), *point.DurationP50MS)
+	require.Equal(t, int64(9100), *point.DurationP90MS)
 	require.NoError(t, mock.ExpectationsWereMet())
 }

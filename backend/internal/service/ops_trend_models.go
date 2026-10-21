@@ -15,6 +15,8 @@ type OpsThroughputTrendPoint struct {
 	TPS                 float64   `json:"tps"`
 	TTFTP50MS           *int64    `json:"ttft_p50_ms,omitempty"`
 	TTFTP90MS           *int64    `json:"ttft_p90_ms,omitempty"`
+	DurationP50MS       *int64    `json:"duration_p50_ms,omitempty"`
+	DurationP90MS       *int64    `json:"duration_p90_ms,omitempty"`
 }
 
 type OpsThroughputPlatformBreakdownItem struct {
