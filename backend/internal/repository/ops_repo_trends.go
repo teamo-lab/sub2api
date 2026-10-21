@@ -55,7 +55,11 @@ WITH usage_buckets AS (
          ROUND(percentile_cont(0.50) WITHIN GROUP (ORDER BY first_token_ms)
            FILTER (WHERE first_token_ms IS NOT NULL))::bigint AS ttft_p50_ms,
          ROUND(percentile_cont(0.90) WITHIN GROUP (ORDER BY first_token_ms)
-           FILTER (WHERE first_token_ms IS NOT NULL))::bigint AS ttft_p90_ms
+           FILTER (WHERE first_token_ms IS NOT NULL))::bigint AS ttft_p90_ms,
+         ROUND(percentile_cont(0.50) WITHIN GROUP (ORDER BY duration_ms)
+           FILTER (WHERE duration_ms IS NOT NULL))::bigint AS duration_p50_ms,
+         ROUND(percentile_cont(0.90) WITHIN GROUP (ORDER BY duration_ms)
+           FILTER (WHERE duration_ms IS NOT NULL))::bigint AS duration_p90_ms
   FROM usage_logs ul
   ` + usageJoin + `
   ` + usageWhere + `
@@ -95,17 +99,19 @@ combined AS (
     SUM(cache_read_tokens) AS cache_read_tokens,
     SUM(switch_count) AS switch_count,
     MAX(ttft_p50_ms) AS ttft_p50_ms,
-    MAX(ttft_p90_ms) AS ttft_p90_ms
+    MAX(ttft_p90_ms) AS ttft_p90_ms,
+    MAX(duration_p50_ms) AS duration_p50_ms,
+    MAX(duration_p90_ms) AS duration_p90_ms
   FROM (
     SELECT bucket, success_count, 0 AS error_count, token_consumed,
            input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, 0 AS switch_count,
-           ttft_p50_ms, ttft_p90_ms
+           ttft_p50_ms, ttft_p90_ms, duration_p50_ms, duration_p90_ms
     FROM usage_buckets
     UNION ALL
-    SELECT bucket, 0, error_count, 0, 0, 0, 0, 0, 0, NULL::bigint, NULL::bigint
+    SELECT bucket, 0, error_count, 0, 0, 0, 0, 0, 0, NULL::bigint, NULL::bigint, NULL::bigint, NULL::bigint
     FROM error_buckets
     UNION ALL
-    SELECT bucket, 0, 0, 0, 0, 0, 0, 0, switch_count, NULL::bigint, NULL::bigint
+    SELECT bucket, 0, 0, 0, 0, 0, 0, 0, switch_count, NULL::bigint, NULL::bigint, NULL::bigint, NULL::bigint
     FROM switch_buckets
   ) t
   GROUP BY bucket
@@ -120,7 +126,9 @@ SELECT
   cache_read_tokens,
   switch_count,
   ttft_p50_ms,
-  ttft_p90_ms
+  ttft_p90_ms,
+  duration_p50_ms,
+  duration_p90_ms
 FROM combined
 ORDER BY bucket ASC`
 
@@ -139,8 +147,8 @@ ORDER BY bucket ASC`
 		var tokens sql.NullInt64
 		var inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens sql.NullInt64
 		var switches sql.NullInt64
-		var ttftP50, ttftP90 sql.NullInt64
-		if err := rows.Scan(&bucket, &requests, &tokens, &inputTokens, &outputTokens, &cacheCreationTokens, &cacheReadTokens, &switches, &ttftP50, &ttftP90); err != nil {
+		var ttftP50, ttftP90, durationP50, durationP90 sql.NullInt64
+		if err := rows.Scan(&bucket, &requests, &tokens, &inputTokens, &outputTokens, &cacheCreationTokens, &cacheReadTokens, &switches, &ttftP50, &ttftP90, &durationP50, &durationP90); err != nil {
 			return nil, err
 		}
 		tokenConsumed := int64(0)
@@ -172,6 +180,8 @@ ORDER BY bucket ASC`
 			TPS:                 tps,
 			TTFTP50MS:           opsNullInt64Pointer(ttftP50),
 			TTFTP90MS:           opsNullInt64Pointer(ttftP90),
+			DurationP50MS:       opsNullInt64Pointer(durationP50),
+			DurationP90MS:       opsNullInt64Pointer(durationP90),
 		})
 	}
 	if err := rows.Err(); err != nil {

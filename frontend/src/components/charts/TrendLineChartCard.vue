@@ -1,13 +1,13 @@
 <template>
   <div class="card p-4">
     <h3 class="mb-4 text-sm font-semibold text-gray-900 dark:text-white">{{ title }}</h3>
-    <div v-if="loading" class="flex h-48 items-center justify-center">
+    <div v-if="loading" class="flex items-center justify-center" :class="chartHeightClass">
       <LoadingSpinner />
     </div>
-    <div v-else-if="hasData && chartData" class="h-48">
+    <div v-else-if="hasData && chartData" :class="chartHeightClass">
       <Line :data="chartData" :options="lineOptions" />
     </div>
-    <div v-else class="flex h-48 items-center justify-center text-sm text-gray-500 dark:text-gray-400">
+    <div v-else class="flex items-center justify-center text-sm text-gray-500 dark:text-gray-400" :class="chartHeightClass">
       {{ emptyText || t('admin.dashboard.noDataAvailable') }}
     </div>
   </div>
@@ -51,11 +51,13 @@ const props = withDefaults(defineProps<{
   emptyText?: string
   primaryFormat?: TrendValueFormat
   tooltipFooter?: (dataIndex: number) => string
+  chartHeightClass?: string
 }>(), {
   loading: false,
   emptyText: '',
   primaryFormat: 'compact',
-  tooltipFooter: undefined
+  tooltipFooter: undefined,
+  chartHeightClass: 'h-48'
 })
 
 const { t } = useI18n()

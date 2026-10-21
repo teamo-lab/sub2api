@@ -19,6 +19,7 @@ export default {
       sla: 'SLA 趋势',
       pv: 'PV 趋势',
       ttft: 'TTFT P50 / P90 趋势',
+      duration: '总耗时 P50 / P90 趋势',
       requests: '请求数'
     },
     metrics: {
