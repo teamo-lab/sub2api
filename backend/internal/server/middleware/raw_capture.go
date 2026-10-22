@@ -196,6 +196,23 @@ func rawCaptureHandler(rc config.RawCaptureConfig, capturer rawCaptureSink) gin.
 	}
 }
 
+// CloseRawCapture 在进程退出前调用：停止接收新记录，等待队列里已有的记录上传完或 ctx 到期。
+// 未开启原文落盘时什么也不做。
+func CloseRawCapture(ctx context.Context) {
+	if rawCaptureInstance == nil {
+		return
+	}
+	before := rawCaptureInstance.Stats()
+	rawCaptureInstance.Close(ctx)
+	after := rawCaptureInstance.Stats()
+	logger.L().Info("raw_capture.closed",
+		zap.Uint64("enqueued", after.Enqueued),
+		zap.Uint64("uploaded", after.Uploaded),
+		zap.Uint64("upload_failed", after.UploadFailed),
+		zap.Uint64("dropped_full", after.DroppedFull),
+		zap.Uint64("uploaded_during_close", after.Uploaded-before.Uploaded))
+}
+
 func sharedRawCapturer(rc config.RawCaptureConfig) *rawcapture.Capturer {
 	rawCaptureOnce.Do(func() {
 		c, err := rawcapture.New(context.Background(), rawcapture.Options{

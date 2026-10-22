@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -250,4 +251,9 @@ func TestRawCaptureInflightBudgetSkipsAndIsReleased(t *testing.T) {
 	require.Equal(t, "{}", string(sink.recs[2].Body))
 	require.NotContains(t, sink.recs[2].Extra, "body_skipped")
 	require.Equal(t, "inflight_budget", sink.recs[2].Extra["response_skipped"])
+}
+
+func TestCloseRawCaptureWithoutInstanceIsNoop(t *testing.T) {
+	require.Nil(t, rawCaptureInstance)
+	CloseRawCapture(context.Background())
 }
