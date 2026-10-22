@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -256,4 +257,47 @@ func TestRawCaptureInflightBudgetSkipsAndIsReleased(t *testing.T) {
 func TestCloseRawCaptureWithoutInstanceIsNoop(t *testing.T) {
 	require.Nil(t, rawCaptureInstance)
 	CloseRawCapture(context.Background())
+}
+
+func TestRawCaptureRecordsPanickingRequestAndRepanics(t *testing.T) {
+	sink := &fakeRawSink{}
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(gin.Recovery())
+	r.Use(ClientRequestIDWithOptions(true))
+	r.Use(rawCaptureHandler(config.RawCaptureConfig{MaxBodyBytes: 1 << 20, MaxResponseBytes: 1 << 20, MaxInflightBytes: 1 << 20}, sink))
+	r.POST("/v1/responses", func(c *gin.Context) {
+		_, _ = io.ReadAll(c.Request.Body)
+		panic("boom")
+	})
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(`{"model":"gpt-6-astra"}`)))
+	require.Equal(t, http.StatusInternalServerError, w.Code, "panic must still reach gin.Recovery")
+	require.Len(t, sink.recs, 1)
+	rec := sink.recs[0]
+	require.Equal(t, http.StatusInternalServerError, rec.Status)
+	require.Equal(t, `{"model":"gpt-6-astra"}`, string(rec.Body))
+	require.Equal(t, "boom", rec.Extra["panic"])
+}
+
+func TestRawCaptureChunkedBodyReservationShrinksToActualSize(t *testing.T) {
+	sink := &fakeRawSink{}
+	// 上限 1MiB、额度 1MiB+10：分块请求按上限预占，读完后必须缩到实际大小，
+	// 否则 handler 运行期间的响应副本会因额度不足被跳过。
+	rc := config.RawCaptureConfig{MaxBodyBytes: 1 << 20, MaxResponseBytes: 1 << 20, MaxInflightBytes: 1<<20 + 10}
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(ClientRequestIDWithOptions(true))
+	r.Use(rawCaptureHandler(rc, sink))
+	r.POST("/v1/responses", func(c *gin.Context) {
+		_, _ = io.ReadAll(c.Request.Body)
+		c.String(http.StatusOK, strings.Repeat("r", 1000))
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString("{}"))
+	req.ContentLength = -1
+	r.ServeHTTP(httptest.NewRecorder(), req)
+	require.Len(t, sink.recs, 1)
+	require.Equal(t, "{}", string(sink.recs[0].Body))
+	require.NotContains(t, sink.recs[0].Extra, "response_skipped")
+	require.Equal(t, 1000, len(sink.recs[0].Response))
 }
