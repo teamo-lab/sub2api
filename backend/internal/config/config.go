@@ -1059,6 +1059,10 @@ type GatewayConfig struct {
 	TeamoRelayEnabled bool `mapstructure:"teamo_relay_enabled"`
 	// TeamoRelayGroupIDs is an explicit server-side allowlist. Empty means no exposure.
 	TeamoRelayGroupIDs []int64 `mapstructure:"teamo_relay_group_ids"`
+	// OpenAIStripSchemaRefSiblingsGroupIDs 分组白名单：这些分组的 OpenAI 请求里，json_schema 与工具参数
+	// 中和 $ref 同级的注释字段（description/title 等）会被删掉，避免上游严格模式报
+	// "$ref cannot have keywords"。为空表示不启用。
+	OpenAIStripSchemaRefSiblingsGroupIDs []int64 `mapstructure:"openai_strip_schema_ref_siblings_group_ids"`
 	// ExposeOneAPIRequestID 在网关响应头（含错误响应）里回 X-Oneapi-Request-Id = client_request_id，
 	// 前置的 new-api 会把它记进 logs.upstream_request_id，从而串上本机的 usage_logs / ops_error_logs。默认关闭。
 	ExposeOneAPIRequestID bool `mapstructure:"expose_oneapi_request_id"`
@@ -2527,6 +2531,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.grok_response_header_timeout", 120)
 	viper.SetDefault("gateway.teamo_relay_enabled", false)
 	viper.SetDefault("gateway.teamo_relay_group_ids", []int64{})
+	viper.SetDefault("gateway.openai_strip_schema_ref_siblings_group_ids", []int64{})
 	viper.SetDefault("gateway.expose_oneapi_request_id", false)
 	viper.SetDefault("gateway.raw_capture.enabled", false)
 	viper.SetDefault("gateway.raw_capture.group_ids", []int64{})
@@ -3497,6 +3502,11 @@ func (c *Config) Validate() error {
 	for _, groupID := range c.Gateway.TeamoRelayGroupIDs {
 		if groupID <= 0 {
 			return fmt.Errorf("gateway.teamo_relay_group_ids must contain positive group IDs")
+		}
+	}
+	for _, groupID := range c.Gateway.OpenAIStripSchemaRefSiblingsGroupIDs {
+		if groupID <= 0 {
+			return fmt.Errorf("gateway.openai_strip_schema_ref_siblings_group_ids must contain positive group IDs")
 		}
 	}
 	if rc := c.Gateway.RawCapture; rc.Enabled {
