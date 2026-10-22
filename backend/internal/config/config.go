@@ -1013,6 +1013,33 @@ const (
 )
 
 // GatewayConfig API网关相关配置
+// RawCaptureConfig 控制请求原文落盘。上传在后台队列完成，队列满时丢弃，不阻塞请求；
+// 对象过期由桶的生命周期规则负责。
+type RawCaptureConfig struct {
+	Enabled bool `mapstructure:"enabled"`
+	// GroupIDs 只记录这些分组的请求；为空表示所有分组。
+	GroupIDs        []int64 `mapstructure:"group_ids"`
+	Endpoint        string  `mapstructure:"endpoint"`
+	Region          string  `mapstructure:"region"`
+	Bucket          string  `mapstructure:"bucket"`
+	Prefix          string  `mapstructure:"prefix"`
+	AccessKeyID     string  `mapstructure:"access_key_id"`
+	SecretAccessKey string  `mapstructure:"secret_access_key"`
+	ForcePathStyle  bool    `mapstructure:"force_path_style"`
+	// MaxBodyBytes 超过该大小的请求体只记元数据（body_truncated=true）。
+	MaxBodyBytes int64 `mapstructure:"max_body_bytes"`
+	// MaxResponseBytes 响应原文保留上限，超过时保留开头和结尾各一半。
+	MaxResponseBytes int64 `mapstructure:"max_response_bytes"`
+	// MaxInflightBytes 限制已读进内存、尚未交给上传队列的原文总字节（请求体 + 响应副本），
+	// 超过时新请求只记元数据，响应停止复制。
+	MaxInflightBytes int64 `mapstructure:"max_inflight_bytes"`
+	QueueSize        int   `mapstructure:"queue_size"`
+	MaxQueueBytes    int64 `mapstructure:"max_queue_bytes"`
+	Workers          int   `mapstructure:"workers"`
+	// UploadTimeoutSeconds 单个对象的上传超时。
+	UploadTimeoutSeconds int `mapstructure:"upload_timeout_seconds"`
+}
+
 type GatewayConfig struct {
 	RequestProfilingRetentionHours int     `mapstructure:"request_profiling_retention_hours"`
 	RequestProfilingGroupIDs       []int64 `mapstructure:"request_profiling_group_ids"`
@@ -1032,6 +1059,11 @@ type GatewayConfig struct {
 	TeamoRelayEnabled bool `mapstructure:"teamo_relay_enabled"`
 	// TeamoRelayGroupIDs is an explicit server-side allowlist. Empty means no exposure.
 	TeamoRelayGroupIDs []int64 `mapstructure:"teamo_relay_group_ids"`
+	// ExposeOneAPIRequestID 在网关响应头（含错误响应）里回 X-Oneapi-Request-Id = client_request_id，
+	// 前置的 new-api 会把它记进 logs.upstream_request_id，从而串上本机的 usage_logs / ops_error_logs。默认关闭。
+	ExposeOneAPIRequestID bool `mapstructure:"expose_oneapi_request_id"`
+	// RawCapture 把网关请求原文异步写到 S3 兼容对象存储。默认关闭。
+	RawCapture RawCaptureConfig `mapstructure:"raw_capture"`
 	// OpenAIFirstOutputTimeoutSeconds: native HTTP Responses 首个语义输出超时（秒），0表示禁用。
 	OpenAIFirstOutputTimeoutSeconds int `mapstructure:"openai_first_output_timeout_seconds"`
 	// OpenAIHighEffortFirstOutputTimeoutSeconds: high/xhigh/max 推理的首个语义输出超时（秒）。
@@ -2495,6 +2527,23 @@ func setDefaults() {
 	viper.SetDefault("gateway.grok_response_header_timeout", 120)
 	viper.SetDefault("gateway.teamo_relay_enabled", false)
 	viper.SetDefault("gateway.teamo_relay_group_ids", []int64{})
+	viper.SetDefault("gateway.expose_oneapi_request_id", false)
+	viper.SetDefault("gateway.raw_capture.enabled", false)
+	viper.SetDefault("gateway.raw_capture.group_ids", []int64{})
+	viper.SetDefault("gateway.raw_capture.endpoint", "")
+	viper.SetDefault("gateway.raw_capture.region", "")
+	viper.SetDefault("gateway.raw_capture.bucket", "")
+	viper.SetDefault("gateway.raw_capture.prefix", "raw")
+	viper.SetDefault("gateway.raw_capture.access_key_id", "")
+	viper.SetDefault("gateway.raw_capture.secret_access_key", "")
+	viper.SetDefault("gateway.raw_capture.force_path_style", false)
+	viper.SetDefault("gateway.raw_capture.max_body_bytes", int64(64<<20))
+	viper.SetDefault("gateway.raw_capture.max_response_bytes", int64(16<<20))
+	viper.SetDefault("gateway.raw_capture.max_inflight_bytes", int64(1<<30))
+	viper.SetDefault("gateway.raw_capture.queue_size", 256)
+	viper.SetDefault("gateway.raw_capture.max_queue_bytes", int64(512<<20))
+	viper.SetDefault("gateway.raw_capture.workers", 4)
+	viper.SetDefault("gateway.raw_capture.upload_timeout_seconds", 60)
 	viper.SetDefault("gateway.openai_first_output_timeout_seconds", 0)
 	viper.SetDefault("gateway.openai_high_effort_first_output_timeout_seconds", 0)
 	viper.SetDefault("gateway.log_upstream_error_body", true)
@@ -3448,6 +3497,19 @@ func (c *Config) Validate() error {
 	for _, groupID := range c.Gateway.TeamoRelayGroupIDs {
 		if groupID <= 0 {
 			return fmt.Errorf("gateway.teamo_relay_group_ids must contain positive group IDs")
+		}
+	}
+	if rc := c.Gateway.RawCapture; rc.Enabled {
+		if strings.TrimSpace(rc.Bucket) == "" || strings.TrimSpace(rc.AccessKeyID) == "" || strings.TrimSpace(rc.SecretAccessKey) == "" {
+			return fmt.Errorf("gateway.raw_capture requires bucket, access_key_id and secret_access_key when enabled")
+		}
+		for _, groupID := range rc.GroupIDs {
+			if groupID <= 0 {
+				return fmt.Errorf("gateway.raw_capture.group_ids must contain positive group IDs")
+			}
+		}
+		if rc.MaxBodyBytes <= 0 || rc.MaxResponseBytes <= 0 || rc.MaxInflightBytes <= 0 || rc.QueueSize <= 0 || rc.MaxQueueBytes <= 0 || rc.Workers <= 0 || rc.UploadTimeoutSeconds <= 0 {
+			return fmt.Errorf("gateway.raw_capture max_body_bytes/max_response_bytes/max_inflight_bytes/queue_size/max_queue_bytes/workers/upload_timeout_seconds must be positive")
 		}
 	}
 	if c.Gateway.OpenAIFirstOutputTimeoutSeconds < 0 || c.Gateway.OpenAIFirstOutputTimeoutSeconds > 600 ||
