@@ -91,6 +91,61 @@ func sanitizeOpenAIResponsesToolParameterTypes(body []byte) ([]byte, bool, error
 	})
 }
 
+// openAIResponsesRefAnnotationKeywords are annotation-only JSON Schema
+// keywords: dropping them never changes which instances validate. Validation
+// keywords such as type or $defs next to $ref are deliberately left alone.
+var openAIResponsesRefAnnotationKeywords = []string{
+	"description", "title", "examples", "default", "deprecated", "readOnly", "writeOnly", "$comment",
+}
+
+type openAIResponsesRefSibling struct {
+	start      int
+	nextComma  int
+	annotation bool
+}
+
+// addRefSiblingEdits deletes the annotation members of one schema object.
+// Members before the last kept member are removed through their trailing
+// comma; the annotation run after it is removed from that member's comma up to
+// the closing brace. $ref itself is always kept, so a kept member exists.
+func (p *openAIResponsesToolSchemaParser) addRefSiblingEdits(members []openAIResponsesRefSibling, closeBrace int) error {
+	lastKept := -1
+	for i, member := range members {
+		if !member.annotation {
+			lastKept = i
+		}
+	}
+	if lastKept < 0 {
+		return nil
+	}
+	for _, member := range members[:lastKept] {
+		if member.annotation {
+			if err := p.addEdit(member.start, member.nextComma+1, ""); err != nil {
+				return err
+			}
+		}
+	}
+	if lastKept < len(members)-1 {
+		return p.addEdit(members[lastKept].nextComma, closeBrace, "")
+	}
+	return nil
+}
+
+// stripOpenAISchemaRefAnnotationSiblings removes annotation keywords that share
+// a schema object with $ref, in function tool parameters and in json_schema
+// response formats (Responses text.format.schema and Chat Completions
+// response_format.json_schema.schema). Untouched bytes, including property
+// order, are preserved.
+func stripOpenAISchemaRefAnnotationSiblings(body []byte) ([]byte, bool, error) {
+	if len(body) == 0 || !bytes.Contains(body, []byte("$ref")) {
+		return body, false, nil
+	}
+	return sanitizeOpenAIResponsesToolSchemas(body, openAIResponsesToolSchemaOptions{
+		stripRefAnnotationSiblings:   true,
+		includeResponseFormatSchemas: true,
+	})
+}
+
 func openAIResponsesBodyMayContainRegexLookaround(body []byte) bool {
 	// An opening parenthesis may be literal or encoded as JSON's canonical
 	// Unicode escape. Other lookaround characters may themselves be escaped, so
@@ -107,6 +162,13 @@ type openAIResponsesToolSchemaOptions struct {
 	removeLookaroundPatterns        bool
 	replaceNullParameterTypes       bool
 	injectObjectUnionRootObjectType bool
+	// stripRefAnnotationSiblings removes annotation-only keywords that sit next
+	// to $ref in the same schema object; OpenAI strict mode rejects them with
+	// "$ref cannot have keywords {'description'}".
+	stripRefAnnotationSiblings bool
+	// includeResponseFormatSchemas also walks text.format.schema (Responses)
+	// and response_format.json_schema.schema (Chat Completions).
+	includeResponseFormatSchemas bool
 }
 
 type openAIResponsesToolSchemaContext uint8
@@ -125,6 +187,10 @@ const (
 	openAIResponsesToolSchemaArray
 	openAIResponsesToolSchemaMap
 	openAIResponsesToolSchemaOrArray
+	openAIResponsesToolSchemaTextCarrier
+	openAIResponsesToolSchemaFormatCarrier
+	openAIResponsesToolSchemaResponseFormat
+	openAIResponsesToolSchemaJSONSchemaCarrier
 )
 
 type openAIResponsesToolSchemaEdit struct {
@@ -238,6 +304,9 @@ func (p *openAIResponsesToolSchemaParser) parseObject(
 	parameterCount := 0
 	parameterValueStart := -1
 	parameterValueEnd := -1
+	trackRefSiblings := context == openAIResponsesToolSchema && p.options.stripRefAnnotationSiblings
+	hasRef := false
+	var refSiblings []openAIResponsesRefSibling
 	for {
 		p.skipWhitespace()
 		memberStart := p.pos
@@ -253,7 +322,7 @@ func (p *openAIResponsesToolSchemaParser) parseObject(
 		p.skipWhitespace()
 		valueStart := p.pos
 
-		childContext, childSchemaRoot := openAIResponsesToolSchemaChildContext(context, key)
+		childContext, childSchemaRoot := openAIResponsesToolSchemaChildContext(context, key, p.options)
 		if err := p.parseValue(childContext, childSchemaRoot, depth); err != nil {
 			return err
 		}
@@ -288,6 +357,16 @@ func (p *openAIResponsesToolSchemaParser) parseObject(
 			}
 		}
 
+		if trackRefSiblings {
+			isRef := openAIResponsesJSONStringEquals(key, "$ref")
+			hasRef = hasRef || isRef
+			refSiblings = append(refSiblings, openAIResponsesRefSibling{
+				start:      memberStart,
+				nextComma:  -1,
+				annotation: !isRef && openAIResponsesJSONStringMatchesAny(key, openAIResponsesRefAnnotationKeywords...),
+			})
+		}
+
 		if p.pos >= len(p.body) {
 			return p.syntaxError("unterminated object")
 		}
@@ -308,6 +387,9 @@ func (p *openAIResponsesToolSchemaParser) parseObject(
 			comma := p.pos
 			p.pos++
 			previousComma = comma
+			if trackRefSiblings {
+				refSiblings[len(refSiblings)-1].nextComma = comma
+			}
 			continue
 		}
 		if p.body[p.pos] != '}' {
@@ -319,6 +401,11 @@ func (p *openAIResponsesToolSchemaParser) parseObject(
 				start = deleteRunPreviousComma
 			}
 			if err := p.addEdit(start, p.pos, ""); err != nil {
+				return err
+			}
+		}
+		if hasRef {
+			if err := p.addRefSiblingEdits(refSiblings, p.pos); err != nil {
 				return err
 			}
 		}
@@ -443,7 +530,7 @@ func (p *openAIResponsesToolSchemaParser) parseArray(
 }
 
 func openAIResponsesToolSchemaChildContext(
-	context openAIResponsesToolSchemaContext, key []byte,
+	context openAIResponsesToolSchemaContext, key []byte, options openAIResponsesToolSchemaOptions,
 ) (openAIResponsesToolSchemaContext, bool) {
 	switch context {
 	case openAIResponsesToolSchemaDocument:
@@ -452,6 +539,22 @@ func openAIResponsesToolSchemaChildContext(
 			return openAIResponsesToolSchemaTools, false
 		case openAIResponsesJSONStringEquals(key, "input"):
 			return openAIResponsesToolSchemaInput, false
+		case options.includeResponseFormatSchemas && openAIResponsesJSONStringEquals(key, "text"):
+			return openAIResponsesToolSchemaTextCarrier, false
+		case options.includeResponseFormatSchemas && openAIResponsesJSONStringEquals(key, "response_format"):
+			return openAIResponsesToolSchemaResponseFormat, false
+		}
+	case openAIResponsesToolSchemaTextCarrier:
+		if openAIResponsesJSONStringEquals(key, "format") {
+			return openAIResponsesToolSchemaFormatCarrier, false
+		}
+	case openAIResponsesToolSchemaFormatCarrier, openAIResponsesToolSchemaJSONSchemaCarrier:
+		if openAIResponsesJSONStringEquals(key, "schema") {
+			return openAIResponsesToolSchema, true
+		}
+	case openAIResponsesToolSchemaResponseFormat:
+		if openAIResponsesJSONStringEquals(key, "json_schema") {
+			return openAIResponsesToolSchemaJSONSchemaCarrier, false
 		}
 	case openAIResponsesToolSchemaTool:
 		switch {

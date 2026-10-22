@@ -91,6 +91,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	} else if toolSchemaSanitized {
 		body = sanitizedToolBody
 	}
+	body = s.stripOpenAISchemaRefSiblingsForGroup(c, body)
 	if account.IsOpenAIOAuthLike() {
 		reasoningBody, reasoningChanged, reasoningErr := normalizeOpenAIResponsesReasoningMode(body)
 		if reasoningErr != nil {
