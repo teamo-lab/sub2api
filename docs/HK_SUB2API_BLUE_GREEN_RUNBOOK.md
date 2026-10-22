@@ -83,6 +83,21 @@ entry-test、activate、finalize。bootstrap镜像必须支持api/worker进程�
 日常stage/canary/promote-fast/worker/complete和一键回滚仍与101共用同一套控制器。
 双机同步版本应传输同一个不可变镜像，并核对两台API、worker的image ID和编译commit；不要各自构建后仅比较版本名。
 
+## 硅谷实例：sv-1 的接管
+
+`ins-6wy1gyos`（内网 `172.26.0.38`，公网 `43.173.108.67`）给 NewAPI 内网调用，原单容器部署在
+`/opt/sub2api-sv/deploy`，PostgreSQL/Redis 是同一 compose 里的本机容器（依赖模式 `local`）。
+为复用默认路径，`/opt/sub2api` 是指向 `/opt/sub2api-sv` 的软链，备份落在 `/opt/sub2api-sv/backups`。
+
+和香港的关键差异是 **API Key 有 IP 白名单**（只放行 NewAPI 的 `172.26.0.31/.32` 和本机 `.38`）。
+HAProxy 会删掉客户端自带的 `X-Forwarded-For`，再写入真实对端地址；只有在
+`server.trusted_proxies` 覆盖 Docker 网络时 Sub2API 才会采信它。所以 sv-1 在 legacy 容器上先加
+`SERVER_TRUSTED_PROXIES=172.18.0.0/16`（`deploy_sub2api-network` 的网段），`prepare-bluegreen`
+会把它带进 `rollout/runtime.env`。没有配置可信代理的站点（如香港）行为不变。
+
+接管顺序同上：bootstrap → 从本机直打 `172.26.0.38:18080` 验证白名单 key → `entry-switch activate`
+→ legacy 连接排空后 `finalize-entry`。本机发起的请求不经过 PREROUTING，测试入口重定向要从其他内网主机发。
+
 ## 跨机鉴权门禁
 
 43依赖101的生产API Key。发布前记录43生产账号、101 API-key ID、Key指纹、Base URL、group、model mapping和账号状态，禁止记录Key本体。
