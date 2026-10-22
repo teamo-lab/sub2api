@@ -254,6 +254,29 @@ gateway:
   # Pure-text endpoint body limit (embeddings and alpha/search), default 32 MiB.
   # 纯文本端点请求体上限（embeddings、alpha/search），默认 32 MiB。
   text_max_body_size: 33554432
+  # Return X-Oneapi-Request-Id = client_request_id on every gateway response so a
+  # fronting new-api stores it in logs.upstream_request_id (joins to usage_logs / ops_error_logs).
+  # 在网关响应头回 X-Oneapi-Request-Id，供前置 new-api 串联请求。
+  expose_oneapi_request_id: false
+  # Asynchronously upload raw request bodies to S3-compatible storage (e.g. Tencent COS).
+  # Never blocks requests: the queue drops records when full. Object expiry is the bucket lifecycle's job.
+  # 请求原文异步落盘到对象存储；队列满时丢弃，不阻塞请求；过期由桶生命周期规则负责。
+  # Secrets can come from env: GATEWAY_RAW_CAPTURE_ACCESS_KEY_ID / GATEWAY_RAW_CAPTURE_SECRET_ACCESS_KEY.
+  raw_capture:
+    enabled: false
+    group_ids: []            # empty = all groups
+    endpoint: ""             # e.g. https://cos.na-siliconvalley.myqcloud.com
+    region: ""               # e.g. na-siliconvalley
+    bucket: ""
+    prefix: "raw"            # objects: <prefix>/YYYY/MM/DD/HH/<client_request_id>.json.gz (UTC)
+    access_key_id: ""
+    secret_access_key: ""
+    force_path_style: false
+    max_body_bytes: 67108864 # larger bodies keep metadata only
+    queue_size: 256
+    max_queue_bytes: 536870912
+    workers: 4
+    upload_timeout_seconds: 60
   # Max bytes to read for non-stream upstream responses (default: 8MB)
   # 非流式上游响应体读取上限（默认 8MB）
   upstream_response_read_max_bytes: 8388608
