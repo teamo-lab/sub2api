@@ -1,4 +1,4 @@
-// Package rawcapture 把网关请求原文异步写到 S3 兼容对象存储（腾讯云 COS 等）。
+// Package rawcapture 把网关请求和响应原文异步写到 S3 兼容对象存储（腾讯云 COS 等）。
 //
 // 设计约束：请求路径上只做一次非阻塞入队；队列按条数和字节数双重限额，满了直接丢弃并计数，
 // 绝不拖慢或阻塞请求。压缩、序列化和上传都在后台 worker 里完成。对象过期由桶的生命周期规则负责。
@@ -15,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
@@ -55,7 +56,13 @@ type Record struct {
 	BodyBytes       int               `json:"body_bytes"`
 	BodyTruncated   bool              `json:"body_truncated,omitempty"`
 	Body            []byte            `json:"-"`
-	Extra           map[string]any    `json:"extra,omitempty"`
+	// ResponseHeaders 是白名单内的响应头；Response 是写给客户端的原始字节（SSE 即事件流文本）。
+	// 超过上限时只保留开头和结尾各一半，ResponseTruncated=true，ResponseBytes 是实际总字节数。
+	ResponseHeaders   map[string]string `json:"response_headers,omitempty"`
+	ResponseBytes     int64             `json:"response_bytes"`
+	ResponseTruncated bool              `json:"response_truncated,omitempty"`
+	Response          []byte            `json:"-"`
+	Extra             map[string]any    `json:"extra,omitempty"`
 }
 
 // Stats 是累计计数，用于日志和排障。
@@ -150,7 +157,7 @@ func (c *Capturer) Enqueue(rec *Record) bool {
 	if c.closed {
 		return false
 	}
-	size := int64(len(rec.Body))
+	size := rec.payloadBytes()
 	if c.queuedBytes.Add(size) > c.opts.MaxQueueBytes {
 		c.queuedBytes.Add(-size)
 		c.droppedFull.Add(1)
@@ -207,7 +214,7 @@ func (c *Capturer) worker(ctx context.Context) {
 	defer c.wg.Done()
 	for rec := range c.queue {
 		c.upload(ctx, rec)
-		c.queuedBytes.Add(-int64(len(rec.Body)))
+		c.queuedBytes.Add(-rec.payloadBytes())
 	}
 }
 
@@ -236,13 +243,16 @@ func (c *Capturer) upload(ctx context.Context, rec *Record) {
 	c.uploadedBytes.Add(uint64(len(payload)))
 }
 
-// ObjectKey 返回记录的对象路径：<prefix>/YYYY/MM/DD/HH/<client_request_id>.json.gz（UTC）。
+func (r *Record) payloadBytes() int64 { return int64(len(r.Body) + len(r.Response)) }
+
+// ObjectKey 返回记录的对象路径：<prefix>/<client_request_id>.json.gz。
+// 不按时间分目录，拿到 ID（例如从 new-api 的 logs.upstream_request_id）就能直接定位对象。
+// 没有 ID 的记录落到 <prefix>/unknown/<UTC 日期>/<纳秒时间戳>.json.gz。
 func ObjectKey(prefix string, rec *Record) string {
-	id := sanitizeKeySegment(rec.ClientRequestID)
-	if id == "" {
-		id = fmt.Sprintf("unknown-%d", rec.StartedAt.UnixNano())
+	key := sanitizeKeySegment(rec.ClientRequestID) + ".json.gz"
+	if key == ".json.gz" {
+		key = fmt.Sprintf("unknown/%s/%d.json.gz", rec.StartedAt.UTC().Format("2006-01-02"), rec.StartedAt.UnixNano())
 	}
-	key := rec.StartedAt.UTC().Format("2006/01/02/15") + "/" + id + ".json.gz"
 	if prefix != "" {
 		key = prefix + "/" + key
 	}
@@ -263,9 +273,13 @@ func sanitizeKeySegment(s string) string {
 
 type envelope struct {
 	*Record
-	BodyEncoding string          `json:"body_encoding"`
-	BodyJSON     json.RawMessage `json:"body,omitempty"`
-	BodyBase64   string          `json:"body_base64,omitempty"`
+	BodyEncoding     string          `json:"body_encoding"`
+	BodyJSON         json.RawMessage `json:"body,omitempty"`
+	BodyBase64       string          `json:"body_base64,omitempty"`
+	ResponseEncoding string          `json:"response_encoding"`
+	ResponseJSON     json.RawMessage `json:"response,omitempty"`
+	ResponseText     string          `json:"response_text,omitempty"`
+	ResponseBase64   string          `json:"response_base64,omitempty"`
 }
 
 // encodeRecord 把记录写成 gzip 压缩的 JSON。合法 JSON 的请求体原样嵌入，否则 base64。
@@ -279,6 +293,20 @@ func encodeRecord(rec *Record) ([]byte, error) {
 		env.BodyBase64 = base64.StdEncoding.EncodeToString(rec.Body)
 	} else {
 		env.BodyEncoding = "none"
+	}
+	// 未截断的 JSON 响应原样嵌入；SSE 等文本存成字符串；其余（如压缩字节）base64。
+	switch {
+	case len(rec.Response) == 0:
+		env.ResponseEncoding = "none"
+	case !rec.ResponseTruncated && json.Valid(rec.Response):
+		env.ResponseEncoding = "json"
+		env.ResponseJSON = rec.Response
+	case utf8.Valid(rec.Response):
+		env.ResponseEncoding = "text"
+		env.ResponseText = string(rec.Response)
+	default:
+		env.ResponseEncoding = "base64"
+		env.ResponseBase64 = base64.StdEncoding.EncodeToString(rec.Response)
 	}
 	var buf bytes.Buffer
 	gz, err := gzip.NewWriterLevel(&buf, gzip.BestSpeed)

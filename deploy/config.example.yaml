@@ -258,9 +258,9 @@ gateway:
   # fronting new-api stores it in logs.upstream_request_id (joins to usage_logs / ops_error_logs).
   # 在网关响应头回 X-Oneapi-Request-Id，供前置 new-api 串联请求。
   expose_oneapi_request_id: false
-  # Asynchronously upload raw request bodies to S3-compatible storage (e.g. Tencent COS).
+  # Asynchronously upload raw request and response bodies to S3-compatible storage (e.g. Tencent COS).
   # Never blocks requests: the queue drops records when full. Object expiry is the bucket lifecycle's job.
-  # 请求原文异步落盘到对象存储；队列满时丢弃，不阻塞请求；过期由桶生命周期规则负责。
+  # 请求和响应原文异步落盘到对象存储；队列满时丢弃，不阻塞请求；过期由桶生命周期规则负责。
   # Secrets can come from env: GATEWAY_RAW_CAPTURE_ACCESS_KEY_ID / GATEWAY_RAW_CAPTURE_SECRET_ACCESS_KEY.
   raw_capture:
     enabled: false
@@ -268,11 +268,12 @@ gateway:
     endpoint: ""             # e.g. https://cos.na-siliconvalley.myqcloud.com
     region: ""               # e.g. na-siliconvalley
     bucket: ""
-    prefix: "raw"            # objects: <prefix>/YYYY/MM/DD/HH/<client_request_id>.json.gz (UTC)
+    prefix: "raw"            # objects: <prefix>/<client_request_id>.json.gz (request + response)
     access_key_id: ""
     secret_access_key: ""
     force_path_style: false
     max_body_bytes: 67108864 # larger bodies keep metadata only
+    max_response_bytes: 16777216 # longer responses keep the first and last half
     queue_size: 256
     max_queue_bytes: 536870912
     workers: 4

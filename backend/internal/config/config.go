@@ -1027,10 +1027,12 @@ type RawCaptureConfig struct {
 	SecretAccessKey string  `mapstructure:"secret_access_key"`
 	ForcePathStyle  bool    `mapstructure:"force_path_style"`
 	// MaxBodyBytes 超过该大小的请求体只记元数据（body_truncated=true）。
-	MaxBodyBytes  int64 `mapstructure:"max_body_bytes"`
-	QueueSize     int   `mapstructure:"queue_size"`
-	MaxQueueBytes int64 `mapstructure:"max_queue_bytes"`
-	Workers       int   `mapstructure:"workers"`
+	MaxBodyBytes int64 `mapstructure:"max_body_bytes"`
+	// MaxResponseBytes 响应原文保留上限，超过时保留开头和结尾各一半。
+	MaxResponseBytes int64 `mapstructure:"max_response_bytes"`
+	QueueSize        int   `mapstructure:"queue_size"`
+	MaxQueueBytes    int64 `mapstructure:"max_queue_bytes"`
+	Workers          int   `mapstructure:"workers"`
 	// UploadTimeoutSeconds 单个对象的上传超时。
 	UploadTimeoutSeconds int `mapstructure:"upload_timeout_seconds"`
 }
@@ -2533,6 +2535,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.raw_capture.secret_access_key", "")
 	viper.SetDefault("gateway.raw_capture.force_path_style", false)
 	viper.SetDefault("gateway.raw_capture.max_body_bytes", int64(64<<20))
+	viper.SetDefault("gateway.raw_capture.max_response_bytes", int64(16<<20))
 	viper.SetDefault("gateway.raw_capture.queue_size", 256)
 	viper.SetDefault("gateway.raw_capture.max_queue_bytes", int64(512<<20))
 	viper.SetDefault("gateway.raw_capture.workers", 4)
@@ -3501,8 +3504,8 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("gateway.raw_capture.group_ids must contain positive group IDs")
 			}
 		}
-		if rc.MaxBodyBytes <= 0 || rc.QueueSize <= 0 || rc.MaxQueueBytes <= 0 || rc.Workers <= 0 || rc.UploadTimeoutSeconds <= 0 {
-			return fmt.Errorf("gateway.raw_capture max_body_bytes/queue_size/max_queue_bytes/workers/upload_timeout_seconds must be positive")
+		if rc.MaxBodyBytes <= 0 || rc.MaxResponseBytes <= 0 || rc.QueueSize <= 0 || rc.MaxQueueBytes <= 0 || rc.Workers <= 0 || rc.UploadTimeoutSeconds <= 0 {
+			return fmt.Errorf("gateway.raw_capture max_body_bytes/max_response_bytes/queue_size/max_queue_bytes/workers/upload_timeout_seconds must be positive")
 		}
 	}
 	if c.Gateway.OpenAIFirstOutputTimeoutSeconds < 0 || c.Gateway.OpenAIFirstOutputTimeoutSeconds > 600 ||
