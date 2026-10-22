@@ -190,6 +190,8 @@ func runMainServer() {
 	if err := app.Server.Shutdown(ctx); err != nil {
 		log.Printf("Server forced to shutdown: %v", err)
 	}
+	// HTTP 请求都结束后，把原文落盘队列里剩下的记录传完（最多等到 ctx 超时）。
+	middleware.CloseRawCapture(ctx)
 
 	log.Println("Server exited")
 }

@@ -262,10 +262,16 @@ func ObjectKey(prefix string, rec *Record) string {
 	return key
 }
 
+// maxKeyIDLen 限制对象名里 ID 段的长度，保证整个对象名远低于 COS/S3 的 1024 字节上限。
+const maxKeyIDLen = 128
+
 func sanitizeKeySegment(s string) string {
 	s = strings.TrimSpace(s)
 	var b strings.Builder
 	for _, r := range s {
+		if b.Len() >= maxKeyIDLen {
+			break
+		}
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
 			b.WriteRune(r)

@@ -200,3 +200,9 @@ func TestQueueBytesCountResponse(t *testing.T) {
 	close(p.block)
 	c.Close(context.Background())
 }
+
+func TestObjectKeyCapsIDLength(t *testing.T) {
+	at := time.Unix(0, 1)
+	key := ObjectKey("raw", &Record{ClientRequestID: strings.Repeat("a", 5000), StartedAt: at})
+	require.Equal(t, "raw/"+strings.Repeat("a", maxKeyIDLen)+"/1.json.gz", key)
+}
