@@ -3,6 +3,7 @@ package middleware
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"slices"
@@ -115,10 +116,6 @@ func rawCaptureHandler(rc config.RawCaptureConfig, capturer rawCaptureSink) gin.
 		}
 		cw := newCaptureWriter(c.Writer, rc.MaxResponseBytes, budget)
 		c.Writer = cw
-		defer func() {
-			budget.release(reserved)
-			cw.releaseBudget()
-		}()
 
 		var body []byte
 		var readErr error
@@ -126,6 +123,10 @@ func rawCaptureHandler(rc config.RawCaptureConfig, capturer rawCaptureSink) gin.
 		if skipReason == "" {
 			body, readErr = io.ReadAll(io.LimitReader(c.Request.Body, rc.MaxBodyBytes+1))
 			truncated = int64(len(body)) > rc.MaxBodyBytes
+			// 预占额度换成实际读到的字节数（分块请求按上限预占，不能一直占到请求结束）。
+			// 已经读进内存的字节必须计入，即使超过上限也只记账、不拒绝。
+			budget.used.Add(int64(len(body)) - reserved)
+			reserved = int64(len(body))
 			switch {
 			case readErr != nil:
 				// 交还已读部分和同一个错误，让 handler 按原逻辑返回 413/400。
@@ -138,61 +139,80 @@ func rawCaptureHandler(rc config.RawCaptureConfig, capturer rawCaptureSink) gin.
 			}
 		}
 
-		c.Next()
-
-		rec := &rawcapture.Record{
-			StartedAt:  started,
-			DurationMs: time.Since(started).Milliseconds(),
-			Method:     c.Request.Method,
-			Path:       c.Request.URL.Path,
-			Status:     c.Writer.Status(),
-			GroupID:    groupID,
-			Headers:    captureHeaders(c.Request.Header),
-		}
-		rec.Response, rec.ResponseBytes, rec.ResponseTruncated = cw.captured()
-		rec.ResponseHeaders = captureResponseHeaders(cw.Header())
-		if id, _ := c.Request.Context().Value(ctxkey.ClientRequestID).(string); id != "" {
-			rec.ClientRequestID = id
-		}
-		if apiKey != nil {
-			rec.APIKeyID = apiKey.ID
-			rec.UserID = apiKey.UserID
-		}
-		extra := map[string]any{}
-		if readErr != nil {
-			extra["read_error"] = readErr.Error()
-		}
-		if skipReason != "" {
-			extra["body_skipped"] = skipReason
-		}
-		if cw.budgetExhausted {
-			extra["response_skipped"] = "inflight_budget"
-		}
-		if len(extra) > 0 {
-			rec.Extra = extra
-		}
-		switch {
-		case skipReason != "":
-			rec.BodyBytes = int(max(c.Request.ContentLength, 0))
-			rec.BodyTruncated = true
-		case truncated || readErr != nil:
-			rec.BodyBytes = len(body)
-			rec.BodyTruncated = true
-		default:
-			rec.BodyBytes = len(body)
-			rec.Body = body
-			if model := gjson.GetBytes(body, "model"); model.Exists() {
-				rec.Model = model.String()
+		// 记录在 defer 里构建和入队：handler panic 时（外层 Recovery 会回 500）也要留下原文，
+		// 这正是最需要复现的情况。入队后把 panic 原样抛给外层。
+		defer func() {
+			recovered := recover()
+			defer func() {
+				budget.release(reserved)
+				cw.releaseBudget()
+				if recovered != nil {
+					panic(recovered)
+				}
+			}()
+			status := c.Writer.Status()
+			if recovered != nil && !c.Writer.Written() {
+				status = http.StatusInternalServerError
 			}
-			rec.Stream = gjson.GetBytes(body, "stream").Bool()
-		}
-		if !capturer.Enqueue(rec) {
-			logger.FromContext(c.Request.Context()).Warn("raw_capture.dropped",
-				zap.String("client_request_id", rec.ClientRequestID),
-				zap.Int("body_bytes", rec.BodyBytes),
-				zap.Int64("response_bytes", rec.ResponseBytes),
-				zap.Uint64("dropped_total", capturer.Stats().DroppedFull))
-		}
+			rec := &rawcapture.Record{
+				StartedAt:  started,
+				DurationMs: time.Since(started).Milliseconds(),
+				Method:     c.Request.Method,
+				Path:       c.Request.URL.Path,
+				Status:     status,
+				GroupID:    groupID,
+				Headers:    captureHeaders(c.Request.Header),
+			}
+			rec.Response, rec.ResponseBytes, rec.ResponseTruncated = cw.captured()
+			rec.ResponseHeaders = captureResponseHeaders(cw.Header())
+			if id, _ := c.Request.Context().Value(ctxkey.ClientRequestID).(string); id != "" {
+				rec.ClientRequestID = id
+			}
+			if apiKey != nil {
+				rec.APIKeyID = apiKey.ID
+				rec.UserID = apiKey.UserID
+			}
+			extra := map[string]any{}
+			if readErr != nil {
+				extra["read_error"] = readErr.Error()
+			}
+			if skipReason != "" {
+				extra["body_skipped"] = skipReason
+			}
+			if cw.budgetExhausted {
+				extra["response_skipped"] = "inflight_budget"
+			}
+			if recovered != nil {
+				extra["panic"] = fmt.Sprint(recovered)
+			}
+			if len(extra) > 0 {
+				rec.Extra = extra
+			}
+			switch {
+			case skipReason != "":
+				rec.BodyBytes = int(max(c.Request.ContentLength, 0))
+				rec.BodyTruncated = true
+			case truncated || readErr != nil:
+				rec.BodyBytes = len(body)
+				rec.BodyTruncated = true
+			default:
+				rec.BodyBytes = len(body)
+				rec.Body = body
+				if model := gjson.GetBytes(body, "model"); model.Exists() {
+					rec.Model = model.String()
+				}
+				rec.Stream = gjson.GetBytes(body, "stream").Bool()
+			}
+			if !capturer.Enqueue(rec) {
+				logger.FromContext(c.Request.Context()).Warn("raw_capture.dropped",
+					zap.String("client_request_id", rec.ClientRequestID),
+					zap.Int("body_bytes", rec.BodyBytes),
+					zap.Int64("response_bytes", rec.ResponseBytes),
+					zap.Uint64("dropped_total", capturer.Stats().DroppedFull))
+			}
+		}()
+
+		c.Next()
 	}
 }
 
