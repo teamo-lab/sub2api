@@ -245,13 +245,16 @@ func (c *Capturer) upload(ctx context.Context, rec *Record) {
 
 func (r *Record) payloadBytes() int64 { return int64(len(r.Body) + len(r.Response)) }
 
-// ObjectKey 返回记录的对象路径：<prefix>/<client_request_id>.json.gz。
-// 不按时间分目录，拿到 ID（例如从 new-api 的 logs.upstream_request_id）就能直接定位对象。
-// 没有 ID 的记录落到 <prefix>/unknown/<UTC 日期>/<纳秒时间戳>.json.gz。
+// ObjectKey 返回记录的对象路径：<prefix>/<client_request_id>/<开始时间纳秒>.json.gz。
+// 按 ID 列前缀 <prefix>/<id>/ 就能找到（拿到 new-api logs.upstream_request_id 即可）；
+// 末段时间戳保证复用同一 ID 的请求不会互相覆盖。没有 ID 的落到 <prefix>/unknown/<UTC 日期>/。
 func ObjectKey(prefix string, rec *Record) string {
-	key := sanitizeKeySegment(rec.ClientRequestID) + ".json.gz"
-	if key == ".json.gz" {
+	id := sanitizeKeySegment(rec.ClientRequestID)
+	var key string
+	if id == "" {
 		key = fmt.Sprintf("unknown/%s/%d.json.gz", rec.StartedAt.UTC().Format("2006-01-02"), rec.StartedAt.UnixNano())
+	} else {
+		key = fmt.Sprintf("%s/%d.json.gz", id, rec.StartedAt.UnixNano())
 	}
 	if prefix != "" {
 		key = prefix + "/" + key
