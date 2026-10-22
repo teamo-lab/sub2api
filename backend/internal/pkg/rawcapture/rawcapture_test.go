@@ -64,7 +64,7 @@ func TestUploadEmbedsJSONBodyAndMetadata(t *testing.T) {
 	require.True(t, ok)
 	c.Close(context.Background())
 
-	data, found := p.objects["raw/2026/10/22/09/abc-123.json.gz"]
+	data, found := p.objects["raw/abc-123.json.gz"]
 	require.True(t, found, "keys: %v", p.objects)
 	got := decode(t, data)
 	require.Equal(t, "json", got["body_encoding"])
@@ -143,7 +143,42 @@ func TestEnqueueAfterCloseIsRejected(t *testing.T) {
 func TestObjectKeySanitizesID(t *testing.T) {
 	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.FixedZone("CST", 8*3600))
 	key := ObjectKey("raw", &Record{ClientRequestID: "../a b/c", StartedAt: at})
-	require.Equal(t, "raw/2026/01/01/19/..abc.json.gz", key)
+	require.Equal(t, "raw/..abc.json.gz", key)
 	require.False(t, strings.Contains(key, "/../"))
-	require.True(t, strings.HasPrefix(ObjectKey("", &Record{StartedAt: at}), "2026/01/01/19/unknown-"))
+	require.True(t, strings.HasPrefix(ObjectKey("", &Record{StartedAt: at}), "unknown/2026-01-01/"))
+}
+
+func TestResponseEncodings(t *testing.T) {
+	cases := []struct {
+		name      string
+		resp      []byte
+		truncated bool
+		encoding  string
+		field     string
+	}{
+		{"json", []byte(`{"id":"resp_1","status":"completed"}`), false, "json", "response"},
+		{"sse text", []byte("event: response.completed\ndata: {\"x\":1}\n\n"), false, "text", "response_text"},
+		{"truncated json is text", []byte(`{"id":"resp_1"`), true, "text", "response_text"},
+		{"binary", []byte{0x1f, 0x8b, 0xff, 0x00}, false, "base64", "response_base64"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &fakePutter{}
+			c := newWithClient(Options{Bucket: "b"}, p, nil)
+			require.True(t, c.Enqueue(&Record{ClientRequestID: "r", StartedAt: time.Now(), Body: []byte("{}"),
+				Response: tc.resp, ResponseBytes: int64(len(tc.resp)), ResponseTruncated: tc.truncated}))
+			c.Close(context.Background())
+			got := decode(t, p.objects["r.json.gz"])
+			require.Equal(t, tc.encoding, got["response_encoding"])
+			require.NotNil(t, got[tc.field])
+		})
+	}
+}
+
+func TestQueueBytesCountResponse(t *testing.T) {
+	p := &fakePutter{block: make(chan struct{})}
+	c := newWithClient(Options{Bucket: "b", Workers: 1, MaxQueueBytes: 10}, p, nil)
+	require.False(t, c.Enqueue(&Record{ClientRequestID: "big", StartedAt: time.Now(), Body: []byte("123456"), Response: []byte("123456")}))
+	close(p.block)
+	c.Close(context.Background())
 }

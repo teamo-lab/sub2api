@@ -150,3 +150,53 @@ func TestClientRequestIDDoesNotExposeOneAPIHeaderByDefault(t *testing.T) {
 	require.NotEmpty(t, w.Header().Get("X-Client-Request-ID"))
 	require.Empty(t, w.Header().Get("X-Oneapi-Request-Id"))
 }
+
+func TestRawCaptureRecordsJSONResponse(t *testing.T) {
+	sink := &fakeRawSink{}
+	r := newRawCaptureRouter(config.RawCaptureConfig{MaxBodyBytes: 1 << 20, MaxResponseBytes: 1 << 20}, sink, 5, func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"id": "resp_1", "status": "completed"})
+	})
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString("{}")))
+	require.Len(t, sink.recs, 1)
+	rec := sink.recs[0]
+	require.Equal(t, w.Body.String(), string(rec.Response))
+	require.Equal(t, int64(w.Body.Len()), rec.ResponseBytes)
+	require.False(t, rec.ResponseTruncated)
+	require.Contains(t, rec.ResponseHeaders["Content-Type"], "application/json")
+	require.Equal(t, rec.ClientRequestID, rec.ResponseHeaders["X-Oneapi-Request-Id"])
+}
+
+func TestRawCaptureStreamKeepsHeadAndTailAndStillFlushes(t *testing.T) {
+	sink := &fakeRawSink{}
+	r := newRawCaptureRouter(config.RawCaptureConfig{MaxBodyBytes: 1 << 20, MaxResponseBytes: 20}, sink, 5, func(c *gin.Context) {
+		c.Header("Content-Type", "text/event-stream")
+		for _, chunk := range []string{"AAAAAAAAAA", "BBBBBBBBBB", "CCCCCCCCCC", "DDDDDDDDDD", "EEEEEEEEEE"} {
+			_, _ = c.Writer.WriteString(chunk)
+			c.Writer.Flush()
+		}
+	})
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString("{}")))
+	require.True(t, w.Flushed)
+	require.Equal(t, 50, w.Body.Len())
+	rec := sink.recs[0]
+	require.Equal(t, int64(50), rec.ResponseBytes)
+	require.True(t, rec.ResponseTruncated)
+	require.Equal(t, "AAAAAAAAAAEEEEEEEEEE", string(rec.Response))
+}
+
+func TestCaptureWriterTailTrimAcrossManySmallWrites(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	cw := newCaptureWriter(c.Writer, 8)
+	for i := 0; i < 100; i++ {
+		_, _ = cw.Write([]byte{byte('0' + i%10)})
+	}
+	got, total, truncated := cw.captured()
+	require.Equal(t, int64(100), total)
+	require.True(t, truncated)
+	require.Equal(t, "01236789", string(got))
+	require.Equal(t, 100, w.Body.Len())
+}
