@@ -1030,6 +1030,9 @@ type RawCaptureConfig struct {
 	MaxBodyBytes int64 `mapstructure:"max_body_bytes"`
 	// MaxResponseBytes 响应原文保留上限，超过时保留开头和结尾各一半。
 	MaxResponseBytes int64 `mapstructure:"max_response_bytes"`
+	// MaxInflightBytes 限制已读进内存、尚未交给上传队列的原文总字节（请求体 + 响应副本），
+	// 超过时新请求只记元数据，响应停止复制。
+	MaxInflightBytes int64 `mapstructure:"max_inflight_bytes"`
 	QueueSize        int   `mapstructure:"queue_size"`
 	MaxQueueBytes    int64 `mapstructure:"max_queue_bytes"`
 	Workers          int   `mapstructure:"workers"`
@@ -2536,6 +2539,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.raw_capture.force_path_style", false)
 	viper.SetDefault("gateway.raw_capture.max_body_bytes", int64(64<<20))
 	viper.SetDefault("gateway.raw_capture.max_response_bytes", int64(16<<20))
+	viper.SetDefault("gateway.raw_capture.max_inflight_bytes", int64(1<<30))
 	viper.SetDefault("gateway.raw_capture.queue_size", 256)
 	viper.SetDefault("gateway.raw_capture.max_queue_bytes", int64(512<<20))
 	viper.SetDefault("gateway.raw_capture.workers", 4)
@@ -3504,8 +3508,8 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("gateway.raw_capture.group_ids must contain positive group IDs")
 			}
 		}
-		if rc.MaxBodyBytes <= 0 || rc.MaxResponseBytes <= 0 || rc.QueueSize <= 0 || rc.MaxQueueBytes <= 0 || rc.Workers <= 0 || rc.UploadTimeoutSeconds <= 0 {
-			return fmt.Errorf("gateway.raw_capture max_body_bytes/max_response_bytes/queue_size/max_queue_bytes/workers/upload_timeout_seconds must be positive")
+		if rc.MaxBodyBytes <= 0 || rc.MaxResponseBytes <= 0 || rc.MaxInflightBytes <= 0 || rc.QueueSize <= 0 || rc.MaxQueueBytes <= 0 || rc.Workers <= 0 || rc.UploadTimeoutSeconds <= 0 {
+			return fmt.Errorf("gateway.raw_capture max_body_bytes/max_response_bytes/max_inflight_bytes/queue_size/max_queue_bytes/workers/upload_timeout_seconds must be positive")
 		}
 	}
 	if c.Gateway.OpenAIFirstOutputTimeoutSeconds < 0 || c.Gateway.OpenAIFirstOutputTimeoutSeconds > 600 ||

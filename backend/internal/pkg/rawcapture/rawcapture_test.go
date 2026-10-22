@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -64,7 +65,7 @@ func TestUploadEmbedsJSONBodyAndMetadata(t *testing.T) {
 	require.True(t, ok)
 	c.Close(context.Background())
 
-	data, found := p.objects["raw/abc-123.json.gz"]
+	data, found := p.objects[fmt.Sprintf("raw/abc-123/%d.json.gz", started.UnixNano())]
 	require.True(t, found, "keys: %v", p.objects)
 	got := decode(t, data)
 	require.Equal(t, "json", got["body_encoding"])
@@ -143,7 +144,7 @@ func TestEnqueueAfterCloseIsRejected(t *testing.T) {
 func TestObjectKeySanitizesID(t *testing.T) {
 	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.FixedZone("CST", 8*3600))
 	key := ObjectKey("raw", &Record{ClientRequestID: "../a b/c", StartedAt: at})
-	require.Equal(t, "raw/..abc.json.gz", key)
+	require.Equal(t, fmt.Sprintf("raw/..abc/%d.json.gz", at.UnixNano()), key)
 	require.False(t, strings.Contains(key, "/../"))
 	require.True(t, strings.HasPrefix(ObjectKey("", &Record{StartedAt: at}), "unknown/2026-01-01/"))
 }
@@ -168,10 +169,27 @@ func TestResponseEncodings(t *testing.T) {
 			require.True(t, c.Enqueue(&Record{ClientRequestID: "r", StartedAt: time.Now(), Body: []byte("{}"),
 				Response: tc.resp, ResponseBytes: int64(len(tc.resp)), ResponseTruncated: tc.truncated}))
 			c.Close(context.Background())
-			got := decode(t, p.objects["r.json.gz"])
+			require.Len(t, p.objects, 1)
+			var got map[string]any
+			for _, data := range p.objects {
+				got = decode(t, data)
+			}
 			require.Equal(t, tc.encoding, got["response_encoding"])
 			require.NotNil(t, got[tc.field])
 		})
+	}
+}
+
+func TestSameClientRequestIDDoesNotOverwrite(t *testing.T) {
+	p := &fakePutter{}
+	c := newWithClient(Options{Bucket: "b"}, p, nil)
+	at := time.Now()
+	require.True(t, c.Enqueue(&Record{ClientRequestID: "dup", StartedAt: at, Body: []byte(`{"n":1}`)}))
+	require.True(t, c.Enqueue(&Record{ClientRequestID: "dup", StartedAt: at.Add(time.Nanosecond), Body: []byte(`{"n":2}`)}))
+	c.Close(context.Background())
+	require.Len(t, p.objects, 2)
+	for key := range p.objects {
+		require.True(t, strings.HasPrefix(key, "dup/"), key)
 	}
 }
 

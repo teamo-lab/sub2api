@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -53,7 +54,36 @@ type rawCaptureSink interface {
 	Stats() rawcapture.Stats
 }
 
+// inflightBudget 限制「已读进内存、尚未交给上传队列」的原文总字节（请求体 + 响应副本）。
+// 队列里的记录另有 max_queue_bytes 限额；两者合起来给出原文落盘的内存上界。
+type inflightBudget struct {
+	max  int64
+	used atomic.Int64
+}
+
+func (b *inflightBudget) reserve(n int64) bool {
+	if n <= 0 {
+		return true
+	}
+	if b.used.Add(n) > b.max {
+		b.used.Add(-n)
+		return false
+	}
+	return true
+}
+
+func (b *inflightBudget) release(n int64) {
+	if n > 0 {
+		b.used.Add(-n)
+	}
+}
+
 func rawCaptureHandler(rc config.RawCaptureConfig, capturer rawCaptureSink) gin.HandlerFunc {
+	maxInflight := rc.MaxInflightBytes
+	if maxInflight <= 0 {
+		maxInflight = 1 << 30
+	}
+	budget := &inflightBudget{max: maxInflight}
 	return func(c *gin.Context) {
 		if c.Request == nil || c.Request.Method != http.MethodPost || c.Request.Body == nil {
 			c.Next()
@@ -71,19 +101,41 @@ func rawCaptureHandler(rc config.RawCaptureConfig, capturer rawCaptureSink) gin.
 		}
 
 		started := time.Now()
-		cw := newCaptureWriter(c.Writer, rc.MaxResponseBytes)
-		c.Writer = cw
-		body, readErr := io.ReadAll(io.LimitReader(c.Request.Body, rc.MaxBodyBytes+1))
-		truncated := int64(len(body)) > rc.MaxBodyBytes
+		var skipReason string
+		// 请求体按 Content-Length 预占额度；未知长度按上限预占。超过落盘上限的请求体不读进内存。
+		reserved := c.Request.ContentLength
 		switch {
-		case readErr != nil:
-			// 交还已读部分和同一个错误，让 handler 按原逻辑返回 413/400。
-			c.Request.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), errReader{readErr}))
-		case truncated:
-			// 超过落盘上限：已读部分加剩余流交还 handler，原文只记元数据。
-			c.Request.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), c.Request.Body))
-		default:
-			c.Request.Body = io.NopCloser(bytes.NewReader(body))
+		case reserved > rc.MaxBodyBytes:
+			skipReason, reserved = "body_too_large", 0
+		case reserved < 0:
+			reserved = rc.MaxBodyBytes + 1
+		}
+		if skipReason == "" && !budget.reserve(reserved) {
+			skipReason, reserved = "inflight_budget", 0
+		}
+		cw := newCaptureWriter(c.Writer, rc.MaxResponseBytes, budget)
+		c.Writer = cw
+		defer func() {
+			budget.release(reserved)
+			cw.releaseBudget()
+		}()
+
+		var body []byte
+		var readErr error
+		truncated := false
+		if skipReason == "" {
+			body, readErr = io.ReadAll(io.LimitReader(c.Request.Body, rc.MaxBodyBytes+1))
+			truncated = int64(len(body)) > rc.MaxBodyBytes
+			switch {
+			case readErr != nil:
+				// 交还已读部分和同一个错误，让 handler 按原逻辑返回 413/400。
+				c.Request.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), errReader{readErr}))
+			case truncated:
+				// 超过落盘上限：已读部分加剩余流交还 handler，原文只记元数据。
+				c.Request.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), c.Request.Body))
+			default:
+				c.Request.Body = io.NopCloser(bytes.NewReader(body))
+			}
 		}
 
 		c.Next()
@@ -106,13 +158,27 @@ func rawCaptureHandler(rc config.RawCaptureConfig, capturer rawCaptureSink) gin.
 			rec.APIKeyID = apiKey.ID
 			rec.UserID = apiKey.UserID
 		}
+		extra := map[string]any{}
 		if readErr != nil {
-			rec.Extra = map[string]any{"read_error": readErr.Error()}
+			extra["read_error"] = readErr.Error()
 		}
-		if truncated || readErr != nil {
+		if skipReason != "" {
+			extra["body_skipped"] = skipReason
+		}
+		if cw.budgetExhausted {
+			extra["response_skipped"] = "inflight_budget"
+		}
+		if len(extra) > 0 {
+			rec.Extra = extra
+		}
+		switch {
+		case skipReason != "":
+			rec.BodyBytes = int(max(c.Request.ContentLength, 0))
+			rec.BodyTruncated = true
+		case truncated || readErr != nil:
 			rec.BodyBytes = len(body)
 			rec.BodyTruncated = true
-		} else {
+		default:
 			rec.BodyBytes = len(body)
 			rec.Body = body
 			if model := gjson.GetBytes(body, "model"); model.Exists() {
@@ -194,13 +260,25 @@ type captureWriter struct {
 	head  []byte
 	tail  []byte
 	total int64
+	// budget 为 nil 时不受全局在途额度约束。held 是当前从 budget 占用的字节数。
+	budget          *inflightBudget
+	held            int64
+	budgetExhausted bool
 }
 
-func newCaptureWriter(w gin.ResponseWriter, limit int64) *captureWriter {
+func newCaptureWriter(w gin.ResponseWriter, limit int64, budget *inflightBudget) *captureWriter {
 	if limit <= 0 {
 		limit = 16 << 20
 	}
-	return &captureWriter{ResponseWriter: w, limit: limit}
+	return &captureWriter{ResponseWriter: w, limit: limit, budget: budget}
+}
+
+// releaseBudget 归还响应副本占用的在途额度。记录交给队列后由队列字节限额接管。
+func (w *captureWriter) releaseBudget() {
+	if w.budget != nil {
+		w.budget.release(w.held)
+	}
+	w.held = 0
 }
 
 func (w *captureWriter) Write(b []byte) (int, error) {
@@ -223,6 +301,17 @@ func (w *captureWriter) keep(b []byte) {
 		return
 	}
 	w.total += int64(len(b))
+	if w.budgetExhausted {
+		return
+	}
+	if w.budget != nil {
+		if !w.budget.reserve(int64(len(b))) {
+			// 全局额度用完：停止复制，已保留的部分照常落盘并标记截断。
+			w.budgetExhausted = true
+			return
+		}
+		w.held += int64(len(b))
+	}
 	half := int(w.limit / 2)
 	if room := half - len(w.head); room > 0 {
 		take := min(room, len(b))
@@ -235,7 +324,12 @@ func (w *captureWriter) keep(b []byte) {
 	w.tail = append(w.tail, b...)
 	// 摊还裁剪：超过两倍上限才整体搬一次，避免每次写都拷贝。
 	if len(w.tail) > 2*half {
+		dropped := len(w.tail) - half
 		w.tail = append(w.tail[:0:0], w.tail[len(w.tail)-half:]...)
+		if w.budget != nil {
+			w.budget.release(int64(dropped))
+			w.held -= int64(dropped)
+		}
 	}
 }
 

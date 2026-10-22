@@ -268,12 +268,13 @@ gateway:
     endpoint: ""             # e.g. https://cos.na-siliconvalley.myqcloud.com
     region: ""               # e.g. na-siliconvalley
     bucket: ""
-    prefix: "raw"            # objects: <prefix>/<client_request_id>.json.gz (request + response)
+    prefix: "raw"            # objects: <prefix>/<client_request_id>/<start_unix_nano>.json.gz (request + response)
     access_key_id: ""
     secret_access_key: ""
     force_path_style: false
     max_body_bytes: 67108864 # larger bodies keep metadata only
     max_response_bytes: 16777216 # longer responses keep the first and last half
+    max_inflight_bytes: 1073741824 # memory cap for bodies being captured but not yet queued
     queue_size: 256
     max_queue_bytes: 536870912
     workers: 4

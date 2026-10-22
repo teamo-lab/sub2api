@@ -190,7 +190,7 @@ func TestCaptureWriterTailTrimAcrossManySmallWrites(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
-	cw := newCaptureWriter(c.Writer, 8)
+	cw := newCaptureWriter(c.Writer, 8, nil)
 	for i := 0; i < 100; i++ {
 		_, _ = cw.Write([]byte{byte('0' + i%10)})
 	}
@@ -199,4 +199,55 @@ func TestCaptureWriterTailTrimAcrossManySmallWrites(t *testing.T) {
 	require.True(t, truncated)
 	require.Equal(t, "01236789", string(got))
 	require.Equal(t, 100, w.Body.Len())
+}
+
+func TestRawCaptureSkipsBodyWhenContentLengthExceedsLimit(t *testing.T) {
+	sink := &fakeRawSink{}
+	body := bytes.Repeat([]byte("x"), 100)
+	var seen int
+	r := newRawCaptureRouter(config.RawCaptureConfig{MaxBodyBytes: 10, MaxResponseBytes: 1 << 20}, sink, 5, func(c *gin.Context) {
+		b, _ := io.ReadAll(c.Request.Body)
+		seen = len(b)
+		c.Status(http.StatusOK)
+	})
+	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body)))
+	require.Equal(t, 100, seen)
+	require.Len(t, sink.recs, 1)
+	require.True(t, sink.recs[0].BodyTruncated)
+	require.Equal(t, 100, sink.recs[0].BodyBytes)
+	require.Equal(t, "body_too_large", sink.recs[0].Extra["body_skipped"])
+}
+
+func TestRawCaptureInflightBudgetSkipsAndIsReleased(t *testing.T) {
+	sink := &fakeRawSink{}
+	rc := config.RawCaptureConfig{MaxBodyBytes: 1 << 20, MaxResponseBytes: 1 << 20, MaxInflightBytes: 16}
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(ClientRequestIDWithOptions(true))
+	h := rawCaptureHandler(rc, sink)
+	r.Use(h)
+	r.POST("/v1/responses", func(c *gin.Context) {
+		_, _ = io.ReadAll(c.Request.Body)
+		c.String(http.StatusOK, "0123456789abcdefXYZ")
+	})
+	// 第一条：请求体 10 字节占额度，响应只能再复制 6 字节就到上限。
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString("0123456789")))
+	require.Equal(t, "0123456789abcdefXYZ", w.Body.String())
+	require.Len(t, sink.recs, 1)
+	require.Equal(t, "0123456789", string(sink.recs[0].Body))
+	require.Equal(t, "inflight_budget", sink.recs[0].Extra["response_skipped"])
+	require.Equal(t, int64(19), sink.recs[0].ResponseBytes)
+	// 第二条：请求体 20 字节超过额度，只记元数据；额度在上一条结束后已经全部归还。
+	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString("01234567890123456789")))
+	require.Len(t, sink.recs, 2)
+	require.Equal(t, "inflight_budget", sink.recs[1].Extra["body_skipped"])
+	require.Nil(t, sink.recs[1].Body)
+	// 第三条：小请求体又能完整落盘，说明前两条的额度已全部归还、没有泄漏。
+	// 响应是一次写出 19 字节，超过剩余额度，整块不复制（不拆分单次写入）。
+	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString("{}")))
+	require.Len(t, sink.recs, 3)
+	require.Equal(t, "{}", string(sink.recs[2].Body))
+	require.NotContains(t, sink.recs[2].Extra, "body_skipped")
+	require.Equal(t, "inflight_budget", sink.recs[2].Extra["response_skipped"])
 }
