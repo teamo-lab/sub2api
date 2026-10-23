@@ -113,6 +113,14 @@ func (Account) Fields() []ent.Field {
 			SchemaType(map[string]string{dialect.Postgres: "decimal(10,4)"}).
 			Default(1.0),
 
+		// sell_rate_multiplier: 账号售价倍率（可空，>=0）。非空时，由该账号最终服务的请求
+		// 用它代替「用户-分组覆盖 ?? 分组默认」向用户扣费（高峰因子照常叠加）；为空时
+		// 保持分组定价。与 rate_multiplier（成本口径）相互独立。
+		field.Float("sell_rate_multiplier").
+			SchemaType(map[string]string{dialect.Postgres: "decimal(10,4)"}).
+			Optional().
+			Nillable(),
+
 		// status: 账户状态，如 "active", "error", "disabled"
 		field.String("status").
 			MaxLen(20).

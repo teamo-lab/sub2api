@@ -329,6 +329,7 @@ type GrokSSOToOAuthRequest struct {
 	LoadFactor         *int           `json:"load_factor"`
 	Priority           int            `json:"priority"`
 	RateMultiplier     *float64       `json:"rate_multiplier"`
+	SellRateMultiplier *float64       `json:"sell_rate_multiplier"`
 	ExpiresAt          *int64         `json:"expires_at"`
 	AutoPauseOnExpired *bool          `json:"auto_pause_on_expired"`
 }
@@ -441,6 +442,7 @@ func (h *GrokOAuthHandler) createAccountFromSSOToken(ctx context.Context, req Gr
 		LoadFactor:         req.LoadFactor,
 		Priority:           req.Priority,
 		RateMultiplier:     req.RateMultiplier,
+		SellRateMultiplier: req.SellRateMultiplier,
 		GroupIDs:           append([]int64(nil), req.GroupIDs...),
 		ExpiresAt:          expiresAt,
 		AutoPauseOnExpired: autoPauseOnExpired,

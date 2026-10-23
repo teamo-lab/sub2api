@@ -54,6 +54,8 @@ type ProfitPreviewAccountVerdict struct {
 	Warnings    []string `json:"warnings,omitempty"`
 	// RejectedUnderMinD 表示账号在最低有效 D（用户覆盖最坏口径）下会被排除。
 	RejectedUnderMinD bool `json:"rejected_under_min_d,omitempty"`
+	// SellRate 为账号售价倍率（非空时该账号的 D 按它计算，不受分组/用户覆盖影响）。
+	SellRate *float64 `json:"sell_rate,omitempty"`
 	// SupportedModels 为该账号支持的主力模型子集。
 	SupportedModels []string `json:"supported_models,omitempty"`
 }
@@ -126,7 +128,13 @@ func PreviewProfitAdmission(inputs []ProfitPreviewGroupInput, evalAt time.Time) 
 			if account == nil {
 				continue
 			}
-			verdict := previewAccountProfitAdmission(account, effectiveGate, thresholdDefault, thresholdMinD, evalAt)
+			accountThresholdDefault, accountThresholdMinD := thresholdDefault, thresholdMinD
+			if sell, ok := account.SellRateOverride(); ok {
+				// 账号售价覆盖分组与全部用户覆盖：两档 D 都按该账号售价计（与线上 thresholdFor 同源）。
+				accountThresholdDefault = clampProfitControlThreshold(sell * peak * (1 - deduction))
+				accountThresholdMinD = accountThresholdDefault
+			}
+			verdict := previewAccountProfitAdmission(account, effectiveGate, accountThresholdDefault, accountThresholdMinD, evalAt)
 			admittedDefault := verdict.Class == ProfitPreviewClassAdmitted
 			admittedMinD := admittedDefault && !verdict.RejectedUnderMinD
 			for _, model := range in.Models {
@@ -177,6 +185,9 @@ func previewAccountProfitAdmission(
 	if validRate {
 		rate := *account.RateMultiplier
 		verdict.AccountRate = &rate
+	}
+	if sell, ok := account.SellRateOverride(); ok {
+		verdict.SellRate = &sell
 	}
 	switch {
 	case !effectiveGate:

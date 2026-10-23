@@ -201,6 +201,10 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	if apiKey.GroupID != nil && apiKey.Group != nil {
 		multiplier = s.ResolveUserGroupRateMultiplier(ctx, user.ID, *apiKey.GroupID, apiKey.Group.RateMultiplier)
 	}
+	// 账号售价倍率（非空时）直接覆盖上面的分组/用户-分组倍率：按最终服务本请求的账号计价
+	//（failover 换号后 account 即最终成功账号；失败跳不进入 RecordUsage，不计费）。
+	// 取被调度账号（影子账号取自身配置），与成本口径 account.BillingRateMultiplier() 同源。
+	multiplier = account.ResolveSellRateMultiplier(multiplier)
 	// token 倍率叠加高峰因子（token 计费含图片 token，图片按次倍率不受影响）。
 	// 高峰因子按请求级 PricingAt 现算（与利润门 D 同源同刻，跨峰谷请求不中途
 	// 变价）；未装配 PricingAt 的路径回退记录时刻，保持既有行为。不并入上面的
