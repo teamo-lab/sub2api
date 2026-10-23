@@ -434,6 +434,9 @@ func openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx context.Con
 	if requestedModel != "" && !account.IsModelSupported(requestedModel) {
 		return "model_not_supported"
 	}
+	if openAIAccountRejectsRequestBodySize(ctx, account) {
+		return openAIAccountRequestBodyTooLargeReason
+	}
 	if !account.SupportsOpenAIEndpointCapability(requiredCapability) {
 		if account.IsGrok() && requiredCapability == OpenAIEndpointCapabilityGrokMediaGeneration {
 			_, reason := account.GrokMediaGenerationEligibility()

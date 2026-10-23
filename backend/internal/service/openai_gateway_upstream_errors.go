@@ -310,13 +310,7 @@ func newOpenAIUpstreamFailoverError(
 		return failoverErr
 	}
 	if isOpenAIRequestBodyTooLargeError(statusCode, upstreamMsg, responseBody) {
-		failoverErr.RetryableOnSameAccount = false
-		failoverErr.RequestScopedTransient = false
-		failoverErr.Scope = GatewayFailureScopeAccount
-		failoverErr.Reason = openAIRequestBodyTooLargeReason
-		failoverErr.NextAccountAction = NextAccountRetry
-		failoverErr.ClientStatusCode = http.StatusRequestEntityTooLarge
-		failoverErr.ClientMessage = OpenAIRequestBodyTooLargeClientMessage
+		markOpenAIRequestBodyTooLarge(failoverErr)
 	}
 	if isOpenAIHTTPUpstreamAccessStateError(statusCode, upstreamMsg, responseBody) {
 		failoverErr.RetryableOnSameAccount = false
@@ -600,7 +594,12 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 		)
 	}
 
-	if isOpenAIRequestBodyTooLargeError(resp.StatusCode, upstreamMsg, body) {
+	requestBytes := openAIInboundRequestBodyBytesFromContext(ctx)
+	if n := int64(len(requestBody)); n > requestBytes {
+		requestBytes = n
+	}
+	newAPIBodyLimit := isNewAPIBodyParseLimitRejection(resp.StatusCode, upstreamMsg, requestBytes)
+	if newAPIBodyLimit || isOpenAIRequestBodyTooLargeError(resp.StatusCode, upstreamMsg, body) {
 		appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 			ProxyID:            opsUpstreamProxyID(account),
 			ProxyName:          opsUpstreamProxyName(account),
@@ -614,6 +613,12 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 			Message:            upstreamMsg,
 			Detail:             upstreamDetail,
 		})
+		if newAPIBodyLimit {
+			// 请求体超过这个号的上限，跟账号健康无关：不冷却、不计入账号失败。
+			failoverErr := newOpenAIUpstreamFailoverError(resp.StatusCode, resp.Header, body, upstreamMsg, false)
+			markOpenAIRequestBodyTooLarge(failoverErr)
+			return nil, failoverErr
+		}
 		s.handleOpenAIAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, body, requestedModel...)
 		return nil, newOpenAIUpstreamFailoverError(
 			resp.StatusCode,
