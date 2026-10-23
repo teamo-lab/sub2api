@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
@@ -209,7 +210,9 @@ func ProvideAccountHandler(
 	rpmCache service.RPMCache,
 	tokenCacheInvalidator service.TokenCacheInvalidator,
 	grokQuotaService *service.GrokQuotaService,
+	cfg *config.Config,
 ) *AccountHandler {
+	service.ConfigureAdminServiceFromConfig(adminService, cfg)
 	handler := NewAccountHandler(
 		adminService,
 		oauthService,

@@ -559,6 +559,10 @@ gateway:
   # Max bytes to log from upstream error body
   # 记录上游错误响应体的最大字节数
   log_upstream_error_body_max_bytes: 2048
+  # Require extra.upstream_request_id_header on OpenAI API-key accounts created/updated via admin (default: off)
+  # 管理端新建或更新 OpenAI API Key 账号时必须配置 extra.upstream_request_id_header（默认：关闭）
+  # env: GATEWAY_REQUIRE_UPSTREAM_REQUEST_ID_HEADER
+  require_upstream_request_id_header: false
   # Auto inject anthropic-beta header for API-key accounts when needed (default: off)
   # 需要时自动为 API-key 账户注入 anthropic-beta 头（默认：关闭）
   inject_beta_for_apikey: false

@@ -40,6 +40,36 @@ func UpstreamRequestIDFromHeaders(account *Account, h http.Header) string {
 	return strings.TrimSpace(h.Get(name))
 }
 
+// opsUpstreamRequestID 给 ops 上游错误事件（含换号失败的每一跳）取直接上游的请求标识：
+// 优先账户指定的头；没配或拿不到时退回 x-request-id，再依次尝试 fallbackHeaders。
+func opsUpstreamRequestID(account *Account, h http.Header, fallbackHeaders ...string) string {
+	if len(h) == 0 {
+		return ""
+	}
+	if id := UpstreamRequestIDFromHeaders(account, h); id != "" {
+		return id
+	}
+	if id := strings.TrimSpace(h.Get("x-request-id")); id != "" {
+		return id
+	}
+	for _, name := range fallbackHeaders {
+		if id := strings.TrimSpace(h.Get(name)); id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+// opsUpstreamCFRay 在拿不到账户指定的业务请求标识时返回响应的 CF-Ray。
+// Cloudflare 边缘直接返回的错误（403 1010、524 等）只带 CF-Ray，没有业务 ID；
+// 退回读到的 x-request-id 也可能是链路里别处的标识，所以此时同样保留 CF-Ray。
+func opsUpstreamCFRay(account *Account, h http.Header) string {
+	if len(h) == 0 || UpstreamRequestIDFromHeaders(account, h) != "" {
+		return ""
+	}
+	return strings.TrimSpace(h.Get("cf-ray"))
+}
+
 // usageUpstreamRequestIDPtr 生成落库到 usage_logs.upstream_request_id 的值。
 // WS 轮次没有 HTTP 响应头，保持 nil；超长时截断到列宽而不是让整条用量行失败。
 func usageUpstreamRequestIDPtr(account *Account, h http.Header, wsMode bool) *string {
@@ -60,6 +90,26 @@ func usageUpstreamRequestIDPtr(account *Account, h http.Header, wsMode bool) *st
 		return nil
 	}
 	return &id
+}
+
+// upstreamRequestIDHeaderRequiredMessage 说明怎么为账户选上游请求标识头。
+const upstreamRequestIDHeaderRequiredMessage = "extra.upstream_request_id_header is required for OpenAI API key accounts on this deployment " +
+	"(gateway.require_upstream_request_id_header). Set it to the response header in which the direct upstream returns its own request ID " +
+	"(check once with curl -sD - against the upstream): X-Oneapi-Request-Id for new-api forks such as zero.cat; " +
+	"X-Request-Id for stock new-api v1.6.x; X-Client-Request-Id for another Sub2API station (its X-Request-Id is a chain ID, not its own); " +
+	"x-request-id for api.openai.com"
+
+// RequireUpstreamRequestIDHeaderExtra 在 gateway.require_upstream_request_id_header 打开时调用：
+// OpenAI API Key 账号的 extra 必须带非空的上游请求标识头名，否则换号失败的每一跳都查不到上游 ID。
+// 其它平台和类型不受影响。
+func RequireUpstreamRequestIDHeaderExtra(platform, accountType string, extra map[string]any) error {
+	if platform != PlatformOpenAI || accountType != AccountTypeAPIKey {
+		return nil
+	}
+	if name, _ := extra[AccountExtraUpstreamRequestIDHeader].(string); strings.TrimSpace(name) != "" {
+		return nil
+	}
+	return infraerrors.BadRequest("UPSTREAM_REQUEST_ID_HEADER_REQUIRED", upstreamRequestIDHeaderRequiredMessage)
 }
 
 // ValidateUpstreamRequestIDHeaderExtra 校验并规范化 extra 中的上游请求标识头名：

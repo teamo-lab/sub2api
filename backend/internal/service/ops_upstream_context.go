@@ -420,6 +420,9 @@ type OpsUpstreamErrorEvent struct {
 	// Outcome
 	UpstreamStatusCode int    `json:"upstream_status_code,omitempty"`
 	UpstreamRequestID  string `json:"upstream_request_id,omitempty"`
+	// UpstreamCFRay 是直接上游经 Cloudflare 返回时的 CF-Ray。只在拿不到账户指定的
+	// 业务请求标识时记录（如 Cloudflare 边缘直接回的 403 1010、524），用于向上游定位。
+	UpstreamCFRay string `json:"upstream_cf_ray,omitempty"`
 
 	// UpstreamURL is the actual upstream URL that was called (host + path, query/fragment stripped).
 	// Helps debug 404/routing errors by showing which endpoint was targeted.
@@ -467,6 +470,7 @@ func appendOpsUpstreamError(c *gin.Context, ev OpsUpstreamErrorEvent) {
 	ev.Platform = strings.TrimSpace(ev.Platform)
 	normalizeOpsUpstreamProxyAttribution(&ev)
 	ev.UpstreamRequestID = strings.TrimSpace(ev.UpstreamRequestID)
+	ev.UpstreamCFRay = strings.TrimSpace(ev.UpstreamCFRay)
 	ev.UpstreamResponseBody = strings.TrimSpace(ev.UpstreamResponseBody)
 	ev.Kind = strings.TrimSpace(ev.Kind)
 	ev.Stage = strings.TrimSpace(ev.Stage)

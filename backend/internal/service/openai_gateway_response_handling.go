@@ -285,7 +285,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	pendingAnswerOutput := false
 	answerOutputReached := func() bool { return answerOutputStarted || pendingAnswerOutput }
 	codexFailureTerminal := account != nil && account.IsOpenAIOAuthLike()
-	upstreamRequestID := strings.TrimSpace(resp.Header.Get("x-request-id"))
+	upstreamRequestID := opsUpstreamRequestID(account, resp.Header)
 	var streamEarlyErr error
 	terminalFailurePending := false
 	failureDelivered := false
