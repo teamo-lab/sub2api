@@ -64,8 +64,8 @@ select coalesce(json_agg(t order by t.created_at), '[]'::json) from (
 OPS_SQL = """
 select coalesce(json_agg(t order by t.created_at), '[]'::json) from (
   select o.id, o.created_at, o.request_id, o.account_id, a.name as account_name,
-         o.status_code, o.upstream_status_code, o.error_phase, o.error_type, o.error_message,
-         o.upstream_error_detail, o.model, o.request_path, o.stream, o.duration_ms,
+         o.status_code, o.upstream_status_code, o.error_phase, o.error_type, o.error_source, o.error_message,
+         o.upstream_error_message, o.upstream_error_detail, left(o.error_body, 2000) as error_body, o.model, o.request_path, o.stream, o.duration_ms,
          o.time_to_first_token_ms, o.routing_latency_ms, o.upstream_latency_ms,
          o.deployment_slot, o.upstream_errors::json as upstream_errors
   from ops_error_logs o left join accounts a on a.id = o.account_id
@@ -78,29 +78,60 @@ class TraceError(RuntimeError):
     pass
 
 
+# Postgres json 里的时间（2026-10-23T06:20:37.34544+00:00，小数位数不定）和 COS 的 LastModified
+#（2026-10-23T06:14:49.000Z）。Python 3.10 的 fromisoformat 只认 3 或 6 位小数、不认 Z，所以自己解析。
+TIMESTAMP_RE = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?\s*(Z|[+-]\d{2}(?::?\d{2})?)?$"
+)
+
+
+def parse_time(value: Any) -> dt.datetime | None:
+    """解析 Postgres / COS 时间串为带时区的 datetime；没带时区的按 UTC。"""
+    m = TIMESTAMP_RE.match(str(value or "").strip())
+    if not m:
+        return None
+    year, month, day, hour, minute, second = (int(x) for x in m.group(1, 2, 3, 4, 5, 6))
+    micro = int((m.group(7) or "0")[:6].ljust(6, "0"))
+    tz = m.group(8)
+    if not tz or tz == "Z":
+        tzinfo = dt.timezone.utc
+    else:
+        sign = -1 if tz[0] == "-" else 1
+        digits = tz[1:].replace(":", "")
+        offset = dt.timedelta(hours=int(digits[:2]), minutes=int(digits[2:4] or 0))
+        tzinfo = dt.timezone(sign * offset)
+    return dt.datetime(year, month, day, hour, minute, second, micro, tzinfo)
+
+
 def fmt_time(value: Any) -> str:
-    """把 at_unix_ms 或 Postgres 时间串格式化成 UTC+8。"""
+    """把 at_unix_ms、Postgres 或 COS 时间串统一格式化成 UTC+8。"""
     if value is None or value == "":
         return "-"
     if isinstance(value, (int, float)):
         return dt.datetime.fromtimestamp(value / 1000, DISPLAY_TZ).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-    try:
-        parsed = dt.datetime.fromisoformat(str(value))
-    except ValueError:
+    parsed = parse_time(value)
+    if parsed is None:
         return str(value)
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=dt.timezone.utc)
     return parsed.astimezone(DISPLAY_TZ).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
 def parse_unix_ms(value: Any) -> int | None:
-    try:
-        parsed = dt.datetime.fromisoformat(str(value))
-    except (TypeError, ValueError):
+    parsed = parse_time(value)
+    if parsed is None:
         return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=dt.timezone.utc)
     return int(parsed.timestamp() * 1000)
+
+
+ERROR_CODE_RE = re.compile(r'"code"\s*:\s*"([^"]+)"')
+
+
+def ops_row_summary(row: dict) -> str:
+    """ops 行本身的错误摘要：上游错误信息优先，再带上返回给客户端的错误码（如 stream_read_error）。"""
+    message = (row.get("upstream_error_message") or row.get("error_message") or "").strip()
+    match = ERROR_CODE_RE.search(row.get("error_body") or "")
+    if match and match.group(1) not in message:
+        message = f"{message} [{match.group(1)}]" if message else match.group(1)
+    return message[:300]
 
 
 def fmt_ms(value: Any) -> str:
@@ -278,10 +309,31 @@ def fetch_cos(sv1: SV1, case_id: str, args: argparse.Namespace) -> list[dict]:
 
 
 def build_hops(usage: list[dict], ops: list[dict]) -> list[dict]:
-    """按时间排出每一跳：ops upstream_errors 里的失败，加上 usage_logs 的最终成功。"""
+    """按时间排出每一跳：ops upstream_errors 里的失败，加上 usage_logs 的最终成功。
+
+    ops 行没有 upstream_errors 但带 account_id 时（老版本的流内断开就是这样），用 ops 行本身补一跳，
+    不然这个号在「各跳」里就看不到了。"""
     hops: list[dict] = []
     seen = set()
     for row in ops:
+        if not row.get("upstream_errors") and row.get("account_id"):
+            hops.append(
+                {
+                    "result": "failed",
+                    "source": "ops_row",
+                    "at": fmt_time(row.get("created_at")),
+                    "at_unix_ms": parse_unix_ms(row.get("created_at")),
+                    "account_id": row.get("account_id"),
+                    "account_name": row.get("account_name"),
+                    "status": row.get("upstream_status_code") or row.get("status_code"),
+                    "kind": row.get("error_type") or row.get("error_phase") or "",
+                    "upstream_request_id": "",
+                    "upstream_cf_ray": "",
+                    "message": ops_row_summary(row),
+                    "upstream_url": "",
+                }
+            )
+            continue
         for ev in row.get("upstream_errors") or []:
             key = (ev.get("at_unix_ms"), ev.get("account_id"), ev.get("upstream_status_code"), ev.get("kind"))
             if key in seen:
@@ -354,7 +406,7 @@ def print_report(report: dict) -> None:
     if isinstance(cos, list):
         starts = [obj["started_at_unix_ms"] for obj in cos if obj.get("started_at_unix_ms")]
         started_ms = min(starts) if starts else None
-    print("\n各跳（按时间）")
+    print("\n各跳（按时间，UTC+8）")
     if started_ms:
         print(f"  0. {fmt_time(started_ms)}  请求进入 Sub2API（COS 原文的开始时间）")
     if not report["hops"]:
@@ -373,6 +425,8 @@ def print_report(report: dict) -> None:
             line = f"  {i}. {hop['at']}  {who}  {hop.get('status')} {hop.get('kind') or ''}  {ids}"
             if hop.get("message"):
                 line += f"  | {hop['message']}"
+            if hop.get("source") == "ops_row":
+                line += "  （取自 ops 行本身：没有 upstream_errors，上游 ID 没记）"
         print(line)
     print("\nCOS 原文")
     if cos is None:
@@ -383,7 +437,8 @@ def print_report(report: dict) -> None:
         print(f"  {report['cos_prefix']} 下没有对象（未开落盘、超过 30 天已过期，或 ID 不对）")
     else:
         for obj in cos:
-            print(f"  {obj['url']}  {obj['size']} 字节  {obj.get('last_modified') or ''}")
+            modified = f"写入 {fmt_time(obj['last_modified'])}" if obj.get("last_modified") else ""
+            print(f"  {obj['url']}  {obj['size']} 字节  {modified}")
             if obj.get("downloaded_to"):
                 print(f"    已解压到 {obj['downloaded_to']}")
                 print(f"    {json.dumps(obj.get('summary') or {}, ensure_ascii=False)}")

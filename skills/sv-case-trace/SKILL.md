@@ -31,7 +31,9 @@ uv run sv_case_trace.py <newapi request_id> --newapi # 输入是 NewAPI 的 requ
 
 ## 怎么读结果
 
-- 「各跳」按时间排：`0.` 是请求进入 Sub2API 的时间（取自 COS 对象名），每跳带相对耗时。失败跳来自 `upstream_errors`，最后一跳 `200 成功` 来自 `usage_logs`。
+- 「各跳」按时间排，时间一律是 UTC+8：`0.` 是请求进入 Sub2API 的时间（取自 COS 对象名），每跳带相对耗时。失败跳来自 `upstream_errors`，最后一跳 `200 成功` 来自 `usage_logs`。
+- 失败跳的类型：`failover` 是换号前的失败，`stream_error` 是客户端已经收到输出之后上游断流（HTTP/2 GOAWAY、连接 reset、没收到终止事件就结束），这时没法再换号，请求以 502 结束。
+- ops 行没有 `upstream_errors`、但带了 `account_id` 时，用 ops 行本身补一跳，后面标「取自 ops 行本身」，上游 ID 为空。老版本的流内断开就是这样（例如 case 137dbcae）；`stream_error` 事件上线后，这类请求会改由事件记下上游 ID。
 - 上游 ID 读的是账号 `extra.upstream_request_id_header` 指定的头（Zero 是 `X-Oneapi-Request-Id`，new-api v1.6.x 是 `X-Request-Id`，Sub2API 站是 `X-Client-Request-Id`）。失败跳在该头缺失时退回 `x-request-id`，同时记 `cf-ray`。Cloudflare 边缘直接返回的错误（403 `error code: 1010`、524）只有 cf-ray。新版本上线前的失败跳一律只读 `x-request-id`，所以老 case 里常常是空的。
 - 客户端状态 200、ops 里又有记录，说明中途换过号、最后成功了（`Recovered upstream error`）。只有 ops、没有 usage，说明请求最终失败。
 - 原文是网关写给客户端的最终请求和响应，不含中间失败跳的上游响应。失败跳的上游报错摘要看「各跳」里 `|` 后面的内容。

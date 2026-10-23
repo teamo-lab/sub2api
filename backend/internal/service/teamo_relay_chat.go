@@ -131,7 +131,7 @@ func (s *OpenAIGatewayService) scanCCStreamWithRelay(
 		!errors.Is(st.Err, context.Canceled) && !errors.Is(st.Err, context.DeadlineExceeded) {
 		// Explicit upstream verdicts are already classified by Sub policy.
 		if len(observer.Failure) == 0 {
-			st.Err = newOpenAIRawStreamTruncatedFailoverError(c, account, requestID, st.Err)
+			st.Err = newOpenAIRawStreamTruncatedFailoverError(c, account, requestID, st.Err, resp.Header)
 		}
 	}
 	st.Committed = gate.Committed()
