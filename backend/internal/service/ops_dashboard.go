@@ -71,9 +71,9 @@ func (s *OpsService) GetDashboardOverview(ctx context.Context, filter *OpsDashbo
 }
 
 func (s *OpsService) resolveOpsFilterQueryMode(ctx context.Context, filter *OpsDashboardFilter) OpsQueryMode {
-	// Account is not a dimension in the ops rollup tables. Falling back to raw
-	// keeps account-scoped results correct even when the caller requests preagg.
-	if filter != nil && filter.AccountID != nil && *filter.AccountID > 0 {
+	// Account and user are not dimensions in the ops rollup tables. Falling back to raw
+	// keeps account/user-scoped results correct even when the caller requests preagg.
+	if filter != nil && ((filter.AccountID != nil && *filter.AccountID > 0) || (filter.UserID != nil && *filter.UserID > 0)) {
 		return OpsQueryModeRaw
 	}
 	if filter == nil {

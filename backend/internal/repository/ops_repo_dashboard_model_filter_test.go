@@ -40,3 +40,21 @@ func TestDashboardWhereBuildersIncludeAccount(t *testing.T) {
 		t.Fatalf("error account filter missing: where=%q args=%v", errorWhere, errorArgs)
 	}
 }
+
+func TestDashboardWhereBuildersIncludeUser(t *testing.T) {
+	start := time.Date(2026, 10, 23, 8, 0, 0, 0, time.UTC)
+	end := start.Add(time.Hour)
+	userID := int64(7)
+	groupID := int64(62)
+	filter := &service.OpsDashboardFilter{GroupID: &groupID, UserID: &userID}
+
+	_, usageWhere, usageArgs, next := buildUsageWhere(filter, start, end, 1)
+	if !strings.Contains(usageWhere, "ul.group_id = $3") || !strings.Contains(usageWhere, "ul.user_id = $4") || len(usageArgs) != 4 || usageArgs[3] != userID {
+		t.Fatalf("usage user filter missing: where=%q args=%v", usageWhere, usageArgs)
+	}
+
+	errorWhere, errorArgs, _ := buildErrorWhere(filter, start, end, next)
+	if !strings.Contains(errorWhere, "user_id = $8") || len(errorArgs) != 4 || errorArgs[3] != userID {
+		t.Fatalf("error user filter missing: where=%q args=%v", errorWhere, errorArgs)
+	}
+}

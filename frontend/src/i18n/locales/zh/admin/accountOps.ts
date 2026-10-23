@@ -1,14 +1,19 @@
 export default {
   accountOps: {
     title: '账号监控',
-    description: '按上游账号或分组查看请求质量、吞吐与告警',
+    description: '按用户、分组或上游账号查看请求质量、吞吐与告警',
+    selectUser: '选择用户',
+    selectUserOptional: '选择用户（可选）',
+    noUserFilter: '不限定用户',
+    searchUser: '搜索邮箱、用户名或 ID',
+    userTag: '用户 #{id}',
     selectGroup: '选择分组',
     noGroupFilter: '不限定分组',
     selectAccount: '选择账号',
     selectAccountOptional: '选择账号（可选）',
     noAccountFilter: '不限定账号',
     searchAccount: '搜索账号名称或 ID',
-    selectAccountHint: '请选择一个账号或分组以加载监控数据',
+    selectAccountHint: '请选择一个用户、分组或账号以加载监控数据',
     accountRequired: '账号监控必须指定一个账号',
     model: '模型',
     timeRange: '时间范围',
@@ -27,7 +32,7 @@ export default {
       successes: '成功 {count}', tokens: 'Token {count}', errors: '错误 {count}', samples: '样本 {count}', excluded: '排除 429/529',
       percentile: 'P95 {p95} · 平均 {avg}'
     },
-    alertScopeHint: '仅展示符合当前账号和分组条件的告警事件。',
+    alertScopeHint: '仅展示符合当前账号和分组条件的告警事件（告警不区分用户）。',
     loadFailed: '账号监控数据加载失败'
   }
 }

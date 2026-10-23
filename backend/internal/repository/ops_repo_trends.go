@@ -200,17 +200,19 @@ ORDER BY bucket ASC`
 	}
 	groupID := (*int64)(nil)
 	accountID := (*int64)(nil)
+	userID := (*int64)(nil)
 	model := ""
 	if filter != nil {
 		groupID = filter.GroupID
 		accountID = filter.AccountID
+		userID = filter.UserID
 		model = strings.TrimSpace(filter.Model)
 	}
 
 	// Drilldown helpers:
 	// - No platform/group: totals by platform
 	// - Platform selected but no group: top groups in that platform
-	accountScoped := accountID != nil && *accountID > 0
+	accountScoped := (accountID != nil && *accountID > 0) || (userID != nil && *userID > 0)
 	if !accountScoped && model == "" && platform == "" && (groupID == nil || *groupID <= 0) {
 		items, err := r.getThroughputBreakdownByPlatform(ctx, start, end)
 		if err != nil {

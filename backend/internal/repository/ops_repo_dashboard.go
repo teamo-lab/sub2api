@@ -130,6 +130,7 @@ func (r *opsRepository) getDashboardOverviewRaw(ctx context.Context, filter *ser
 		Platform:  strings.TrimSpace(filter.Platform),
 		GroupID:   filter.GroupID,
 		AccountID: filter.AccountID,
+		UserID:    filter.UserID,
 
 		SuccessCount:         successCount,
 		ErrorCountTotal:      errorTotal,
@@ -334,6 +335,7 @@ func (r *opsRepository) getDashboardOverviewPreaggregated(ctx context.Context, f
 		Platform:  strings.TrimSpace(filter.Platform),
 		GroupID:   filter.GroupID,
 		AccountID: filter.AccountID,
+		UserID:    filter.UserID,
 
 		SuccessCount:         successCount,
 		ErrorCountTotal:      errorTotal,
@@ -1002,11 +1004,13 @@ func buildUsageWhere(filter *service.OpsDashboardFilter, start, end time.Time, s
 	platform := ""
 	groupID := (*int64)(nil)
 	accountID := (*int64)(nil)
+	userID := (*int64)(nil)
 	model := ""
 	if filter != nil {
 		platform = strings.TrimSpace(strings.ToLower(filter.Platform))
 		groupID = filter.GroupID
 		accountID = filter.AccountID
+		userID = filter.UserID
 		model = strings.TrimSpace(filter.Model)
 	}
 
@@ -1031,6 +1035,11 @@ func buildUsageWhere(filter *service.OpsDashboardFilter, start, end time.Time, s
 		clauses = append(clauses, fmt.Sprintf("ul.account_id = $%d", idx))
 		idx++
 	}
+	if userID != nil && *userID > 0 {
+		args = append(args, *userID)
+		clauses = append(clauses, fmt.Sprintf("ul.user_id = $%d", idx))
+		idx++
+	}
 	if platform != "" {
 		// Prefer group.platform when available; fall back to account.platform so we don't
 		// drop rows where group_id is NULL.
@@ -1053,11 +1062,13 @@ func buildErrorWhere(filter *service.OpsDashboardFilter, start, end time.Time, s
 	platform := ""
 	groupID := (*int64)(nil)
 	accountID := (*int64)(nil)
+	userID := (*int64)(nil)
 	model := ""
 	if filter != nil {
 		platform = strings.TrimSpace(strings.ToLower(filter.Platform))
 		groupID = filter.GroupID
 		accountID = filter.AccountID
+		userID = filter.UserID
 		model = strings.TrimSpace(filter.Model)
 	}
 
@@ -1082,6 +1093,11 @@ func buildErrorWhere(filter *service.OpsDashboardFilter, start, end time.Time, s
 	if accountID != nil && *accountID > 0 {
 		args = append(args, *accountID)
 		clauses = append(clauses, fmt.Sprintf("account_id = $%d", idx))
+		idx++
+	}
+	if userID != nil && *userID > 0 {
+		args = append(args, *userID)
+		clauses = append(clauses, fmt.Sprintf("user_id = $%d", idx))
 		idx++
 	}
 	if platform != "" {
