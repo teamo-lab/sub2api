@@ -457,7 +457,7 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 
 	if relayErr != nil {
 		if !clientOutputStarted && (errors.Is(relayErr, relay.ErrLimit) || errors.Is(relayErr, relay.ErrMalformedFrame) || errors.Is(relayErr, relay.ErrIncompleteTool) || errors.Is(relayErr, relay.ErrEmptyResponse)) {
-			return resultWithUsage(), newOpenAIRawStreamTruncatedFailoverError(c, account, requestID, relayErr)
+			return resultWithUsage(), newOpenAIRawStreamTruncatedFailoverError(c, account, requestID, relayErr, resp.Header)
 		}
 		return resultWithUsage(), relayErr
 	}
@@ -495,13 +495,13 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 		if !clientOutputStarted {
 			// 响应头尚未提交：可以透明换号重试，客户端不会看到半截流。
 			if relayGate == nil {
-				return nil, newOpenAIRawStreamTruncatedFailoverError(c, account, requestID, cause)
+				return nil, newOpenAIRawStreamTruncatedFailoverError(c, account, requestID, cause, resp.Header)
 			}
-			return resultWithUsage(), newOpenAIRawStreamTruncatedFailoverError(c, account, requestID, cause)
+			return resultWithUsage(), newOpenAIRawStreamTruncatedFailoverError(c, account, requestID, cause, resp.Header)
 		}
 		// 已写出语义字节：无法再 failover，改为带类型的上游错误。handler 会据此
 		// 补发 SSE error 帧并把本次请求计入 SLA 失败。
-		recordOpenAIRawStreamTruncation(c, account, requestID, cause, "http_error")
+		recordOpenAIRawStreamTruncation(c, account, requestID, cause, "http_error", resp.Header)
 		return resultWithUsage(), newOpenAIUpstreamStreamReadError(cause)
 	}
 
