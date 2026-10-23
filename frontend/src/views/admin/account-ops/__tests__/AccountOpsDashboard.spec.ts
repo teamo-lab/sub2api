@@ -11,6 +11,9 @@ const getSnapshot = vi.fn()
 const getDistribution = vi.fn()
 const getModels = vi.fn()
 const listGroups = vi.fn()
+const user = { id: 9, email: 'ka@example.com', username: 'ka' }
+const listUsers = vi.fn()
+const getUser = vi.fn()
 let routeQuery: Record<string, string> = { account_id: '42' }
 
 vi.mock('vue-i18n', async (importOriginal) => ({
@@ -27,7 +30,11 @@ vi.mock('@/api', () => ({
       list: (...args: unknown[]) => listAccounts(...args),
       getById: (...args: unknown[]) => getAccount(...args)
     },
-    groups: { getAll: (...args: unknown[]) => listGroups(...args) }
+    groups: { getAll: (...args: unknown[]) => listGroups(...args) },
+    users: {
+      list: (...args: unknown[]) => listUsers(...args),
+      getById: (...args: unknown[]) => getUser(...args)
+    }
   }
 }))
 vi.mock('@/api/admin/ops', () => ({
@@ -47,6 +54,8 @@ describe('AccountOpsDashboard', () => {
     getDistribution.mockResolvedValue({ total: 0, items: [] })
     getModels.mockResolvedValue(['gpt-5'])
     listGroups.mockResolvedValue([{ id: 7, name: 'premium', platform: 'openai' }])
+    listUsers.mockResolvedValue({ items: [user], total: 1 })
+    getUser.mockResolvedValue(user)
     routeQuery = { account_id: '42' }
   })
 
@@ -122,7 +131,7 @@ describe('AccountOpsDashboard', () => {
     await flushPromises()
     listAccounts.mockClear()
 
-    await wrapper.findAllComponents({ name: 'Select' })[0]!.vm.$emit('change', 7)
+    await wrapper.findAllComponents({ name: 'Select' })[1]!.vm.$emit('change', 7)
     await flushPromises()
 
     expect(listAccounts).toHaveBeenCalledWith(
@@ -131,7 +140,90 @@ describe('AccountOpsDashboard', () => {
       expect.objectContaining({ group: '7', lite: 'true' }),
       expect.objectContaining({ signal: expect.any(AbortSignal) })
     )
-    expect(wrapper.findAllComponents({ name: 'Select' })[1]!.props('modelValue')).toBeNull()
+    expect(wrapper.findAllComponents({ name: 'Select' })[2]!.props('modelValue')).toBeNull()
+    wrapper.unmount()
+  })
+
+  it('loads a user scope and combines it with the selected group', async () => {
+    routeQuery = { user_id: '9', group_id: '7' }
+    const wrapper = shallowMount(AccountOpsDashboard, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' }, Select: true, Icon: true, BaseDialog: true,
+          TokenUsageTrend: true, TrendLineChartCard: true, OpsThroughputTrendChart: true,
+          OpsErrorDistributionChart: true, OpsErrorTrendChart: true, OpsAlertEventsCard: true,
+          OpsErrorDetailsModal: true, OpsErrorDetailModal: true, OpsRequestDetailsModal: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    expect(getUser).toHaveBeenCalledWith(9)
+    expect(getSnapshot).toHaveBeenCalledWith(
+      expect.objectContaining({ user_id: 9, group_id: 7, account_id: null, mode: 'raw' }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+    expect(getDistribution).toHaveBeenCalledWith(expect.objectContaining({ user_id: 9 }), expect.anything())
+    expect(getModels).toHaveBeenCalledWith(expect.objectContaining({ user_id: 9 }), expect.anything())
+    expect(wrapper.findComponent({ name: 'OpsRequestDetailsModal' }).props('userId')).toBe(9)
+    expect(wrapper.findComponent({ name: 'OpsErrorDetailsModal' }).props('userId')).toBe(9)
+    wrapper.unmount()
+  })
+
+  it('puts the user picker first and keeps the group when switching users', async () => {
+    routeQuery = { group_id: '7' }
+    const wrapper = shallowMount(AccountOpsDashboard, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' }, Icon: true, BaseDialog: true,
+          TokenUsageTrend: true, TrendLineChartCard: true, OpsThroughputTrendChart: true,
+          OpsErrorDistributionChart: true, OpsErrorTrendChart: true, OpsAlertEventsCard: true,
+          OpsErrorDetailsModal: true, OpsErrorDetailModal: true, OpsRequestDetailsModal: true
+        }
+      }
+    })
+
+    await flushPromises()
+    const selects = wrapper.findAllComponents({ name: 'Select' })
+    expect(selects[0]!.props('options')).toEqual(expect.arrayContaining([
+      expect.objectContaining({ value: 9, label: 'ka@example.com · #9' })
+    ]))
+
+    getSnapshot.mockClear()
+    await selects[0]!.vm.$emit('change', 9)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    await flushPromises()
+
+    expect(getSnapshot).toHaveBeenCalledWith(expect.objectContaining({ user_id: 9, group_id: 7 }), expect.anything())
+    expect(replace).toHaveBeenCalledWith({ query: expect.objectContaining({ user_id: '9', group_id: '7' }) })
+    wrapper.unmount()
+  })
+
+  it('also looks a user up by numeric ID when searching', async () => {
+    const wrapper = shallowMount(AccountOpsDashboard, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' }, Icon: true, BaseDialog: true,
+          TokenUsageTrend: true, TrendLineChartCard: true, OpsThroughputTrendChart: true,
+          OpsErrorDistributionChart: true, OpsErrorTrendChart: true, OpsAlertEventsCard: true,
+          OpsErrorDetailsModal: true, OpsErrorDetailModal: true, OpsRequestDetailsModal: true
+        }
+      }
+    })
+
+    await flushPromises()
+    listUsers.mockResolvedValueOnce({ items: [], total: 0 })
+    getUser.mockResolvedValueOnce({ id: 123, email: 'id@example.com', username: 'id' })
+
+    await wrapper.findAllComponents({ name: 'Select' })[0]!.vm.$emit('search', '123')
+    await flushPromises()
+
+    expect(listUsers).toHaveBeenLastCalledWith(1, 50, { search: '123' }, expect.objectContaining({ signal: expect.any(AbortSignal) }))
+    expect(getUser).toHaveBeenLastCalledWith(123)
+    expect(wrapper.findAllComponents({ name: 'Select' })[0]!.props('options')).toEqual(expect.arrayContaining([
+      expect.objectContaining({ value: 123 })
+    ]))
     wrapper.unmount()
   })
 

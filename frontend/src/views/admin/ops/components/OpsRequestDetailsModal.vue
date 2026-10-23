@@ -26,6 +26,7 @@ interface Props {
   platform?: string
   groupId?: number | null
   accountId?: number | null
+  userId?: number | null
   model?: string
   resumeState?: boolean
 }
@@ -89,6 +90,7 @@ const fetchData = async () => {
     if (platform) params.platform = platform
     if (typeof props.groupId === 'number' && props.groupId > 0) params.group_id = props.groupId
     if (typeof props.accountId === 'number' && props.accountId > 0) params.account_id = props.accountId
+    if (typeof props.userId === 'number' && props.userId > 0) params.user_id = props.userId
     if (props.model?.trim()) params.model = props.model.trim()
 
     if (typeof props.preset.min_duration_ms === 'number') params.min_duration_ms = props.preset.min_duration_ms
@@ -127,6 +129,7 @@ watch(
     props.platform,
     props.groupId,
     props.accountId,
+    props.userId,
     props.model,
     props.preset.kind,
     props.preset.sort,

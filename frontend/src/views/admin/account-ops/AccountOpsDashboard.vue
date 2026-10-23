@@ -9,6 +9,22 @@
           </div>
 
           <div class="flex flex-wrap items-end gap-3">
+            <label class="block min-w-[240px]">
+              <span class="mb-1 block text-xs font-medium text-gray-500 dark:text-gray-400">{{ t('admin.accountOps.selectUser') }}</span>
+              <Select
+                :model-value="userId"
+                :options="userOptions"
+                :placeholder="t('admin.accountOps.selectUserOptional')"
+                :search-placeholder="t('admin.accountOps.searchUser')"
+                :loading="usersLoading"
+                searchable
+                remote
+                class="w-full"
+                @search="loadUsers"
+                @change="onUserChange"
+              />
+            </label>
+
             <label class="block min-w-[190px]">
               <span class="mb-1 block text-xs font-medium text-gray-500 dark:text-gray-400">{{ t('admin.accountOps.selectGroup') }}</span>
               <Select :model-value="groupId" :options="groupOptions" searchable class="w-full" @change="onGroupChange" />
@@ -58,6 +74,11 @@
           </div>
         </div>
 
+        <div v-if="selectedUser" class="mt-3 flex flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+          <span class="rounded bg-gray-100 px-2 py-1 font-mono dark:bg-dark-800">{{ t('admin.accountOps.userTag', { id: selectedUser.id }) }}</span>
+          <span>{{ selectedUser.email || selectedUser.username }}</span>
+          <span v-if="!selectedAccount && !selectedGroup && lastUpdated">{{ t('admin.accountOps.lastUpdated', { time: lastUpdated.toLocaleTimeString() }) }}</span>
+        </div>
         <div v-if="selectedAccount" class="mt-3 flex flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
           <span class="rounded bg-gray-100 px-2 py-1 font-mono dark:bg-dark-800">#{{ selectedAccount.id }}</span>
           <span>{{ selectedAccount.platform }}</span>
@@ -177,6 +198,7 @@
         :custom-end-time="customEndTime"
         :group-id="groupId"
         :account-id="accountId"
+        :user-id="userId"
         :model="model"
         :error-type="errorType"
         @update:show="showErrorDetails = $event"
@@ -191,6 +213,7 @@
         :preset="requestPreset"
         :group-id="groupId"
         :account-id="accountId"
+        :user-id="userId"
         :model="model"
         @open-error-detail="openErrorDetail"
       />
@@ -228,7 +251,7 @@ import TokenUsageTrend from '@/components/charts/TokenUsageTrend.vue'
 import TrendLineChartCard, { type TrendLineSeries } from '@/components/charts/TrendLineChartCard.vue'
 import { adminAPI } from '@/api'
 import { opsAPI, type OpsDashboardFilterParams, type OpsDashboardSnapshotV2Response, type OpsErrorDistributionResponse } from '@/api/admin/ops'
-import type { AccountListItem, TrendDataPoint } from '@/types'
+import type { AccountListItem, AdminUser, TrendDataPoint } from '@/types'
 import { formatNumber } from '@/utils/format'
 import OpsThroughputTrendChart from '@/views/admin/ops/components/OpsThroughputTrendChart.vue'
 import OpsErrorDistributionChart from '@/views/admin/ops/components/OpsErrorDistributionChart.vue'
@@ -240,10 +263,12 @@ import OpsRequestDetailsModal, { type OpsRequestDetailsPreset } from '@/views/ad
 
 type TimeRange = '5m' | '30m' | '1h' | '6h' | '24h' | 'custom'
 type GroupOption = { id: number; name: string; platform: string }
+type UserOption = Pick<AdminUser, 'id' | 'email' | 'username'>
 
 const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
+const userId = ref<number | null>(parsePositiveInt(route.query.user_id))
 const accountId = ref<number | null>(parsePositiveInt(route.query.account_id))
 const groupId = ref<number | null>(parsePositiveInt(route.query.group_id))
 const model = ref(typeof route.query.model === 'string' ? route.query.model : '')
@@ -254,6 +279,9 @@ const timeRange = ref<TimeRange>(initialTimeRange === 'custom' && (!customStartT
 const accounts = ref<AccountListItem[]>([])
 const selectedAccount = ref<AccountListItem | null>(null)
 const accountsLoading = ref(false)
+const users = ref<UserOption[]>([])
+const selectedUser = ref<UserOption | null>(null)
+const usersLoading = ref(false)
 const groups = ref<GroupOption[]>([])
 const models = ref<string[]>([])
 const snapshot = ref<OpsDashboardSnapshotV2Response | null>(null)
@@ -267,6 +295,7 @@ const showCustomTimeRangeDialog = ref(false)
 const customStartTimeInput = ref('')
 const customEndTimeInput = ref('')
 let accountSearchController: AbortController | null = null
+let userSearchController: AbortController | null = null
 let dashboardController: AbortController | null = null
 let refreshTimer: number | null = null
 let requestSequence = 0
@@ -293,8 +322,18 @@ function parseISOTime(value: unknown): string | null {
   return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString()
 }
 
-const hasScope = computed(() => Boolean(accountId.value || groupId.value))
+const hasScope = computed(() => Boolean(userId.value || accountId.value || groupId.value))
 const selectedGroup = computed(() => groups.value.find((item) => item.id === groupId.value) ?? null)
+
+const userOptions = computed(() => {
+  const items = selectedUser.value && !users.value.some((item) => item.id === selectedUser.value?.id)
+    ? [selectedUser.value, ...users.value]
+    : users.value
+  return [{ value: null, label: t('admin.accountOps.noUserFilter') }, ...items.map((user) => ({
+    value: user.id,
+    label: `${user.email || user.username} · #${user.id}`
+  }))]
+})
 
 const groupOptions = computed(() => [
   { value: null, label: t('admin.accountOps.noGroupFilter') },
@@ -512,6 +551,50 @@ async function loadAccounts(search = '') {
   }
 }
 
+function toUserOption(user: UserOption): UserOption {
+  return { id: user.id, email: user.email, username: user.username }
+}
+
+async function loadUsers(search = '') {
+  userSearchController?.abort()
+  const controller = new AbortController()
+  userSearchController = controller
+  usersLoading.value = true
+  const keyword = search.trim()
+  // 后台用户搜索只匹配邮箱/用户名/备注/Key；纯数字时顺带按 ID 精确查一次。
+  const searchID = /^\d+$/.test(keyword) ? parsePositiveInt(keyword) : null
+  try {
+    const [response, byID] = await Promise.all([
+      adminAPI.users.list(1, 50, { search: keyword || undefined }, { signal: controller.signal }),
+      searchID ? adminAPI.users.getById(searchID).catch(() => null) : Promise.resolve(null)
+    ])
+    if (userSearchController !== controller) return
+    const items = (response.items ?? []).map(toUserOption)
+    users.value = byID && !items.some((item) => item.id === byID.id) ? [toUserOption(byID), ...items] : items
+  } catch (error: any) {
+    if (error?.name !== 'CanceledError' && error?.name !== 'AbortError') console.error('[AccountOps] user search failed', error)
+  } finally {
+    if (userSearchController === controller) usersLoading.value = false
+  }
+}
+
+async function restoreSelectedUser() {
+  if (!userId.value) return
+  try {
+    selectedUser.value = toUserOption(await adminAPI.users.getById(userId.value))
+  } catch {
+    userId.value = null
+  }
+}
+
+function onUserChange(value: string | number | boolean | null) {
+  const nextID = typeof value === 'number' ? value : parsePositiveInt(value)
+  userId.value = nextID
+  selectedUser.value = users.value.find((item) => item.id === nextID) ?? null
+  model.value = ''
+  if (nextID && !selectedUser.value) void restoreSelectedUser()
+}
+
 async function restoreSelectedAccount() {
   if (!accountId.value) return
   try {
@@ -539,6 +622,7 @@ function onGroupChange(value: string | number | boolean | null) {
 
 function buildParams(): OpsDashboardFilterParams {
   const params: OpsDashboardFilterParams = {
+    user_id: userId.value,
     account_id: accountId.value,
     group_id: groupId.value,
     model: model.value || undefined,
@@ -589,6 +673,7 @@ async function refreshAll() {
 const refreshDebounced = useDebounceFn(refreshAll, 120)
 const syncQuery = useDebounceFn(() => {
   const query: Record<string, string> = {}
+  if (userId.value) query.user_id = String(userId.value)
   if (accountId.value) query.account_id = String(accountId.value)
   if (groupId.value) query.group_id = String(groupId.value)
   if (model.value) query.model = model.value
@@ -600,7 +685,7 @@ const syncQuery = useDebounceFn(() => {
   void router.replace({ query })
 }, 120)
 
-watch([accountId, groupId, model, timeRange, customStartTime, customEndTime], () => {
+watch([userId, accountId, groupId, model, timeRange, customStartTime, customEndTime], () => {
   syncQuery()
   refreshDebounced()
 })
@@ -622,6 +707,8 @@ function openErrorDetail(id: number) {
 
 onMounted(async () => {
   await Promise.all([
+    loadUsers(),
+    restoreSelectedUser(),
     loadAccounts(),
     restoreSelectedAccount(),
     adminAPI.groups.getAll().then((items) => {
@@ -635,6 +722,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  userSearchController?.abort()
   accountSearchController?.abort()
   dashboardController?.abort()
   if (refreshTimer !== null) window.clearInterval(refreshTimer)
