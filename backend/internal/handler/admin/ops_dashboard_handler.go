@@ -320,5 +320,13 @@ func parseOpsDashboardFilter(c *gin.Context, defaultTimeRange string) (*service.
 		filter.AccountID = &id
 		filter.QueryMode = service.OpsQueryModeRaw
 	}
+	if v := strings.TrimSpace(c.Query("user_id")); v != "" {
+		id, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || id <= 0 {
+			return nil, fmt.Errorf("Invalid user_id")
+		}
+		filter.UserID = &id
+		filter.QueryMode = service.OpsQueryModeRaw
+	}
 	return filter, nil
 }

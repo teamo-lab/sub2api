@@ -20,6 +20,7 @@ export interface OpsDashboardFilterParams {
   platform?: string
   group_id?: number | null
   account_id?: number | null
+  user_id?: number | null
   model?: string
   mode?: OpsQueryMode
 }

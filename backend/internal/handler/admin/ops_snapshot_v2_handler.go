@@ -28,6 +28,7 @@ type opsDashboardSnapshotV2CacheKey struct {
 	Model        string               `json:"model"`
 	GroupID      *int64               `json:"group_id"`
 	AccountID    *int64               `json:"account_id"`
+	UserID       *int64               `json:"user_id"`
 	QueryMode    service.OpsQueryMode `json:"mode"`
 	BucketSecond int                  `json:"bucket_second"`
 }
@@ -58,6 +59,7 @@ func (h *OpsHandler) GetDashboardSnapshotV2(c *gin.Context) {
 		Model:        filter.Model,
 		GroupID:      filter.GroupID,
 		AccountID:    filter.AccountID,
+		UserID:       filter.UserID,
 		QueryMode:    filter.QueryMode,
 		BucketSecond: bucketSeconds,
 	})
