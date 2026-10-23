@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -142,4 +143,181 @@ func TestSanitizeOpsUpstreamErrors_PersistsUpstreamCFRay(t *testing.T) {
 	require.NoError(t, sanitizeOpsUpstreamErrors(entry))
 	require.NotNil(t, entry.UpstreamErrorsJSON)
 	require.Contains(t, *entry.UpstreamErrorsJSON, `"upstream_cf_ray":"8f1e2d3c4b5a6978-SJC"`)
+}
+
+// openAIMidStreamGOAWAY 复现 sv-1 case 137dbcae：上游 200 响应头和部分正文已经到达、
+// 客户端已收到输出之后，HTTP/2 连接被 GOAWAY 断开。
+var openAIMidStreamGOAWAY = errors.New("http2: server sent GOAWAY and closed the connection; LastStreamID=37, ErrCode=NO_ERROR, debug=\"\"")
+
+func switchbaseUpstreamIDTestAccount() *Account {
+	return &Account{
+		ID: 4, Name: "switchbase-0.2x", Platform: PlatformOpenAI, Type: AccountTypeAPIKey,
+		Extra: map[string]any{AccountExtraUpstreamRequestIDHeader: "X-Client-Request-Id"},
+	}
+}
+
+func midStreamTestHeaders() http.Header {
+	return http.Header{
+		"Content-Type":        []string{"text/event-stream"},
+		"X-Request-Id":        []string{"chain-id-not-switchbase"},
+		"X-Client-Request-Id": []string{"sb-req-137"},
+		"Cf-Ray":              []string{"8f1e2d3c4b5a6978-SJC"},
+	}
+}
+
+func requireSingleStreamErrorEvent(t *testing.T, c *gin.Context) *OpsUpstreamErrorEvent {
+	t.Helper()
+	events := openAIUpstreamIDOpsEvents(t, c)
+	var streamErrors []*OpsUpstreamErrorEvent
+	for _, ev := range events {
+		if ev.Kind == "stream_error" {
+			streamErrors = append(streamErrors, ev)
+		}
+	}
+	require.Len(t, streamErrors, 1, "events=%+v", events)
+	return streamErrors[0]
+}
+
+func TestOpenAIStreamingMidStreamReadError_RecordsAccountUpstreamRequestID(t *testing.T) {
+	c, rec := newOpenAIUpstreamIDTestContext()
+	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     midStreamTestHeaders(),
+		Body: &openAIResponseFlushReadError{
+			payload: []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n"),
+			err:     openAIMidStreamGOAWAY,
+		},
+	}
+
+	_, err := svc.handleStreamingResponse(c.Request.Context(), resp, c, switchbaseUpstreamIDTestAccount(), time.Now(), "gpt-6-astra", "gpt-6-astra")
+	require.ErrorContains(t, err, "stream read error")
+	var failoverErr *UpstreamFailoverError
+	require.False(t, errors.As(err, &failoverErr), "客户端已收到输出，不能换号")
+	require.Contains(t, rec.Body.String(), "stream_read_error")
+
+	ev := requireSingleStreamErrorEvent(t, c)
+	require.Equal(t, int64(4), ev.AccountID)
+	require.Equal(t, "switchbase-0.2x", ev.AccountName)
+	require.Equal(t, http.StatusBadGateway, ev.UpstreamStatusCode)
+	require.Equal(t, "sb-req-137", ev.UpstreamRequestID)
+	require.Empty(t, ev.UpstreamCFRay, "拿到账号指定的业务 ID 时不另存 cf-ray")
+	require.False(t, ev.Passthrough)
+	require.Contains(t, ev.Message, "GOAWAY")
+	status, ok := c.Get(OpsUpstreamStatusCodeKey)
+	require.True(t, ok)
+	require.Equal(t, http.StatusBadGateway, status)
+}
+
+func TestOpenAIStreamingMidStreamReadError_FallsBackToXRequestIDAndKeepsCFRay(t *testing.T) {
+	c, _ := newOpenAIUpstreamIDTestContext()
+	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
+	headers := midStreamTestHeaders()
+	headers.Del("X-Client-Request-Id")
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     headers,
+		Body: &openAIResponseFlushReadError{
+			payload: []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n"),
+			err:     openAIMidStreamGOAWAY,
+		},
+	}
+
+	_, err := svc.handleStreamingResponse(c.Request.Context(), resp, c, switchbaseUpstreamIDTestAccount(), time.Now(), "gpt-6-astra", "gpt-6-astra")
+	require.ErrorContains(t, err, "stream read error")
+	ev := requireSingleStreamErrorEvent(t, c)
+	require.Equal(t, "chain-id-not-switchbase", ev.UpstreamRequestID)
+	require.Equal(t, "8f1e2d3c4b5a6978-SJC", ev.UpstreamCFRay)
+}
+
+func TestOpenAIStreamingMidStreamEOFWithoutTerminal_RecordsUpstreamRequestID(t *testing.T) {
+	c, _ := newOpenAIUpstreamIDTestContext()
+	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     midStreamTestHeaders(),
+		Body:       io.NopCloser(strings.NewReader("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n")),
+	}
+
+	_, err := svc.handleStreamingResponse(c.Request.Context(), resp, c, switchbaseUpstreamIDTestAccount(), time.Now(), "gpt-6-astra", "gpt-6-astra")
+	require.ErrorContains(t, err, "missing terminal event")
+	ev := requireSingleStreamErrorEvent(t, c)
+	require.Equal(t, "sb-req-137", ev.UpstreamRequestID)
+	require.Contains(t, ev.Message, "stream ended before terminal event")
+}
+
+func TestOpenAIStreamingClientCanceledAfterOutput_DoesNotRecordStreamError(t *testing.T) {
+	c, _ := newOpenAIUpstreamIDTestContext()
+	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     midStreamTestHeaders(),
+		Body: &openAIResponseFlushReadError{
+			payload: []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n"),
+			err:     context.Canceled,
+		},
+	}
+
+	_, err := svc.handleStreamingResponse(c.Request.Context(), resp, c, switchbaseUpstreamIDTestAccount(), time.Now(), "gpt-6-astra", "gpt-6-astra")
+	require.ErrorIs(t, err, context.Canceled)
+	_, ok := c.Get(OpsUpstreamErrorsKey)
+	require.False(t, ok, "客户端取消不是上游断流")
+}
+
+func TestOpenAIPassthroughMidStreamReadError_RecordsAccountUpstreamRequestID(t *testing.T) {
+	c, _ := newOpenAIUpstreamIDTestContext()
+	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     midStreamTestHeaders(),
+		Body: &openAIResponseFlushReadError{
+			payload: []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n"),
+			err:     openAIMidStreamGOAWAY,
+		},
+	}
+
+	_, err := svc.handleStreamingResponsePassthrough(c.Request.Context(), resp, c, switchbaseUpstreamIDTestAccount(), time.Now(), "gpt-6-astra", "gpt-6-astra")
+	require.ErrorContains(t, err, "stream read error")
+	ev := requireSingleStreamErrorEvent(t, c)
+	require.True(t, ev.Passthrough)
+	require.Equal(t, "sb-req-137", ev.UpstreamRequestID)
+	require.Contains(t, ev.Message, "GOAWAY")
+}
+
+func TestOpenAIRawChatMidStreamTruncation_RecordsAccountUpstreamRequestID(t *testing.T) {
+	c, _ := newOpenAIUpstreamIDTestContext()
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
+	headers := midStreamTestHeaders()
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     headers,
+		Body: &openAIResponseFlushReadError{
+			payload: []byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n"),
+			err:     openAIMidStreamGOAWAY,
+		},
+	}
+
+	_, err := svc.streamRawChatCompletions(c, resp, switchbaseUpstreamIDTestAccount(), "gpt-6-astra", "gpt-6-astra", "gpt-6-astra", nil, nil, time.Now(), 20)
+	require.Error(t, err)
+	events := openAIUpstreamIDOpsEvents(t, c)
+	require.Len(t, events, 1)
+	require.Equal(t, "http_error", events[0].Kind)
+	require.Equal(t, "sb-req-137", events[0].UpstreamRequestID)
+	require.Empty(t, events[0].UpstreamCFRay)
+
+	// 账号没配头时沿用 x-request-id，同时保留 cf-ray。
+	c2, _ := newOpenAIUpstreamIDTestContext()
+	c2.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	resp.Body = &openAIResponseFlushReadError{
+		payload: []byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n"),
+		err:     openAIMidStreamGOAWAY,
+	}
+	plain := &Account{ID: 9, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	_, err = svc.streamRawChatCompletions(c2, resp, plain, "gpt-6-astra", "gpt-6-astra", "gpt-6-astra", nil, nil, time.Now(), 20)
+	require.Error(t, err)
+	events = openAIUpstreamIDOpsEvents(t, c2)
+	require.Len(t, events, 1)
+	require.Equal(t, "chain-id-not-switchbase", events[0].UpstreamRequestID)
+	require.Equal(t, "8f1e2d3c4b5a6978-SJC", events[0].UpstreamCFRay)
 }

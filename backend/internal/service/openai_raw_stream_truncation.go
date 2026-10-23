@@ -85,8 +85,9 @@ func newOpenAIRawStreamTruncatedFailoverError(
 	account *Account,
 	upstreamRequestID string,
 	cause error,
+	responseHeaders http.Header,
 ) *UpstreamFailoverError {
-	recordOpenAIRawStreamTruncation(c, account, upstreamRequestID, cause, "failover")
+	recordOpenAIRawStreamTruncation(c, account, upstreamRequestID, cause, "failover", responseHeaders)
 
 	headers := http.Header{}
 	if id := strings.TrimSpace(upstreamRequestID); id != "" {
@@ -107,9 +108,14 @@ func recordOpenAIRawStreamTruncation(
 	upstreamRequestID string,
 	cause error,
 	kind string,
+	responseHeaders http.Header,
 ) {
 	if c == nil {
 		return
+	}
+	// 上游 ID 优先读账号指定的头，拿不到时沿用调用方给的 x-request-id。
+	if id := opsUpstreamRequestID(account, responseHeaders); id != "" {
+		upstreamRequestID = id
 	}
 	message := openAIRawStreamTruncatedMessage(cause)
 	platform := PlatformOpenAI
@@ -130,6 +136,7 @@ func recordOpenAIRawStreamTruncation(
 		AccountName:        accountName,
 		UpstreamStatusCode: http.StatusBadGateway,
 		UpstreamRequestID:  strings.TrimSpace(upstreamRequestID),
+		UpstreamCFRay:      opsUpstreamCFRay(account, responseHeaders),
 		Kind:               kind,
 		Message:            message,
 	})

@@ -6,6 +6,7 @@ import (
 	"unicode/utf8"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/gin-gonic/gin"
 	"golang.org/x/net/http/httpguts"
 )
 
@@ -68,6 +69,41 @@ func opsUpstreamCFRay(account *Account, h http.Header) string {
 		return ""
 	}
 	return strings.TrimSpace(h.Get("cf-ray"))
+}
+
+// recordOpenAIMidStreamError 记录已经向客户端写出内容之后的上游断流（HTTP/2 GOAWAY、
+// 连接 reset、没收到终止事件就 EOF）。这时已不能换号，请求以 502 结束；上游响应头早已收到，
+// 照样按账号指定的头记下上游 ID（拿不到业务 ID 时另存 cf-ray），让这一跳和换号失败、
+// 最终成功一样能对上上游。
+func recordOpenAIMidStreamError(c *gin.Context, account *Account, passthrough bool, headers http.Header, streamErr error) {
+	if c == nil {
+		return
+	}
+	message := "OpenAI stream disconnected after output started"
+	if streamErr != nil {
+		if text := strings.TrimSpace(streamErr.Error()); text != "" {
+			message += ": " + text
+		}
+	}
+	message = sanitizeUpstreamErrorMessage(message)
+	setOpsUpstreamError(c, http.StatusBadGateway, message, "")
+	event := OpsUpstreamErrorEvent{
+		ProxyID:            opsUpstreamProxyID(account),
+		ProxyName:          opsUpstreamProxyName(account),
+		Platform:           PlatformOpenAI,
+		UpstreamStatusCode: http.StatusBadGateway,
+		UpstreamRequestID:  opsUpstreamRequestID(account, headers),
+		UpstreamCFRay:      opsUpstreamCFRay(account, headers),
+		Passthrough:        passthrough,
+		Kind:               "stream_error",
+		Message:            message,
+	}
+	if account != nil {
+		event.Platform = account.Platform
+		event.AccountID = account.ID
+		event.AccountName = account.Name
+	}
+	appendOpsUpstreamError(c, event)
 }
 
 // usageUpstreamRequestIDPtr 生成落库到 usage_logs.upstream_request_id 的值。

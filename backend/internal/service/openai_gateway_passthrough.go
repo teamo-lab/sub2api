@@ -2617,6 +2617,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			return resultWithUsage(), fmt.Errorf("stream usage incomplete after disconnect: %w", err)
 		}
 		s.recordOpenAIProxyStreamDisconnect(account, err, upstreamRequestID)
+		recordOpenAIMidStreamError(c, account, true, resp.Header, err)
 		logger.LegacyPrintf("service.openai_gateway",
 			"[OpenAI passthrough] 流读取异常中断: account=%d request_id=%s err=%v",
 			account.ID,
@@ -2644,7 +2645,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			logOpenAIFailoverAfterReasoningOutput(ctx, account, "passthrough_sse", upstreamRequestID, "eof")
 			return resultWithUsage(), failoverErr
 		}
-		s.recordOpenAIProxyStreamDisconnect(account, errors.New("stream ended before terminal event"), upstreamRequestID)
+		streamErr := errors.New("stream ended before terminal event")
+		s.recordOpenAIProxyStreamDisconnect(account, streamErr, upstreamRequestID)
+		recordOpenAIMidStreamError(c, account, true, resp.Header, streamErr)
 		return resultWithUsage(), errors.New("stream usage incomplete: missing terminal event")
 	}
 	if (sawDone || sawTerminalEvent) && !sawFailedEvent {
