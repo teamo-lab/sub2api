@@ -629,7 +629,8 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 			AccountID:          account.ID,
 			AccountName:        account.Name,
 			UpstreamStatusCode: resp.StatusCode,
-			UpstreamRequestID:  firstNonEmpty(resp.Header.Get("x-request-id"), resp.Header.Get("xai-request-id")),
+			UpstreamRequestID:  opsUpstreamRequestID(account, resp.Header, "xai-request-id"),
+			UpstreamCFRay:      opsUpstreamCFRay(account, resp.Header),
 			Kind:               kind,
 			Message:            upstreamMsg,
 		})

@@ -925,7 +925,8 @@ func (s *OpenAIGatewayService) handleFailoverErrorResponsePassthrough(
 		AccountID:            account.ID,
 		AccountName:          account.Name,
 		UpstreamStatusCode:   resp.StatusCode,
-		UpstreamRequestID:    resp.Header.Get("x-request-id"),
+		UpstreamRequestID:    opsUpstreamRequestID(account, resp.Header),
+		UpstreamCFRay:        opsUpstreamCFRay(account, resp.Header),
 		Passthrough:          true,
 		Kind:                 "failover",
 		Message:              upstreamMsg,
@@ -993,7 +994,8 @@ func (s *OpenAIGatewayService) handleErrorResponsePassthrough(
 		AccountID:            account.ID,
 		AccountName:          account.Name,
 		UpstreamStatusCode:   resp.StatusCode,
-		UpstreamRequestID:    resp.Header.Get("x-request-id"),
+		UpstreamRequestID:    opsUpstreamRequestID(account, resp.Header),
+		UpstreamCFRay:        opsUpstreamCFRay(account, resp.Header),
 		Passthrough:          true,
 		Kind:                 "http_error",
 		Message:              upstreamMsg,
@@ -2100,7 +2102,7 @@ func (s *OpenAIGatewayService) nonStreamingTerminalFailureFailover(
 	upstreamRequestID := ""
 	if resp != nil {
 		headers = resp.Header
-		upstreamRequestID = strings.TrimSpace(resp.Header.Get("x-request-id"))
+		upstreamRequestID = opsUpstreamRequestID(account, resp.Header)
 	}
 	return s.newOpenAIStreamFailoverErrorWithModel(c, account, passthrough, upstreamRequestID, payload, message, firstNonEmpty(canonicalModel...), headers)
 }
@@ -2162,7 +2164,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	responseFailedPending := false
 	var bareErrorPayload []byte
 	bareErrorAccountSideEffectsPending := false
-	upstreamRequestID := strings.TrimSpace(resp.Header.Get("x-request-id"))
+	upstreamRequestID := opsUpstreamRequestID(account, resp.Header)
 	terminalOrigin := s.newOpenAIStreamErrorOrigin(c, account, true, upstreamRequestID)
 	defer terminalOrigin.record()
 	// pendingLines 在首个可见输出前保留前导事件，确保无输出失败仍可安全 failover。

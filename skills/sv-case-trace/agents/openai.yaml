@@ -1,0 +1,7 @@
+interface:
+  display_name: "SV Case Trace"
+  short_description: "Trace one sv-1 Sub2API request across accounts, upstream IDs and raw COS bodies"
+  default_prompt: "Use $sv-case-trace to show which accounts a sv-1 Sub2API request went through and where its raw request/response is stored."
+
+policy:
+  allow_implicit_invocation: true

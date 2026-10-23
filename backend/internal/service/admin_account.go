@@ -311,6 +311,11 @@ func (s *adminServiceImpl) DuplicateAccount(ctx context.Context, id int64, actor
 	if err != nil {
 		return nil, fmt.Errorf("normalize duplicate account extra: %w", err)
 	}
+	if s.requireUpstreamRequestIDHeader {
+		if err := RequireUpstreamRequestIDHeaderExtra(input.Platform, input.Type, accountExtra); err != nil {
+			return nil, err
+		}
+	}
 	if err := NormalizeHeaderOverrideCredentials(input.Credentials); err != nil {
 		return nil, err
 	}
@@ -477,6 +482,11 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	if err := ValidateUpstreamRequestIDHeaderExtra(accountExtra); err != nil {
 		return nil, err
 	}
+	if s.requireUpstreamRequestIDHeader {
+		if err := RequireUpstreamRequestIDHeaderExtra(input.Platform, input.Type, accountExtra); err != nil {
+			return nil, err
+		}
+	}
 
 	// 绑定分组
 	groupIDs := input.GroupIDs
@@ -575,6 +585,20 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			return nil, err
 		}
 		if err := ValidateUpstreamRequestIDHeaderExtra(normalizedExtra); err != nil {
+			return nil, err
+		}
+	}
+	// 只在这次更新会整体替换 extra、或把账号改成 API Key 时检查，
+	// 改状态/调度等不碰 extra 的更新不因历史账号缺头而失败。
+	if s.requireUpstreamRequestIDHeader && (input.Extra != nil || (input.Type != "" && input.Type != account.Type)) {
+		effectiveType, effectiveExtra := account.Type, account.Extra
+		if input.Type != "" {
+			effectiveType = input.Type
+		}
+		if input.Extra != nil {
+			effectiveExtra = normalizedExtra
+		}
+		if err := RequireUpstreamRequestIDHeaderExtra(account.Platform, effectiveType, effectiveExtra); err != nil {
 			return nil, err
 		}
 	}

@@ -76,3 +76,42 @@ func TestValidateUpstreamRequestIDHeaderExtra(t *testing.T) {
 	require.Error(t, ValidateUpstreamRequestIDHeaderExtra(map[string]any{AccountExtraUpstreamRequestIDHeader: "X-Request-Id:"}))
 	require.Error(t, ValidateUpstreamRequestIDHeaderExtra(map[string]any{AccountExtraUpstreamRequestIDHeader: strings.Repeat("x", 65)}))
 }
+
+func TestOpsUpstreamRequestID_PrefersAccountHeaderThenFallsBack(t *testing.T) {
+	sub2apiStation := &Account{Platform: PlatformOpenAI, Extra: map[string]any{AccountExtraUpstreamRequestIDHeader: "X-Client-Request-Id"}}
+	h := http.Header{}
+	h.Set("X-Request-Id", "chain-local-id")
+	h.Set("X-Client-Request-Id", " station-business-id ")
+	h.Set("CF-Ray", "8f1e2d3c4b5a6978-LAX")
+	require.Equal(t, "station-business-id", opsUpstreamRequestID(sub2apiStation, h))
+	require.Equal(t, "", opsUpstreamCFRay(sub2apiStation, h), "business ID present: CF-Ray is not needed")
+
+	// 账户配了头但这次响应没带（例如上游报错时不回业务 ID）：退回 x-request-id，并保留 CF-Ray。
+	noBusinessID := http.Header{}
+	noBusinessID.Set("X-Request-Id", "chain-local-id")
+	noBusinessID.Set("CF-Ray", "8f1e2d3c4b5a6978-LAX")
+	require.Equal(t, "chain-local-id", opsUpstreamRequestID(sub2apiStation, noBusinessID))
+	require.Equal(t, "8f1e2d3c4b5a6978-LAX", opsUpstreamCFRay(sub2apiStation, noBusinessID))
+
+	// 未配置头的账户（HK 现状）：行为与改动前一致，读 x-request-id。
+	require.Equal(t, "chain-local-id", opsUpstreamRequestID(&Account{Platform: PlatformOpenAI}, noBusinessID))
+	require.Equal(t, "chain-local-id", opsUpstreamRequestID(nil, noBusinessID))
+
+	// Grok 等额外的退回头。
+	xai := http.Header{}
+	xai.Set("xai-request-id", "xai-1")
+	require.Equal(t, "xai-1", opsUpstreamRequestID(&Account{Platform: PlatformGrok}, xai, "xai-request-id"))
+	require.Equal(t, "", opsUpstreamRequestID(&Account{Platform: PlatformGrok}, xai))
+
+	require.Equal(t, "", opsUpstreamRequestID(sub2apiStation, nil))
+	require.Equal(t, "", opsUpstreamCFRay(sub2apiStation, nil))
+}
+
+func TestOpsUpstreamCFRay_CloudflareEdgeErrorWithoutBusinessID(t *testing.T) {
+	zero := &Account{Platform: PlatformOpenAI, Extra: map[string]any{AccountExtraUpstreamRequestIDHeader: "X-Oneapi-Request-Id"}}
+	edge := http.Header{}
+	edge.Set("CF-Ray", " 8f1e2d3c4b5a6978-SJC ")
+	edge.Set("Server", "cloudflare")
+	require.Equal(t, "", opsUpstreamRequestID(zero, edge))
+	require.Equal(t, "8f1e2d3c4b5a6978-SJC", opsUpstreamCFRay(zero, edge))
+}

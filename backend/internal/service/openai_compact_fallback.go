@@ -201,10 +201,11 @@ func (s *OpenAIGatewayService) appendOpenAICompactFallbackRetryOps(
 		return
 	}
 	statusCode := http.StatusBadRequest
-	requestID := ""
+	requestID, cfRay := "", ""
 	if resp != nil {
 		statusCode = resp.StatusCode
-		requestID = resp.Header.Get("x-request-id")
+		requestID = opsUpstreamRequestID(account, resp.Header)
+		cfRay = opsUpstreamCFRay(account, resp.Header)
 	}
 	detail := ""
 	if s != nil && s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
@@ -222,6 +223,7 @@ func (s *OpenAIGatewayService) appendOpenAICompactFallbackRetryOps(
 		AccountName:          account.Name,
 		UpstreamStatusCode:   statusCode,
 		UpstreamRequestID:    requestID,
+		UpstreamCFRay:        cfRay,
 		Passthrough:          passthrough,
 		Kind:                 "retry",
 		Reason:               "compact_model_fallback",

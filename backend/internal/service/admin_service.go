@@ -6,6 +6,7 @@ import (
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 )
 
@@ -684,6 +685,24 @@ type adminServiceImpl struct {
 	compositeResolver    *CompositeRouteResolver
 	// 分组平台变更后用来失效渠道缓存；可为 nil（缓存会在 TTL 到期后自然重建）
 	channelCacheInvalidator ChannelCacheInvalidator
+	// requireUpstreamRequestIDHeader 对应 gateway.require_upstream_request_id_header。
+	requireUpstreamRequestIDHeader bool
+}
+
+// SetRequireUpstreamRequestIDHeader 设置新建/更新 OpenAI API Key 账号是否必须配置
+// extra.upstream_request_id_header（gateway.require_upstream_request_id_header）。
+func (s *adminServiceImpl) SetRequireUpstreamRequestIDHeader(required bool) {
+	s.requireUpstreamRequestIDHeader = required
+}
+
+// ConfigureAdminServiceFromConfig 把只在启动时读取的网关开关注入管理服务。
+func ConfigureAdminServiceFromConfig(svc AdminService, cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	if setter, ok := svc.(interface{ SetRequireUpstreamRequestIDHeader(bool) }); ok {
+		setter.SetRequireUpstreamRequestIDHeader(cfg.Gateway.RequireUpstreamRequestIDHeader)
+	}
 }
 
 // ChannelCacheInvalidator 失效渠道缓存。
