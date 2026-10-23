@@ -161,12 +161,14 @@ type AccountBulkUpdate struct {
 	Concurrency    *int
 	Priority       *int
 	RateMultiplier *float64
-	LoadFactor     *int
-	Status         *string
-	Schedulable    *bool
-	Credentials    map[string]any
-	Extra          map[string]any
-	ProbeEnabled   *bool
+	// SellRateMultiplier 账号售价倍率；负数表示清空（回退分组定价）。
+	SellRateMultiplier *float64
+	LoadFactor         *int
+	Status             *string
+	Schedulable        *bool
+	Credentials        map[string]any
+	Extra              map[string]any
+	ProbeEnabled       *bool
 	// EnsureCodexFingerprintSeed asks the repository to atomically preserve an
 	// existing valid Codex fingerprint seed or create one for eligible rows.
 	EnsureCodexFingerprintSeed bool

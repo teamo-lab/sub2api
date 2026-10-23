@@ -2305,6 +2305,8 @@ type AccountMutation struct {
 	addpriority                 *int
 	rate_multiplier             *float64
 	addrate_multiplier          *float64
+	sell_rate_multiplier        *float64
+	addsell_rate_multiplier     *float64
 	status                      *string
 	error_message               *string
 	last_used_at                *time.Time
@@ -3142,6 +3144,76 @@ func (m *AccountMutation) AddedRateMultiplier() (r float64, exists bool) {
 func (m *AccountMutation) ResetRateMultiplier() {
 	m.rate_multiplier = nil
 	m.addrate_multiplier = nil
+}
+
+// SetSellRateMultiplier sets the "sell_rate_multiplier" field.
+func (m *AccountMutation) SetSellRateMultiplier(f float64) {
+	m.sell_rate_multiplier = &f
+	m.addsell_rate_multiplier = nil
+}
+
+// SellRateMultiplier returns the value of the "sell_rate_multiplier" field in the mutation.
+func (m *AccountMutation) SellRateMultiplier() (r float64, exists bool) {
+	v := m.sell_rate_multiplier
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSellRateMultiplier returns the old "sell_rate_multiplier" field's value of the Account entity.
+// If the Account object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccountMutation) OldSellRateMultiplier(ctx context.Context) (v *float64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSellRateMultiplier is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSellRateMultiplier requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSellRateMultiplier: %w", err)
+	}
+	return oldValue.SellRateMultiplier, nil
+}
+
+// AddSellRateMultiplier adds f to the "sell_rate_multiplier" field.
+func (m *AccountMutation) AddSellRateMultiplier(f float64) {
+	if m.addsell_rate_multiplier != nil {
+		*m.addsell_rate_multiplier += f
+	} else {
+		m.addsell_rate_multiplier = &f
+	}
+}
+
+// AddedSellRateMultiplier returns the value that was added to the "sell_rate_multiplier" field in this mutation.
+func (m *AccountMutation) AddedSellRateMultiplier() (r float64, exists bool) {
+	v := m.addsell_rate_multiplier
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearSellRateMultiplier clears the value of the "sell_rate_multiplier" field.
+func (m *AccountMutation) ClearSellRateMultiplier() {
+	m.sell_rate_multiplier = nil
+	m.addsell_rate_multiplier = nil
+	m.clearedFields[account.FieldSellRateMultiplier] = struct{}{}
+}
+
+// SellRateMultiplierCleared returns if the "sell_rate_multiplier" field was cleared in this mutation.
+func (m *AccountMutation) SellRateMultiplierCleared() bool {
+	_, ok := m.clearedFields[account.FieldSellRateMultiplier]
+	return ok
+}
+
+// ResetSellRateMultiplier resets all changes to the "sell_rate_multiplier" field.
+func (m *AccountMutation) ResetSellRateMultiplier() {
+	m.sell_rate_multiplier = nil
+	m.addsell_rate_multiplier = nil
+	delete(m.clearedFields, account.FieldSellRateMultiplier)
 }
 
 // SetStatus sets the "status" field.
@@ -4139,7 +4211,7 @@ func (m *AccountMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AccountMutation) Fields() []string {
-	fields := make([]string, 0, 31)
+	fields := make([]string, 0, 32)
 	if m.created_at != nil {
 		fields = append(fields, account.FieldCreatedAt)
 	}
@@ -4184,6 +4256,9 @@ func (m *AccountMutation) Fields() []string {
 	}
 	if m.rate_multiplier != nil {
 		fields = append(fields, account.FieldRateMultiplier)
+	}
+	if m.sell_rate_multiplier != nil {
+		fields = append(fields, account.FieldSellRateMultiplier)
 	}
 	if m.status != nil {
 		fields = append(fields, account.FieldStatus)
@@ -4271,6 +4346,8 @@ func (m *AccountMutation) Field(name string) (ent.Value, bool) {
 		return m.Priority()
 	case account.FieldRateMultiplier:
 		return m.RateMultiplier()
+	case account.FieldSellRateMultiplier:
+		return m.SellRateMultiplier()
 	case account.FieldStatus:
 		return m.Status()
 	case account.FieldErrorMessage:
@@ -4342,6 +4419,8 @@ func (m *AccountMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldPriority(ctx)
 	case account.FieldRateMultiplier:
 		return m.OldRateMultiplier(ctx)
+	case account.FieldSellRateMultiplier:
+		return m.OldSellRateMultiplier(ctx)
 	case account.FieldStatus:
 		return m.OldStatus(ctx)
 	case account.FieldErrorMessage:
@@ -4488,6 +4567,13 @@ func (m *AccountMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetRateMultiplier(v)
 		return nil
+	case account.FieldSellRateMultiplier:
+		v, ok := value.(float64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSellRateMultiplier(v)
+		return nil
 	case account.FieldStatus:
 		v, ok := value.(string)
 		if !ok {
@@ -4623,6 +4709,9 @@ func (m *AccountMutation) AddedFields() []string {
 	if m.addrate_multiplier != nil {
 		fields = append(fields, account.FieldRateMultiplier)
 	}
+	if m.addsell_rate_multiplier != nil {
+		fields = append(fields, account.FieldSellRateMultiplier)
+	}
 	return fields
 }
 
@@ -4641,6 +4730,8 @@ func (m *AccountMutation) AddedField(name string) (ent.Value, bool) {
 		return m.AddedPriority()
 	case account.FieldRateMultiplier:
 		return m.AddedRateMultiplier()
+	case account.FieldSellRateMultiplier:
+		return m.AddedSellRateMultiplier()
 	}
 	return nil, false
 }
@@ -4685,6 +4776,13 @@ func (m *AccountMutation) AddField(name string, value ent.Value) error {
 		}
 		m.AddRateMultiplier(v)
 		return nil
+	case account.FieldSellRateMultiplier:
+		v, ok := value.(float64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddSellRateMultiplier(v)
+		return nil
 	}
 	return fmt.Errorf("unknown Account numeric field %s", name)
 }
@@ -4707,6 +4805,9 @@ func (m *AccountMutation) ClearedFields() []string {
 	}
 	if m.FieldCleared(account.FieldLoadFactor) {
 		fields = append(fields, account.FieldLoadFactor)
+	}
+	if m.FieldCleared(account.FieldSellRateMultiplier) {
+		fields = append(fields, account.FieldSellRateMultiplier)
 	}
 	if m.FieldCleared(account.FieldErrorMessage) {
 		fields = append(fields, account.FieldErrorMessage)
@@ -4772,6 +4873,9 @@ func (m *AccountMutation) ClearField(name string) error {
 		return nil
 	case account.FieldLoadFactor:
 		m.ClearLoadFactor()
+		return nil
+	case account.FieldSellRateMultiplier:
+		m.ClearSellRateMultiplier()
 		return nil
 	case account.FieldErrorMessage:
 		m.ClearErrorMessage()
@@ -4861,6 +4965,9 @@ func (m *AccountMutation) ResetField(name string) error {
 		return nil
 	case account.FieldRateMultiplier:
 		m.ResetRateMultiplier()
+		return nil
+	case account.FieldSellRateMultiplier:
+		m.ResetSellRateMultiplier()
 		return nil
 	case account.FieldStatus:
 		m.ResetStatus()

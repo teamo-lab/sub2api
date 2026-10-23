@@ -1200,6 +1200,7 @@ export interface Account {
   scheduler_scores?: AccountSchedulerGroupScore[] | null
   priority: number
   rate_multiplier?: number // Account billing multiplier (>=0, 0 means free)
+  sell_rate_multiplier?: number | null // Account sell rate; null = use group pricing
   status: 'active' | 'inactive' | 'error'
   error_message: string | null
   last_used_at: string | null
@@ -1477,6 +1478,7 @@ export interface CreateAccountRequest {
   load_factor?: number | null
   priority?: number
   rate_multiplier?: number // Account billing multiplier (>=0, 0 means free)
+  sell_rate_multiplier?: number // Account sell rate (>=0); omit to use group pricing
   group_ids?: number[]
   expires_at?: number | null
   auto_pause_on_expired?: boolean
@@ -1495,6 +1497,7 @@ export interface UpdateAccountRequest {
   load_factor?: number | null
   priority?: number
   rate_multiplier?: number // Account billing multiplier (>=0, 0 means free)
+  sell_rate_multiplier?: number // Account sell rate (>=0); negative clears it (use group pricing)
   schedulable?: boolean
   status?: 'active' | 'inactive' | 'error'
   group_ids?: number[]
@@ -1614,6 +1617,7 @@ export interface CodexSessionImportRequest {
   concurrency?: number
   priority?: number
   rate_multiplier?: number
+  sell_rate_multiplier?: number
   load_factor?: number | null
   expires_at?: number | null
   auto_pause_on_expired?: boolean
@@ -1633,6 +1637,7 @@ export interface OpenAICodexPATCreateRequest {
   concurrency?: number
   priority?: number
   rate_multiplier?: number
+  sell_rate_multiplier?: number
   load_factor?: number | null
   expires_at?: number | null
   auto_pause_on_expired?: boolean

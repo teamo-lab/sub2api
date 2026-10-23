@@ -6,6 +6,7 @@ import (
 	"errors"
 	"hash/fnv"
 	"log/slog"
+	"math"
 	"net/url"
 	"reflect"
 	"sort"
@@ -35,7 +36,10 @@ type Account struct {
 	Priority                int
 	// RateMultiplier 账号计费倍率（>=0，允许 0 表示该账号计费为 0）。
 	// 使用指针用于兼容旧版本调度缓存（Redis）中缺字段的情况：nil 表示按 1.0 处理。
-	RateMultiplier     *float64
+	RateMultiplier *float64
+	// SellRateMultiplier 账号售价倍率（>=0，可空）。非空时，该账号最终服务的请求按它
+	// 代替「用户-分组覆盖 ?? 分组默认」向用户扣费；nil 表示沿用分组定价。
+	SellRateMultiplier *float64
 	LoadFactor         *int // 调度负载因子；nil 表示使用 Concurrency
 	Status             string
 	ErrorMessage       string
@@ -172,6 +176,31 @@ func (a *Account) BillingRateMultiplier() float64 {
 		return 1.0
 	}
 	return *a.RateMultiplier
+}
+
+// SellRateOverride 返回账号售价倍率及其是否生效。nil、负数、NaN、Inf 一律视为
+// 未配置（返回 false），调用方回退分组定价——脏数据绝不能把用户扣费抬高或清零。
+// 0 是合法值，表示该账号服务的请求对用户免费。
+func (a *Account) SellRateOverride() (float64, bool) {
+	if a == nil || a.SellRateMultiplier == nil {
+		return 0, false
+	}
+	v := *a.SellRateMultiplier
+	if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+		return 0, false
+	}
+	return v, true
+}
+
+// ResolveSellRateMultiplier 是用户扣费基础倍率（叠加高峰因子之前）的唯一收口：
+// 账号售价倍率 ?? groupResolved（用户-分组覆盖 ?? 分组默认 ?? 系统默认）。
+// 账号售价直接覆盖用户-分组覆盖：运维看账号即可知道该账号卖多少钱。
+// 计费（Gateway/OpenAI RecordUsage）与利润门 D 必须共用这一规则。
+func (a *Account) ResolveSellRateMultiplier(groupResolved float64) float64 {
+	if v, ok := a.SellRateOverride(); ok {
+		return v
+	}
+	return groupResolved
 }
 
 func (a *Account) EffectiveLoadFactor() int {

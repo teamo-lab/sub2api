@@ -154,6 +154,9 @@ func createAccountRecord(ctx context.Context, client *dbent.Client, account *ser
 	if account.RateMultiplier != nil {
 		builder.SetRateMultiplier(*account.RateMultiplier)
 	}
+	if account.SellRateMultiplier != nil {
+		builder.SetSellRateMultiplier(*account.SellRateMultiplier)
+	}
 	if account.LoadFactor != nil {
 		builder.SetLoadFactor(*account.LoadFactor)
 	}
@@ -542,6 +545,11 @@ func (r *accountRepository) updateLockedAccount(
 
 	if explicitRateMultiplier != nil {
 		builder.SetRateMultiplier(*explicitRateMultiplier)
+	}
+	if account.SellRateMultiplier != nil {
+		builder.SetSellRateMultiplier(*account.SellRateMultiplier)
+	} else {
+		builder.ClearSellRateMultiplier()
 	}
 	if account.LoadFactor != nil {
 		builder.SetLoadFactor(*account.LoadFactor)
@@ -1115,6 +1123,9 @@ func accountListOrder(params pagination.PaginationParams) []func(*entsql.Selecto
 		defaultOrder = false
 	case "rate_multiplier":
 		field = dbaccount.FieldRateMultiplier
+		defaultOrder = false
+	case "sell_rate_multiplier":
+		field = dbaccount.FieldSellRateMultiplier
 		defaultOrder = false
 	case "last_used_at":
 		field = dbaccount.FieldLastUsedAt
@@ -2870,6 +2881,15 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 		args = append(args, *updates.RateMultiplier)
 		idx++
 	}
+	if updates.SellRateMultiplier != nil {
+		if *updates.SellRateMultiplier < 0 {
+			setClauses = append(setClauses, "sell_rate_multiplier = NULL")
+		} else {
+			setClauses = append(setClauses, "sell_rate_multiplier = $"+itoa(idx))
+			args = append(args, *updates.SellRateMultiplier)
+			idx++
+		}
+	}
 	if updates.LoadFactor != nil {
 		if *updates.LoadFactor <= 0 {
 			setClauses = append(setClauses, "load_factor = NULL")
@@ -3381,6 +3401,7 @@ func accountEntityToService(m *dbent.Account) *service.Account {
 		Concurrency:             m.Concurrency,
 		Priority:                m.Priority,
 		RateMultiplier:          &rateMultiplier,
+		SellRateMultiplier:      m.SellRateMultiplier,
 		LoadFactor:              m.LoadFactor,
 		Status:                  m.Status,
 		ErrorMessage:            derefString(m.ErrorMessage),

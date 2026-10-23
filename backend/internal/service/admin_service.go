@@ -384,6 +384,7 @@ type CreateAccountInput struct {
 	Concurrency        int
 	Priority           int
 	RateMultiplier     *float64 // 账号计费倍率（>=0，允许 0）
+	SellRateMultiplier *float64 // 账号售价倍率（>=0；nil/负数表示不设置，沿用分组定价）
 	LoadFactor         *int
 	GroupIDs           []int64
 	ExpiresAt          *int64
@@ -415,6 +416,7 @@ type UpdateAccountInput struct {
 	Concurrency           *int     // 使用指针区分"未提供"和"设置为0"
 	Priority              *int     // 使用指针区分"未提供"和"设置为0"
 	RateMultiplier        *float64 // 账号计费倍率（>=0，允许 0）
+	SellRateMultiplier    *float64 // 账号售价倍率（>=0；负数表示清空，回退分组定价；nil 不修改）
 	LoadFactor            *int
 	Status                string
 	GroupIDs              *[]int64
@@ -434,9 +436,11 @@ type BulkUpdateAccountsInput struct {
 	Concurrency    *int
 	Priority       *int
 	RateMultiplier *float64 // 账号计费倍率（>=0，允许 0）
-	LoadFactor     *int
-	Status         string
-	Schedulable    *bool
+	// SellRateMultiplier 账号售价倍率（>=0；负数表示清空，回退分组定价；nil 不修改）
+	SellRateMultiplier *float64
+	LoadFactor         *int
+	Status             string
+	Schedulable        *bool
 	GroupIDs       *[]int64
 	Credentials    map[string]any
 	Extra          map[string]any

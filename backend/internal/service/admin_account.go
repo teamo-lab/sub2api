@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"math"
 	"net/http"
 	"reflect"
 	"strconv"
@@ -300,6 +301,7 @@ func (s *adminServiceImpl) DuplicateAccount(ctx context.Context, id int64, actor
 		Concurrency:           source.Concurrency,
 		Priority:              source.Priority,
 		RateMultiplier:        cloneAccountValuePointer(source.RateMultiplier),
+		SellRateMultiplier:    cloneAccountValuePointer(source.SellRateMultiplier),
 		LoadFactor:            cloneAccountValuePointer(source.LoadFactor),
 		GroupIDs:              groupIDs,
 		ExpiresAt:             expiresAt,
@@ -456,6 +458,13 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 			return nil, errors.New("rate_multiplier must be >= 0")
 		}
 		account.RateMultiplier = input.RateMultiplier
+	}
+	sellRate, clearSellRate, err := normalizeSellRateMultiplierInput(input.SellRateMultiplier)
+	if err != nil {
+		return nil, err
+	}
+	if !clearSellRate {
+		account.SellRateMultiplier = sellRate
 	}
 	if input.LoadFactor != nil && *input.LoadFactor > 0 {
 		if *input.LoadFactor > 10000 {
@@ -799,6 +808,17 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		}
 		account.RateMultiplier = input.RateMultiplier
 	}
+	if input.SellRateMultiplier != nil {
+		sellRate, clearSellRate, err := normalizeSellRateMultiplierInput(input.SellRateMultiplier)
+		if err != nil {
+			return nil, err
+		}
+		if clearSellRate {
+			account.SellRateMultiplier = nil
+		} else {
+			account.SellRateMultiplier = sellRate
+		}
+	}
 	if input.LoadFactor != nil {
 		if *input.LoadFactor <= 0 {
 			account.LoadFactor = nil // 0 或负数表示清除
@@ -1115,6 +1135,18 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	}
 	if input.RateMultiplier != nil {
 		repoUpdates.RateMultiplier = input.RateMultiplier
+	}
+	if input.SellRateMultiplier != nil {
+		sellRate, clearSellRate, err := normalizeSellRateMultiplierInput(input.SellRateMultiplier)
+		if err != nil {
+			return nil, err
+		}
+		if clearSellRate {
+			clearValue := -1.0
+			repoUpdates.SellRateMultiplier = &clearValue // 仓库层约定：负数 = 置 NULL
+		} else {
+			repoUpdates.SellRateMultiplier = sellRate
+		}
 	}
 	if input.LoadFactor != nil {
 		if *input.LoadFactor <= 0 {
@@ -1742,4 +1774,26 @@ func (s *adminServiceImpl) ForceAntigravityPrivacy(ctx context.Context, account 
 	}
 	applyAntigravityPrivacyMode(account, mode)
 	return mode
+}
+
+// maxSellRateMultiplier 对应 accounts.sell_rate_multiplier decimal(10,4) 的上限。
+const maxSellRateMultiplier = 999999.9999
+
+// normalizeSellRateMultiplierInput 校验账号售价倍率入参。约定：nil 或负数表示清空
+// （clear=true，回退分组定价）；NaN/Inf/超出列精度上限视为非法；0 合法（免费）。
+func normalizeSellRateMultiplierInput(v *float64) (value *float64, clear bool, err error) {
+	if v == nil {
+		return nil, true, nil
+	}
+	if math.IsNaN(*v) || math.IsInf(*v, 0) {
+		return nil, false, errors.New("sell_rate_multiplier must be a finite number")
+	}
+	if *v < 0 {
+		return nil, true, nil
+	}
+	if *v > maxSellRateMultiplier {
+		return nil, false, fmt.Errorf("sell_rate_multiplier must be <= %v", maxSellRateMultiplier)
+	}
+	out := *v
+	return &out, false, nil
 }

@@ -2970,6 +2970,19 @@
           <input v-model.number="form.rate_multiplier" type="number" min="0" step="0.001" class="input" />
           <p class="input-hint">{{ t('admin.accounts.billingRateMultiplierHint') }}</p>
         </div>
+        <div>
+          <label class="input-label">{{ t('admin.accounts.sellRateMultiplier') }}</label>
+          <input
+            v-model.number="form.sell_rate_multiplier"
+            type="number"
+            min="0"
+            step="0.001"
+            class="input"
+            data-testid="account-sell-rate-multiplier"
+            :placeholder="t('admin.accounts.sellRateMultiplierPlaceholder')"
+          />
+          <p class="input-hint">{{ t('admin.accounts.sellRateMultiplierHint') }}</p>
+        </div>
       </div>
       <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <label class="input-label">{{ t('admin.accounts.expiresAt') }}</label>
@@ -3881,6 +3894,7 @@ import {
   parseDateTimeLocalInput
 } from '@/utils/format'
 import { createStableObjectKeyResolver } from '@/utils/stableObjectKey'
+import { sellRateCreatePayload } from '@/utils/sellRate'
 import { VERTEX_LOCATION_OPTIONS } from '@/constants/account'
 import {
   OPENAI_WS_MODE_CTX_POOL,
@@ -4586,6 +4600,7 @@ const form = reactive({
   load_factor: null as number | null,
   priority: 1,
   rate_multiplier: 1,
+  sell_rate_multiplier: null as number | '' | null,
   group_ids: [] as number[],
   expires_at: null as number | null
 })
@@ -5164,6 +5179,7 @@ const resetForm = () => {
   form.load_factor = null
   form.priority = 1
   form.rate_multiplier = 1
+  form.sell_rate_multiplier = null
   form.group_ids = []
   form.expires_at = null
   accountCategory.value = 'oauth-based'
@@ -5727,6 +5743,7 @@ const handleSubmit = async () => {
 
   await doCreateAccount({
     ...form,
+    sell_rate_multiplier: sellRateCreatePayload(form.sell_rate_multiplier),
     group_ids: form.group_ids,
     extra: withUpstreamRequestIdHeader(extra),
     upstream_billing_probe_enabled: upstreamBillingAutoProbeEnabled.value,
@@ -5856,6 +5873,7 @@ const createAccountAndFinish = async (
     load_factor: form.load_factor ?? undefined,
     priority: form.priority,
     rate_multiplier: form.rate_multiplier,
+    sell_rate_multiplier: sellRateCreatePayload(form.sell_rate_multiplier),
     group_ids: form.group_ids,
     expires_at: form.expires_at,
     // 上游倍率探测对全部 API-key 平台开放（antigravity upstream 走本 helper）；
@@ -5923,6 +5941,7 @@ const handleGrokValidateRT = async (refreshTokenInput: string) => {
           load_factor: form.load_factor ?? undefined,
           priority: form.priority,
           rate_multiplier: form.rate_multiplier,
+          sell_rate_multiplier: sellRateCreatePayload(form.sell_rate_multiplier),
           group_ids: form.group_ids,
           expires_at: form.expires_at,
           auto_pause_on_expired: autoPauseOnExpired.value
@@ -5991,6 +6010,7 @@ const handleGrokImportSSO = async (ssoInput: string) => {
       load_factor: form.load_factor ?? undefined,
       priority: form.priority,
       rate_multiplier: form.rate_multiplier,
+      sell_rate_multiplier: sellRateCreatePayload(form.sell_rate_multiplier),
       expires_at: form.expires_at,
       auto_pause_on_expired: autoPauseOnExpired.value
     })
@@ -6100,6 +6120,7 @@ const handleGrokAuthorizePassword = async (emailPasswordInput: string) => {
           load_factor: form.load_factor ?? undefined,
           priority: form.priority,
           rate_multiplier: form.rate_multiplier,
+          sell_rate_multiplier: sellRateCreatePayload(form.sell_rate_multiplier),
           group_ids: form.group_ids,
           expires_at: form.expires_at,
           auto_pause_on_expired: autoPauseOnExpired.value
@@ -6199,6 +6220,7 @@ const handleOpenAIExchange = async (authCode: string) => {
         load_factor: form.load_factor ?? undefined,
         priority: form.priority,
         rate_multiplier: form.rate_multiplier,
+        sell_rate_multiplier: sellRateCreatePayload(form.sell_rate_multiplier),
         group_ids: form.group_ids,
         expires_at: form.expires_at,
         auto_pause_on_expired: autoPauseOnExpired.value
@@ -6304,6 +6326,7 @@ const handleOpenAIImportCodexSession = async (content: string) => {
       load_factor: form.load_factor ?? undefined,
       priority: form.priority,
       rate_multiplier: form.rate_multiplier,
+      sell_rate_multiplier: sellRateCreatePayload(form.sell_rate_multiplier),
       group_ids: form.group_ids,
       expires_at: form.expires_at,
       auto_pause_on_expired: autoPauseOnExpired.value,
@@ -6382,6 +6405,7 @@ const handleOpenAIImportCodexPAT = async (accessToken: string) => {
       load_factor: form.load_factor ?? undefined,
       priority: form.priority,
       rate_multiplier: form.rate_multiplier,
+      sell_rate_multiplier: sellRateCreatePayload(form.sell_rate_multiplier),
       group_ids: form.group_ids,
       expires_at: form.expires_at,
       auto_pause_on_expired: autoPauseOnExpired.value,
@@ -6480,6 +6504,7 @@ const handleOpenAIBatchRT = async (refreshTokenInput: string, clientId?: string)
             load_factor: form.load_factor ?? undefined,
             priority: form.priority,
             rate_multiplier: form.rate_multiplier,
+            sell_rate_multiplier: sellRateCreatePayload(form.sell_rate_multiplier),
             group_ids: form.group_ids,
             expires_at: form.expires_at,
             auto_pause_on_expired: autoPauseOnExpired.value
@@ -6579,6 +6604,7 @@ const handleAntigravityValidateRT = async (refreshTokenInput: string) => {
           load_factor: form.load_factor ?? undefined,
           priority: form.priority,
           rate_multiplier: form.rate_multiplier,
+          sell_rate_multiplier: sellRateCreatePayload(form.sell_rate_multiplier),
           group_ids: form.group_ids,
           expires_at: form.expires_at,
           auto_pause_on_expired: autoPauseOnExpired.value
@@ -6960,6 +6986,7 @@ const handleCookieAuth = async (sessionKey: string) => {
           load_factor: form.load_factor ?? undefined,
           priority: form.priority,
           rate_multiplier: form.rate_multiplier,
+          sell_rate_multiplier: sellRateCreatePayload(form.sell_rate_multiplier),
           group_ids: form.group_ids,
           expires_at: form.expires_at,
           auto_pause_on_expired: autoPauseOnExpired.value

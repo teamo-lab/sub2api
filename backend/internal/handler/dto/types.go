@@ -223,6 +223,7 @@ type Account struct {
 	LoadFactor              *int                           `json:"load_factor,omitempty"`
 	Priority                int                            `json:"priority"`
 	RateMultiplier          float64                        `json:"rate_multiplier"`
+	SellRateMultiplier      *float64                       `json:"sell_rate_multiplier"` // null 表示沿用分组定价
 	Status                  string                         `json:"status"`
 	ErrorMessage            string                         `json:"error_message"`
 	LastUsedAt              *time.Time                     `json:"last_used_at"`
@@ -348,6 +349,7 @@ type AccountListItem struct {
 	LoadFactor              *int       `json:"load_factor,omitempty"`
 	Priority                int        `json:"priority"`
 	RateMultiplier          float64    `json:"rate_multiplier"`
+	SellRateMultiplier      *float64   `json:"sell_rate_multiplier"`
 	Status                  string     `json:"status"`
 	ErrorMessage            string     `json:"error_message"`
 	LastUsedAt              *time.Time `json:"last_used_at"`
