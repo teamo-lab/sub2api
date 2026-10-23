@@ -96,6 +96,11 @@ func (s *OpenAIGatewayService) failoverOpenAIUpstreamHTTPError(
 		return rejected
 	}
 	shouldFailover := s.shouldFailoverOpenAIUpstreamResponse(resp.StatusCode, upstreamMsg, respBody)
+	newAPIBodyLimit := account != nil && account.Platform != PlatformGrok &&
+		isNewAPIBodyParseLimitRejection(resp.StatusCode, upstreamMsg, openAIInboundRequestBodyBytesFromContext(ctx))
+	if newAPIBodyLimit {
+		shouldFailover = true
+	}
 	tempUnscheduled := false
 	if c != nil && account != nil && account.Platform != PlatformGrok && !shouldFailover && !IsResponseCommitted(c) && s.rateLimitService != nil {
 		tempUnscheduled = s.rateLimitService.CheckErrorPolicy(ctx, account, resp.StatusCode, respBody, upstreamModel) == ErrorPolicyTempUnscheduled
@@ -131,6 +136,12 @@ func (s *OpenAIGatewayService) failoverOpenAIUpstreamHTTPError(
 		Message:            upstreamMsg,
 		Detail:             upstreamDetail,
 	})
+	if newAPIBodyLimit {
+		// 请求体超过这个号的上限，跟账号健康无关：不冷却、不计入账号失败。
+		failoverErr := newOpenAIUpstreamFailoverError(resp.StatusCode, resp.Header, respBody, upstreamMsg, false)
+		markOpenAIRequestBodyTooLarge(failoverErr)
+		return failoverErr
+	}
 	shouldDisable := tempUnscheduled
 	if account.Platform != PlatformGrok && !tempUnscheduled {
 		shouldDisable = s.handleOpenAIAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody, upstreamModel)
