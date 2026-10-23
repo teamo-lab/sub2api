@@ -1174,6 +1174,10 @@ type GatewayConfig struct {
 	// 上游错误响应体记录最大字节数（超过会截断）
 	LogUpstreamErrorBodyMaxBytes int `mapstructure:"log_upstream_error_body_max_bytes"`
 
+	// RequireUpstreamRequestIDHeader 打开后，管理端新建或更新 OpenAI API Key 账号时必须配置
+	// extra.upstream_request_id_header，否则换号失败的每一跳都查不到上游请求标识（默认关闭）。
+	RequireUpstreamRequestIDHeader bool `mapstructure:"require_upstream_request_id_header"`
+
 	// API-key 账号在客户端未提供 anthropic-beta 时，是否按需自动补齐（默认关闭以保持兼容）
 	InjectBetaForAPIKey bool `mapstructure:"inject_beta_for_apikey"`
 
@@ -2553,6 +2557,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.openai_high_effort_first_output_timeout_seconds", 0)
 	viper.SetDefault("gateway.log_upstream_error_body", true)
 	viper.SetDefault("gateway.log_upstream_error_body_max_bytes", 2048)
+	viper.SetDefault("gateway.require_upstream_request_id_header", false)
 	viper.SetDefault("gateway.inject_beta_for_apikey", false)
 	viper.SetDefault("gateway.failover_on_400", false)
 	viper.SetDefault("gateway.max_account_switches", 10)

@@ -2610,3 +2610,20 @@ func TestLoad_DefaultGatewayImageStreamConfig(t *testing.T) {
 		t.Fatalf("image stream timeout = %d, want greater than ordinary stream timeout %d", cfg.Gateway.ImageStreamDataIntervalTimeout, cfg.Gateway.StreamDataIntervalTimeout)
 	}
 }
+
+func TestLoadRequireUpstreamRequestIDHeader(t *testing.T) {
+	t.Run("disabled by default", func(t *testing.T) {
+		resetViperWithJWTSecret(t)
+		cfg, err := Load()
+		require.NoError(t, err)
+		require.False(t, cfg.Gateway.RequireUpstreamRequestIDHeader)
+	})
+
+	t.Run("enabled by environment variable", func(t *testing.T) {
+		resetViperWithJWTSecret(t)
+		t.Setenv("GATEWAY_REQUIRE_UPSTREAM_REQUEST_ID_HEADER", "true")
+		cfg, err := Load()
+		require.NoError(t, err)
+		require.True(t, cfg.Gateway.RequireUpstreamRequestIDHeader)
+	})
+}
