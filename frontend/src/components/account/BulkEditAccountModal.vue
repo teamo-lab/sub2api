@@ -850,6 +850,38 @@
             <span>{{ t('admin.accounts.bulkEdit.rateSyncWarning') }}</span>
           </p>
         </div>
+        <div>
+          <div class="mb-3 flex items-center justify-between">
+            <label
+              id="bulk-edit-sell-rate-multiplier-label"
+              class="input-label mb-0"
+              for="bulk-edit-sell-rate-multiplier-enabled"
+            >
+              {{ t('admin.accounts.sellRateMultiplier') }}
+            </label>
+            <input
+              v-model="enableSellRateMultiplier"
+              id="bulk-edit-sell-rate-multiplier-enabled"
+              type="checkbox"
+              aria-controls="bulk-edit-sell-rate-multiplier"
+              class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+            />
+          </div>
+          <input
+            v-model.number="sellRateMultiplier"
+            id="bulk-edit-sell-rate-multiplier"
+            type="number"
+            min="0"
+            step="0.01"
+            :disabled="!enableSellRateMultiplier"
+            class="input"
+            :class="!enableSellRateMultiplier && 'cursor-not-allowed opacity-50'"
+            :placeholder="t('admin.accounts.sellRateMultiplierPlaceholder')"
+            aria-labelledby="bulk-edit-sell-rate-multiplier-label"
+            data-testid="bulk-sell-rate-multiplier"
+          />
+          <p class="input-hint">{{ t('admin.accounts.sellRateMultiplierHint') }}</p>
+        </div>
       </div>
 
       <!-- Status -->
@@ -1547,6 +1579,7 @@ import {
   resolveOpenAIWSModeConcurrencyHintKey
 } from '@/utils/openaiWsMode'
 import type { OpenAIWSMode } from '@/utils/openaiWsMode'
+import { sellRateUpdatePayload } from '@/utils/sellRate'
 interface Props {
   show: boolean
   accountIds: number[]
@@ -1687,6 +1720,7 @@ const enableStickyBurst = ref(false)
 const enableLoadFactor = ref(false)
 const enablePriority = ref(false)
 const enableRateMultiplier = ref(false)
+const enableSellRateMultiplier = ref(false)
 const enableStatus = ref(false)
 const enableGroups = ref(false)
 const enableOpenAIPassthrough = ref(false)
@@ -1723,6 +1757,7 @@ const stickyBurst = ref(1)
 const loadFactor = ref<number | null>(null)
 const priority = ref(1)
 const rateMultiplier = ref(1)
+const sellRateMultiplier = ref<number | '' | null>(null)
 const status = ref<'active' | 'inactive'>('active')
 const groupIds = ref<number[]>([])
 const openaiPassthroughEnabled = ref(false)
@@ -1997,6 +2032,11 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     updates.rate_multiplier = rateMultiplier.value
   }
 
+  // 售价倍率留空 = 清空（发送 -1，后端回退分组定价）
+  if (enableSellRateMultiplier.value) {
+    updates.sell_rate_multiplier = sellRateUpdatePayload(sellRateMultiplier.value)
+  }
+
   if (enableStatus.value) {
     updates.status = status.value
   }
@@ -2254,6 +2294,7 @@ const handleSubmit = async () => {
     enableLoadFactor.value ||
     enablePriority.value ||
     enableRateMultiplier.value ||
+    enableSellRateMultiplier.value ||
     enableStatus.value ||
     enableGroups.value ||
     enableOpenAIWSMode.value ||
@@ -2401,6 +2442,7 @@ watch(
       enableLoadFactor.value = false
       enablePriority.value = false
       enableRateMultiplier.value = false
+      enableSellRateMultiplier.value = false
       enableStatus.value = false
       enableGroups.value = false
       enableOpenAIPassthrough.value = false
@@ -2440,6 +2482,7 @@ watch(
       loadFactor.value = null
       priority.value = 1
       rateMultiplier.value = 1
+      sellRateMultiplier.value = null
       status.value = 'active'
       groupIds.value = []
       openaiOAuthResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF

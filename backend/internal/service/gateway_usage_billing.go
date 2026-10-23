@@ -755,6 +755,9 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 		groupDefault := apiKey.Group.RateMultiplier
 		multiplier = s.ResolveUserGroupRateMultiplier(ctx, user.ID, *apiKey.GroupID, groupDefault)
 	}
+	// 账号售价倍率（非空时）直接覆盖上面的分组/用户-分组倍率：按最终服务本请求的账号计价
+	//（failover 换号后 account 即最终成功账号；失败跳不进入 RecordUsage，不计费）。
+	multiplier = account.ResolveSellRateMultiplier(multiplier)
 	// token 倍率叠加高峰因子（token 计费含图片 token，图片按次倍率不受影响）。高峰因子按请求时刻现算，
 	// 不并入上面的 getUserGroupRateMultiplier，以免污染 user:group 倍率缓存。
 	pricingAt := input.PricingAt

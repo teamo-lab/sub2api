@@ -16,6 +16,11 @@ package service
 //     （用户-分组覆盖 ?? 分组默认）× Group.PeakMultiplierAt(pricingAt)，绝不在
 //     用户有覆盖时退回分组默认；开关与 margin/buffer 则始终取被调度
 //     openai/grok 分组。
+//   - 账号售价倍率（accounts.sell_rate_multiplier）非空时，计费按该账号售价代替
+//     分组/用户覆盖倍率（见 Account.ResolveSellRateMultiplier），D 随之逐账号：
+//     D(account) = 账号售价 × 高峰因子。门同时预存 sellRateScale = 高峰因子 ×
+//     (1 − margin − buffer)，否决点对有售价的账号用 售价 × sellRateScale 作阈值，
+//     无售价的账号沿用分组阈值，从而不会因账号售价高于/低于分组价而误挡/误放。
 //   - U（上游成本倍率）取 accounts.rate_multiplier。倍率可以由运营者手工维护，
 //     也可以由上游倍率探测同步写回；利润门不再耦合探测协议、新鲜度或账号类型。
 //     0 是合法的免费上游倍率；nil、负数、NaN、Inf 属于非法数据并保守拒绝。
@@ -122,7 +127,11 @@ type openAIProfitControlGate struct {
 	// platform 是利润配置所在分组的平台，用于按平台观测门是否真实生效。
 	platform string
 	// threshold = D(pricingAt) × (1 − margin − buffer)，账号倍率必须 <= 它。
+	// 仅适用于未配置售价倍率的账号；有售价的账号见 thresholdFor。
 	threshold float64
+	// sellRateScale = 高峰因子(pricingAt) × (1 − margin − buffer)：配置了售价倍率的
+	// 账号按 售价 × sellRateScale 求逐账号阈值（D 与计费同源，按该账号售价计）。
+	sellRateScale float64
 	// pricingAt 是本请求的统一定价时刻（D 侧）。
 	pricingAt time.Time
 }
@@ -262,11 +271,22 @@ func (s *OpenAIGatewayService) resolveOpenAIProfitControlGate(ctx context.Contex
 	deduction := group.ProfitMinMargin + group.ProfitSafetyBuffer
 	threshold := clampProfitControlThreshold(downstream * (1 - deduction))
 	return &openAIProfitControlGate{
-		groupID:   *groupID,
-		platform:  group.Platform,
-		threshold: threshold,
-		pricingAt: pricingAt,
+		groupID:       *groupID,
+		platform:      group.Platform,
+		threshold:     threshold,
+		sellRateScale: billingGroup.PeakMultiplierAt(pricingAt) * (1 - deduction),
+		pricingAt:     pricingAt,
 	}
+}
+
+// thresholdFor 返回该账号适用的准入阈值：配置了售价倍率的账号按 售价 × 高峰因子 ×
+// (1 − margin − buffer) 逐账号计算（与 RecordUsage 按账号售价扣费同源）；其余账号
+// 沿用按分组/用户覆盖倍率预计算的阈值。
+func (g *openAIProfitControlGate) thresholdFor(account *Account) float64 {
+	if sell, ok := account.SellRateOverride(); ok {
+		return clampProfitControlThreshold(sell * g.sellRateScale)
+	}
+	return g.threshold
 }
 
 // attachSelectionProfitGate 把调度上下文里生效的利润门记录到选号结果上。门在
@@ -312,8 +332,8 @@ func openAIProfitControlVetoReason(ctx context.Context, account *Account) (bool,
 		return true, openAIProfitFilterReasonInvalidAccountRate
 	}
 	upstream := *account.RateMultiplier
-	if profitControlOverThreshold(upstream, gate.threshold) {
-		openAIProfitControlObserverInstance.recordVeto(gate.groupID, gate.platform, gate.threshold, openAIProfitFilterReasonThreshold)
+	if threshold := gate.thresholdFor(account); profitControlOverThreshold(upstream, threshold) {
+		openAIProfitControlObserverInstance.recordVeto(gate.groupID, gate.platform, threshold, openAIProfitFilterReasonThreshold)
 		return true, openAIProfitFilterReasonThreshold
 	}
 	return false, ""

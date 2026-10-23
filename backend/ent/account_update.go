@@ -268,6 +268,33 @@ func (_u *AccountUpdate) AddRateMultiplier(v float64) *AccountUpdate {
 	return _u
 }
 
+// SetSellRateMultiplier sets the "sell_rate_multiplier" field.
+func (_u *AccountUpdate) SetSellRateMultiplier(v float64) *AccountUpdate {
+	_u.mutation.ResetSellRateMultiplier()
+	_u.mutation.SetSellRateMultiplier(v)
+	return _u
+}
+
+// SetNillableSellRateMultiplier sets the "sell_rate_multiplier" field if the given value is not nil.
+func (_u *AccountUpdate) SetNillableSellRateMultiplier(v *float64) *AccountUpdate {
+	if v != nil {
+		_u.SetSellRateMultiplier(*v)
+	}
+	return _u
+}
+
+// AddSellRateMultiplier adds value to the "sell_rate_multiplier" field.
+func (_u *AccountUpdate) AddSellRateMultiplier(v float64) *AccountUpdate {
+	_u.mutation.AddSellRateMultiplier(v)
+	return _u
+}
+
+// ClearSellRateMultiplier clears the value of the "sell_rate_multiplier" field.
+func (_u *AccountUpdate) ClearSellRateMultiplier() *AccountUpdate {
+	_u.mutation.ClearSellRateMultiplier()
+	return _u
+}
+
 // SetStatus sets the "status" field.
 func (_u *AccountUpdate) SetStatus(v string) *AccountUpdate {
 	_u.mutation.SetStatus(v)
@@ -868,6 +895,15 @@ func (_u *AccountUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if value, ok := _u.mutation.AddedRateMultiplier(); ok {
 		_spec.AddField(account.FieldRateMultiplier, field.TypeFloat64, value)
 	}
+	if value, ok := _u.mutation.SellRateMultiplier(); ok {
+		_spec.SetField(account.FieldSellRateMultiplier, field.TypeFloat64, value)
+	}
+	if value, ok := _u.mutation.AddedSellRateMultiplier(); ok {
+		_spec.AddField(account.FieldSellRateMultiplier, field.TypeFloat64, value)
+	}
+	if _u.mutation.SellRateMultiplierCleared() {
+		_spec.ClearField(account.FieldSellRateMultiplier, field.TypeFloat64)
+	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(account.FieldStatus, field.TypeString, value)
 	}
@@ -1405,6 +1441,33 @@ func (_u *AccountUpdateOne) SetNillableRateMultiplier(v *float64) *AccountUpdate
 // AddRateMultiplier adds value to the "rate_multiplier" field.
 func (_u *AccountUpdateOne) AddRateMultiplier(v float64) *AccountUpdateOne {
 	_u.mutation.AddRateMultiplier(v)
+	return _u
+}
+
+// SetSellRateMultiplier sets the "sell_rate_multiplier" field.
+func (_u *AccountUpdateOne) SetSellRateMultiplier(v float64) *AccountUpdateOne {
+	_u.mutation.ResetSellRateMultiplier()
+	_u.mutation.SetSellRateMultiplier(v)
+	return _u
+}
+
+// SetNillableSellRateMultiplier sets the "sell_rate_multiplier" field if the given value is not nil.
+func (_u *AccountUpdateOne) SetNillableSellRateMultiplier(v *float64) *AccountUpdateOne {
+	if v != nil {
+		_u.SetSellRateMultiplier(*v)
+	}
+	return _u
+}
+
+// AddSellRateMultiplier adds value to the "sell_rate_multiplier" field.
+func (_u *AccountUpdateOne) AddSellRateMultiplier(v float64) *AccountUpdateOne {
+	_u.mutation.AddSellRateMultiplier(v)
+	return _u
+}
+
+// ClearSellRateMultiplier clears the value of the "sell_rate_multiplier" field.
+func (_u *AccountUpdateOne) ClearSellRateMultiplier() *AccountUpdateOne {
+	_u.mutation.ClearSellRateMultiplier()
 	return _u
 }
 
@@ -2037,6 +2100,15 @@ func (_u *AccountUpdateOne) sqlSave(ctx context.Context) (_node *Account, err er
 	}
 	if value, ok := _u.mutation.AddedRateMultiplier(); ok {
 		_spec.AddField(account.FieldRateMultiplier, field.TypeFloat64, value)
+	}
+	if value, ok := _u.mutation.SellRateMultiplier(); ok {
+		_spec.SetField(account.FieldSellRateMultiplier, field.TypeFloat64, value)
+	}
+	if value, ok := _u.mutation.AddedSellRateMultiplier(); ok {
+		_spec.AddField(account.FieldSellRateMultiplier, field.TypeFloat64, value)
+	}
+	if _u.mutation.SellRateMultiplierCleared() {
+		_spec.ClearField(account.FieldSellRateMultiplier, field.TypeFloat64)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(account.FieldStatus, field.TypeString, value)

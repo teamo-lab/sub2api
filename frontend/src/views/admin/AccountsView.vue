@@ -347,6 +347,18 @@
               </div>
             </div>
           </template>
+          <template #cell-sell_rate_multiplier="{ row }">
+            <span
+              v-if="row.sell_rate_multiplier != null"
+              class="text-sm font-mono text-gray-700 dark:text-gray-300"
+              data-testid="account-sell-rate"
+            >{{ formatMultiplier(row.sell_rate_multiplier) }}x</span>
+            <span
+              v-else
+              class="cursor-help text-xs text-gray-400 dark:text-gray-500"
+              :title="t('admin.accounts.sellRateMultiplierGroupTooltip')"
+            >{{ t('admin.accounts.sellRateMultiplierGroupPrice') }}</span>
+          </template>
           <template #cell-rate_multiplier="{ row }">
             <span class="inline-flex items-center gap-1 text-sm font-mono text-gray-700 dark:text-gray-300">
               <span>{{ formatMultiplier(row.rate_multiplier ?? 1) }}x</span>
@@ -642,7 +654,8 @@ const accountToolsDropdownStyle = computed(() => ({
   width: `${accountToolsDropdownPosition.width}px`
 }))
 const hiddenColumns = reactive<Set<string>>(new Set())
-const DEFAULT_HIDDEN_COLUMNS = ['today_stats', 'proxy', 'notes', 'scheduler_score', 'rate_multiplier']
+// 成本倍率与售价倍率默认同时展示：运维看账号即可知道该账号的成本与卖价。
+const DEFAULT_HIDDEN_COLUMNS = ['today_stats', 'proxy', 'notes', 'scheduler_score']
 const HIDDEN_COLUMNS_KEY = 'account-hidden-columns'
 // One-time migration: hide scheduler score for existing admins too, because showing it opt-ins to heavy backend scoring.
 const HIDDEN_COLUMNS_VERSION_KEY = 'account-hidden-columns-version'
@@ -662,6 +675,7 @@ const ACCOUNT_SORTABLE_KEYS = new Set([
   'schedulable',
   'priority',
   'rate_multiplier',
+  'sell_rate_multiplier',
   'upstream_billing_rate',
   'last_used_at',
   'created_at',
@@ -1799,6 +1813,7 @@ const allColumns = computed(() => {
     { key: 'priority', label: t('admin.accounts.columns.priority'), sortable: true },
     { key: 'scheduler_score', label: t('admin.accounts.columns.schedulerScore'), sortable: false },
     { key: 'rate_multiplier', label: t('admin.accounts.columns.billingRateMultiplier'), sortable: true },
+    { key: 'sell_rate_multiplier', label: t('admin.accounts.columns.sellRateMultiplier'), sortable: true },
     { key: 'upstream_billing_rate', label: t('admin.accounts.columns.upstreamBillingRate'), sortable: true },
     { key: 'last_used_at', label: t('admin.accounts.columns.lastUsed'), sortable: true },
     { key: 'created_at', label: t('admin.accounts.columns.createdAt'), sortable: true },

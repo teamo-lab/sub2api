@@ -120,6 +120,11 @@ func RateMultiplier(v float64) predicate.Account {
 	return predicate.Account(sql.FieldEQ(FieldRateMultiplier, v))
 }
 
+// SellRateMultiplier applies equality check predicate on the "sell_rate_multiplier" field. It's identical to SellRateMultiplierEQ.
+func SellRateMultiplier(v float64) predicate.Account {
+	return predicate.Account(sql.FieldEQ(FieldSellRateMultiplier, v))
+}
+
 // Status applies equality check predicate on the "status" field. It's identical to StatusEQ.
 func Status(v string) predicate.Account {
 	return predicate.Account(sql.FieldEQ(FieldStatus, v))
@@ -843,6 +848,56 @@ func RateMultiplierLT(v float64) predicate.Account {
 // RateMultiplierLTE applies the LTE predicate on the "rate_multiplier" field.
 func RateMultiplierLTE(v float64) predicate.Account {
 	return predicate.Account(sql.FieldLTE(FieldRateMultiplier, v))
+}
+
+// SellRateMultiplierEQ applies the EQ predicate on the "sell_rate_multiplier" field.
+func SellRateMultiplierEQ(v float64) predicate.Account {
+	return predicate.Account(sql.FieldEQ(FieldSellRateMultiplier, v))
+}
+
+// SellRateMultiplierNEQ applies the NEQ predicate on the "sell_rate_multiplier" field.
+func SellRateMultiplierNEQ(v float64) predicate.Account {
+	return predicate.Account(sql.FieldNEQ(FieldSellRateMultiplier, v))
+}
+
+// SellRateMultiplierIn applies the In predicate on the "sell_rate_multiplier" field.
+func SellRateMultiplierIn(vs ...float64) predicate.Account {
+	return predicate.Account(sql.FieldIn(FieldSellRateMultiplier, vs...))
+}
+
+// SellRateMultiplierNotIn applies the NotIn predicate on the "sell_rate_multiplier" field.
+func SellRateMultiplierNotIn(vs ...float64) predicate.Account {
+	return predicate.Account(sql.FieldNotIn(FieldSellRateMultiplier, vs...))
+}
+
+// SellRateMultiplierGT applies the GT predicate on the "sell_rate_multiplier" field.
+func SellRateMultiplierGT(v float64) predicate.Account {
+	return predicate.Account(sql.FieldGT(FieldSellRateMultiplier, v))
+}
+
+// SellRateMultiplierGTE applies the GTE predicate on the "sell_rate_multiplier" field.
+func SellRateMultiplierGTE(v float64) predicate.Account {
+	return predicate.Account(sql.FieldGTE(FieldSellRateMultiplier, v))
+}
+
+// SellRateMultiplierLT applies the LT predicate on the "sell_rate_multiplier" field.
+func SellRateMultiplierLT(v float64) predicate.Account {
+	return predicate.Account(sql.FieldLT(FieldSellRateMultiplier, v))
+}
+
+// SellRateMultiplierLTE applies the LTE predicate on the "sell_rate_multiplier" field.
+func SellRateMultiplierLTE(v float64) predicate.Account {
+	return predicate.Account(sql.FieldLTE(FieldSellRateMultiplier, v))
+}
+
+// SellRateMultiplierIsNil applies the IsNil predicate on the "sell_rate_multiplier" field.
+func SellRateMultiplierIsNil() predicate.Account {
+	return predicate.Account(sql.FieldIsNull(FieldSellRateMultiplier))
+}
+
+// SellRateMultiplierNotNil applies the NotNil predicate on the "sell_rate_multiplier" field.
+func SellRateMultiplierNotNil() predicate.Account {
+	return predicate.Account(sql.FieldNotNull(FieldSellRateMultiplier))
 }
 
 // StatusEQ applies the EQ predicate on the "status" field.

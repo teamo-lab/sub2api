@@ -1628,6 +1628,19 @@
             />
           </div>
         </div>
+        <div>
+          <label class="input-label">{{ t('admin.accounts.sellRateMultiplier') }}</label>
+          <input
+            v-model.number="form.sell_rate_multiplier"
+            type="number"
+            min="0"
+            step="0.001"
+            class="input"
+            data-testid="account-sell-rate-multiplier"
+            :placeholder="t('admin.accounts.sellRateMultiplierPlaceholder')"
+          />
+          <p class="input-hint">{{ t('admin.accounts.sellRateMultiplierHint') }}</p>
+        </div>
       </div>
       <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <label class="input-label">{{ t('admin.accounts.expiresAt') }}</label>
@@ -2983,6 +2996,7 @@ import {
 import { createStableObjectKeyResolver } from '@/utils/stableObjectKey'
 import { allSelectedGroupsEnableLongContextPricing } from '@/components/account/longContextBilling'
 import { VERTEX_LOCATION_OPTIONS } from '@/constants/account'
+import { normalizeSellRateInput, sellRateUpdatePayload } from '@/utils/sellRate'
 import {
   OPENAI_WS_MODE_CTX_POOL,
   OPENAI_WS_MODE_OFF,
@@ -3658,6 +3672,7 @@ const form = reactive({
   load_factor: null as number | null,
   priority: 1,
   rate_multiplier: 1,
+  sell_rate_multiplier: null as number | '' | null,
   status: 'active' as 'active' | 'inactive' | 'error',
   group_ids: [] as number[],
   expires_at: null as number | null
@@ -3770,6 +3785,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   form.load_factor = newAccount.load_factor ?? null
   form.priority = newAccount.priority
   form.rate_multiplier = newAccount.rate_multiplier ?? 1
+  form.sell_rate_multiplier = normalizeSellRateInput(newAccount.sell_rate_multiplier)
   form.status = (newAccount.status === 'active' || newAccount.status === 'inactive' || newAccount.status === 'error')
     ? newAccount.status
     : 'active'
@@ -4748,6 +4764,8 @@ const handleSubmit = async () => {
     if (lf == null || Number.isNaN(lf) || lf <= 0) {
       updatePayload.load_factor = 0
     }
+    // sell_rate_multiplier: 空值/NaN/负数 时发送 -1（后端约定 < 0 = 清空，回退分组定价）
+    updatePayload.sell_rate_multiplier = sellRateUpdatePayload(form.sell_rate_multiplier)
     updatePayload.auto_pause_on_expired = autoPauseOnExpired.value
     if (props.account.type === 'apikey') {
       updatePayload.upstream_billing_probe_enabled = upstreamBillingAutoProbeEnabled.value
