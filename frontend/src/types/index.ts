@@ -1679,11 +1679,12 @@ export type UsageRequestType = 'unknown' | 'sync' | 'stream' | 'ws_v2' | 'cyber'
 export type ImageSizeSource = 'output' | 'input' | 'default' | 'legacy'
 export type ImageSizeBreakdown = Record<string, number>
 
+// User-facing usage record. Upstream account identity and group configuration
+// are admin-only (see AdminUsageLog).
 export interface UsageLog {
   id: number
   user_id: number
   api_key_id: number
-  account_id: number | null
   request_id: string
   model: string
   service_tier?: string | null
@@ -1743,9 +1744,19 @@ export interface UsageLog {
   created_at: string
 
   user?: User
-  api_key?: ApiKey
-  group?: Group
+  api_key?: UsageLogApiKeySummary
+  group?: UsageLogGroupSummary
   subscription?: UserSubscription
+}
+
+export interface UsageLogApiKeySummary {
+  id: number
+  name: string
+}
+
+export interface UsageLogGroupSummary {
+  id: number
+  name: string
 }
 
 export interface UsageLogAccountSummary {
@@ -1754,6 +1765,10 @@ export interface UsageLogAccountSummary {
 }
 
 export interface AdminUsageLog extends UsageLog {
+  account_id: number | null
+  api_key?: ApiKey
+  group?: Group
+
   upstream_model?: string | null
   upstream_reasoning_effort?: string | null
   upstream_response_model?: string | null
