@@ -588,11 +588,13 @@ type BatchUpdateRedeemCodesRequest struct {
 }
 
 // UsageLog 是普通用户接口使用的 usage log DTO（不包含管理员字段）。
+// UsageLog is the user-facing usage record. It must not expose upstream
+// account identity or group configuration: account_id lives on AdminUsageLog,
+// and group / api_key are reduced to id + name summaries.
 type UsageLog struct {
 	ID        int64  `json:"id"`
 	UserID    int64  `json:"user_id"`
 	APIKeyID  int64  `json:"api_key_id"`
-	AccountID int64  `json:"account_id"`
 	RequestID string `json:"request_id"`
 	Model     string `json:"model"`
 	// ServiceTier records the OpenAI service tier used for billing, e.g. "priority" / "flex".
@@ -666,14 +668,33 @@ type UsageLog struct {
 	CreatedAt time.Time `json:"created_at"`
 
 	User         *User             `json:"user,omitempty"`
-	APIKey       *APIKey           `json:"api_key,omitempty"`
-	Group        *Group            `json:"group,omitempty"`
+	APIKey       *UsageLogAPIKey   `json:"api_key,omitempty"`
+	Group        *UsageLogGroup    `json:"group,omitempty"`
 	Subscription *UserSubscription `json:"subscription,omitempty"`
 }
 
 // AdminUsageLog 是管理员接口使用的 usage log DTO（包含管理员字段）。
+// UsageLogGroup is the group summary shown on user-facing usage records.
+// Group description, fallback routing and pricing switches stay admin-only.
+type UsageLogGroup struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+}
+
+// UsageLogAPIKey is the API key summary shown on user-facing usage records.
+type UsageLogAPIKey struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+}
+
 type AdminUsageLog struct {
 	UsageLog
+
+	// AccountID, APIKey and Group shadow the redacted user-facing fields of the
+	// embedded UsageLog, so admin responses keep the full shapes.
+	AccountID int64   `json:"account_id"`
+	APIKey    *APIKey `json:"api_key,omitempty"`
+	Group     *Group  `json:"group,omitempty"`
 
 	// UpstreamModel is the actual model sent to the upstream provider after mapping.
 	// Omitted when no mapping was applied (requested model was used as-is).
