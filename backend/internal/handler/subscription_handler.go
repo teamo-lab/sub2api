@@ -26,7 +26,7 @@ type SubscriptionSummaryItem struct {
 
 // SubscriptionProgressInfo represents subscription with progress info
 type SubscriptionProgressInfo struct {
-	Subscription *dto.UserSubscription         `json:"subscription"`
+	Subscription *dto.UserFacingSubscription   `json:"subscription"`
 	Progress     *service.SubscriptionProgress `json:"progress"`
 }
 
@@ -57,9 +57,9 @@ func (h *SubscriptionHandler) List(c *gin.Context) {
 		return
 	}
 
-	out := make([]dto.UserSubscription, 0, len(subscriptions))
+	out := make([]dto.UserFacingSubscription, 0, len(subscriptions))
 	for i := range subscriptions {
-		out = append(out, *dto.UserSubscriptionFromService(&subscriptions[i]))
+		out = append(out, *dto.UserSubscriptionFromServiceUser(&subscriptions[i]))
 	}
 	response.Success(c, out)
 }
@@ -79,9 +79,9 @@ func (h *SubscriptionHandler) GetActive(c *gin.Context) {
 		return
 	}
 
-	out := make([]dto.UserSubscription, 0, len(subscriptions))
+	out := make([]dto.UserFacingSubscription, 0, len(subscriptions))
 	for i := range subscriptions {
-		out = append(out, *dto.UserSubscriptionFromService(&subscriptions[i]))
+		out = append(out, *dto.UserSubscriptionFromServiceUser(&subscriptions[i]))
 	}
 	response.Success(c, out)
 }
@@ -111,7 +111,7 @@ func (h *SubscriptionHandler) GetProgress(c *gin.Context) {
 			continue
 		}
 		result = append(result, SubscriptionProgressInfo{
-			Subscription: dto.UserSubscriptionFromService(sub),
+			Subscription: dto.UserSubscriptionFromServiceUser(sub),
 			Progress:     progress,
 		})
 	}

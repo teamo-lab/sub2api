@@ -245,12 +245,12 @@ import { resolveUsageRequestType, requestTypeToLegacyStream } from '@/utils/usag
 import type {
   ApiKey,
   EndpointStat,
-  Group,
   GroupStat,
   ModelStat,
   TrendDataPoint,
   UsageLog,
   UsageQueryParams,
+  UserGroup,
   UsageStatsResponse,
   UserErrorRequest,
 } from '@/types'
@@ -408,7 +408,7 @@ const billingModeOptions = computed<SelectOption[]>(() => [
 ])
 
 const apiKeys = ref<ApiKey[]>([])
-const groups = ref<Group[]>([])
+const groups = ref<UserGroup[]>([])
 const modelOptionValues = ref<string[]>([])
 
 const apiKeyOptions = computed<SelectOption[]>(() => [

@@ -45,7 +45,7 @@ func marshalToMap(t *testing.T, v any) map[string]any {
 // TestGroupFromServiceOmitsProfitControl 钉死普通用户侧的分组 DTO 不泄露利润控制配置。
 func TestGroupFromServiceOmitsProfitControl(t *testing.T) {
 	for name, got := range map[string]any{
-		"GroupFromService":        GroupFromService(profitControlServiceGroup()),
+		"UserGroupFromService":    UserGroupFromService(profitControlServiceGroup()),
 		"GroupFromServiceShallow": GroupFromServiceShallow(profitControlServiceGroup()),
 	} {
 		fields := marshalToMap(t, got)
