@@ -164,8 +164,11 @@ func TestForwardAsAnthropic_StreamingGenericBareErrorBeforeOutputIsNotHiddenByFa
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
 	c.Request.Header.Set("Content-Type", "application/json")
 
+	// server_error/upstream_error 前置裸错误属于瞬态，会走 failover（见
+	// TestOpenAIStreamBareStructuredTransientError）；这里用无瞬态标识的
+	// 结构化错误，确认非瞬态的前置裸错误仍原样写回下游、不被 failover 吞掉。
 	ssePayload := "event: error\n" +
-		`data: {"type":"error","error":{"type":"server_error","code":"upstream_error","message":"mixed tools failed"}}` + "\n\n" +
+		`data: {"type":"error","error":{"type":"invalid_request_error","code":"unknown_error","message":"mixed tools failed"}}` + "\n\n" +
 		"data: [DONE]\n\n"
 	upstream := &httpUpstreamRecorder{resp: &http.Response{
 		StatusCode: http.StatusOK,
