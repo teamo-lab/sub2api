@@ -14,6 +14,14 @@ type opsRepoMock struct {
 	ListSystemLogsFn              func(ctx context.Context, filter *OpsSystemLogFilter) (*OpsSystemLogList, error)
 	DeleteSystemLogsFn            func(ctx context.Context, filter *OpsSystemLogCleanupFilter) (int64, error)
 	InsertSystemLogCleanupAuditFn func(ctx context.Context, input *OpsSystemLogCleanupAudit) error
+	GetUserErrorStatsRawFn        func(ctx context.Context, filter *OpsUserErrorStatsFilter) (*OpsUserErrorStatsRaw, error)
+}
+
+func (m *opsRepoMock) GetUserErrorStatsRaw(ctx context.Context, filter *OpsUserErrorStatsFilter) (*OpsUserErrorStatsRaw, error) {
+	if m.GetUserErrorStatsRawFn != nil {
+		return m.GetUserErrorStatsRawFn(ctx, filter)
+	}
+	return &OpsUserErrorStatsRaw{}, nil
 }
 
 func (m *opsRepoMock) InsertErrorLog(ctx context.Context, input *OpsInsertErrorLogInput) (int64, error) {

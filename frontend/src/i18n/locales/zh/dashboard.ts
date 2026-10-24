@@ -343,6 +343,17 @@ export default {
     requestedReasoningEffort: '请求推理强度',
     endpoint: '端点',
     endpointDistribution: '端点分布',
+    errorStats: {
+      title: '请求失败率',
+      hint: '只统计最终失败的请求；余额不足、并发/额度限制和客户端主动断开不计入。',
+      failedOfTotal: '失败 {failed} / 共 {total}',
+      byStatus: '失败状态码',
+      noFailures: '该时间范围内没有失败请求',
+      excluded: '未计入：账户限制 {limited} 条，客户端断开 {closed} 条',
+      trendTitle: '失败趋势',
+      failedRequests: '失败请求',
+      failureRate: '失败率'
+    },
     inbound: '入站',
     upstream: '上游',
     mapping: '映射',
