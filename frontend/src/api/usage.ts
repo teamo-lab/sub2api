@@ -10,6 +10,8 @@ import type {
   UsageStatsResponse,
   PaginatedResponse,
   TrendDataPoint,
+  QualityTrendParams,
+  QualityTrendResponse,
   ModelStat,
   GroupStat,
   UsageRequestType,
@@ -370,36 +372,11 @@ export async function getMyErrorDetail(id: number): Promise<UserErrorRequestDeta
   return data
 }
 
-export interface UserErrorStatsParams {
-  start_date?: string
-  end_date?: string
-  api_key_id?: number | null
-  model?: string | null
-  group_id?: number | null
-  granularity?: 'day' | 'hour'
-}
-
-export interface UserErrorStats {
-  start: string
-  end: string
-  granularity: 'day' | 'hour'
-  total: number
-  success: number
-  failed: number
-  failure_rate: number
-  by_status: Array<{ status_code: number; count: number }>
-  trend: Array<{ bucket: string; total: number; failed: number }>
-  excluded: { business_limited: number; client_closed: number }
-}
-
-export async function getMyErrorStats(
-  params: UserErrorStatsParams,
-  options?: { signal?: AbortSignal }
-): Promise<UserErrorStats> {
-  const { data } = await apiClient.get<UserErrorStats>('/usage/error-stats', {
-    params,
-    signal: options?.signal
-  })
+/**
+ * Get the current user's total-duration P50/P90 and SLA trend
+ */
+export async function getDashboardQualityTrend(params: QualityTrendParams): Promise<QualityTrendResponse> {
+  const { data } = await apiClient.get<QualityTrendResponse>('/usage/dashboard/quality-trend', { params })
   return data
 }
 
@@ -413,14 +390,14 @@ export const usageAPI = {
   // Dashboard
   getDashboardStats,
   getDashboardTrend,
+  getDashboardQualityTrend,
   getDashboardModels,
   getMyApiKeyDailyUsage,
   getDashboardSnapshotV2,
   getDashboardApiKeysUsage,
   // Error requests
   listMyErrorRequests,
-  getMyErrorDetail,
-  getMyErrorStats
+  getMyErrorDetail
 }
 
 export default usageAPI

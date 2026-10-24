@@ -7,6 +7,8 @@ import { apiClient } from '../client'
 import type {
   DashboardStats,
   TrendDataPoint,
+  QualityTrendParams,
+  QualityTrendResponse,
   ModelStat,
   GroupStat,
   ApiKeyUsageTrendPoint,
@@ -74,6 +76,14 @@ export interface TrendResponse {
  */
 export async function getUsageTrend(params?: TrendParams): Promise<TrendResponse> {
   const { data } = await apiClient.get<TrendResponse>('/admin/dashboard/trend', { params })
+  return data
+}
+
+/**
+ * Get site-wide total-duration P50/P90 and SLA trend
+ */
+export async function getQualityTrend(params: QualityTrendParams): Promise<QualityTrendResponse> {
+  const { data } = await apiClient.get<QualityTrendResponse>('/admin/dashboard/quality-trend', { params })
   return data
 }
 
@@ -335,6 +345,7 @@ export const dashboardAPI = {
   getStats,
   getRealtimeMetrics,
   getUsageTrend,
+  getQualityTrend,
   getModelStats,
   getGroupStats,
   getSnapshotV2,

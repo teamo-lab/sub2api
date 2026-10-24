@@ -60,6 +60,9 @@
       <!-- Token Usage Trend Chart -->
       <TokenUsageTrend :trend-data="trend" :loading="loading" />
     </div>
+
+    <!-- Total Duration P50/P90 + SLA Trend -->
+    <QualityTrendCharts :points="qualityPoints" :loading="qualityLoading" />
   </div>
 </template>
 
@@ -71,12 +74,13 @@ import DateRangePicker from '@/components/common/DateRangePicker.vue'
 import Select from '@/components/common/Select.vue'
 import { Doughnut } from 'vue-chartjs'
 import TokenUsageTrend from '@/components/charts/TokenUsageTrend.vue'
-import type { TrendDataPoint, ModelStat } from '@/types'
+import QualityTrendCharts from '@/components/charts/QualityTrendCharts.vue'
+import type { TrendDataPoint, ModelStat, QualityTrendPoint } from '@/types'
 import { formatCostFixed as formatCost, formatNumberLocaleString as formatNumber, formatTokensK as formatTokens } from '@/utils/format'
 import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, ArcElement, Title, Tooltip, Legend, Filler } from 'chart.js'
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, ArcElement, Title, Tooltip, Legend, Filler)
 
-const props = defineProps<{ loading: boolean, startDate: string, endDate: string, granularity: string, trend: TrendDataPoint[], models: ModelStat[] }>()
+const props = defineProps<{ loading: boolean, startDate: string, endDate: string, granularity: string, trend: TrendDataPoint[], models: ModelStat[], qualityPoints: QualityTrendPoint[], qualityLoading: boolean }>()
 defineEmits(['update:startDate', 'update:endDate', 'update:granularity', 'dateRangeChange', 'granularityChange', 'refresh'])
 const { t } = useI18n()
 
