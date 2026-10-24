@@ -690,7 +690,6 @@ func usageLogFromServiceUser(l *service.UsageLog) UsageLog {
 		ID:                        l.ID,
 		UserID:                    l.UserID,
 		APIKeyID:                  l.APIKeyID,
-		AccountID:                 l.AccountID,
 		RequestID:                 l.RequestID,
 		Model:                     requestedModel,
 		ServiceTier:               l.ServiceTier,
@@ -737,10 +736,24 @@ func usageLogFromServiceUser(l *service.UsageLog) UsageLog {
 		BillingMode:               l.BillingMode,
 		CreatedAt:                 l.CreatedAt,
 		User:                      UserFromServiceShallow(l.User),
-		APIKey:                    APIKeyFromService(l.APIKey),
-		Group:                     GroupFromServiceShallow(l.Group),
+		APIKey:                    usageLogAPIKeyFromService(l.APIKey),
+		Group:                     usageLogGroupFromService(l.Group),
 		Subscription:              UserSubscriptionFromService(l.Subscription),
 	}
+}
+
+func usageLogGroupFromService(g *service.Group) *UsageLogGroup {
+	if g == nil {
+		return nil
+	}
+	return &UsageLogGroup{ID: g.ID, Name: g.Name}
+}
+
+func usageLogAPIKeyFromService(k *service.APIKey) *UsageLogAPIKey {
+	if k == nil {
+		return nil
+	}
+	return &UsageLogAPIKey{ID: k.ID, Name: k.Name}
 }
 
 // UsageLogFromService converts a service UsageLog to DTO for regular users.
@@ -761,8 +774,14 @@ func UsageLogFromServiceAdmin(l *service.UsageLog) *AdminUsageLog {
 	}
 	usageLog := usageLogFromServiceUser(l)
 	usageLog.UpstreamEndpoint = l.UpstreamEndpoint
+	// The embedded summaries are shadowed by the full admin fields below.
+	usageLog.APIKey = nil
+	usageLog.Group = nil
 	return &AdminUsageLog{
 		UsageLog:                usageLog,
+		AccountID:               l.AccountID,
+		APIKey:                  APIKeyFromService(l.APIKey),
+		Group:                   GroupFromServiceShallow(l.Group),
 		UpstreamModel:           l.UpstreamModel,
 		UpstreamReasoningEffort: adminUpstreamReasoningEffort(l),
 		UpstreamResponseModel:   l.UpstreamResponseModel,
