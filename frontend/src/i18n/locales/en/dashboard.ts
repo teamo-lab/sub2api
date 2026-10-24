@@ -338,6 +338,17 @@ export default {
     requestedReasoningEffort: 'Requested reasoning effort',
     endpoint: 'Endpoint',
     endpointDistribution: 'Endpoint Distribution',
+    errorStats: {
+      title: 'Failure Rate',
+      hint: 'Only requests that finally failed are counted; insufficient balance, concurrency/quota limits and client disconnects are excluded.',
+      failedOfTotal: '{failed} failed / {total} total',
+      byStatus: 'Failed status codes',
+      noFailures: 'No failed requests in this time range',
+      excluded: 'Not counted: {limited} account-limited, {closed} client disconnects',
+      trendTitle: 'Failure Trend',
+      failedRequests: 'Failed requests',
+      failureRate: 'Failure rate'
+    },
     inbound: 'Inbound',
     upstream: 'Upstream',
     mapping: 'Mapping',
