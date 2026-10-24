@@ -162,6 +162,46 @@ type Group struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// UserFacingGroup is the group shape returned by regular-user endpoints:
+// /groups/available and the groups nested in the user's own API keys,
+// subscriptions and redeem codes. It is a whitelist of what the user pages
+// read (name, platform, pricing multipliers, subscription limits and the
+// feature switches that change which guides are shown).
+//
+// Everything else on Group stays admin-only: operators write internal notes
+// in description, and fallback routing, RPM caps, reasoning-effort ceilings
+// and mappings, account filters and per-media price overrides describe how
+// requests are routed upstream.
+type UserFacingGroup struct {
+	ID             int64   `json:"id"`
+	Name           string  `json:"name"`
+	Platform       string  `json:"platform"`
+	RateMultiplier float64 `json:"rate_multiplier"`
+
+	SubscriptionType string   `json:"subscription_type"`
+	DailyLimitUSD    *float64 `json:"daily_limit_usd"`
+	WeeklyLimitUSD   *float64 `json:"weekly_limit_usd"`
+	MonthlyLimitUSD  *float64 `json:"monthly_limit_usd"`
+
+	PeakRateEnabled    bool    `json:"peak_rate_enabled"`
+	PeakStart          string  `json:"peak_start"`
+	PeakEnd            string  `json:"peak_end"`
+	PeakRateMultiplier float64 `json:"peak_rate_multiplier"`
+
+	// AllowMessagesDispatch decides whether the Claude Code guide is shown for OpenAI keys.
+	AllowMessagesDispatch bool `json:"allow_messages_dispatch"`
+	// AllowBatchImageGeneration decides whether the Gemini batch image page is available.
+	AllowBatchImageGeneration bool `json:"allow_batch_image_generation"`
+}
+
+// UserFacingAPIKey is the API key returned by /keys. Its Group shadows the
+// embedded APIKey.Group (shallower JSON field wins), so the user never sees
+// the full group; admin endpoints keep using APIKey directly.
+type UserFacingAPIKey struct {
+	APIKey
+	Group *UserFacingGroup `json:"group,omitempty"`
+}
+
 // AdminGroup 是管理员接口使用的 group DTO（包含敏感/内部字段）。
 // 注意：普通用户接口不得返回 model_routing/account_count/account_groups 等内部信息。
 type AdminGroup struct {
@@ -526,6 +566,13 @@ type RedeemCode struct {
 	Group *Group `json:"group,omitempty"`
 }
 
+// UserFacingRedeemCode is the redeem code returned by /redeem and
+// /redeem/history. Group shadows the embedded RedeemCode.Group, see UserFacingAPIKey.
+type UserFacingRedeemCode struct {
+	RedeemCode
+	Group *UserFacingGroup `json:"group,omitempty"`
+}
+
 // AdminRedeemCode 是管理员接口使用的 redeem code DTO（包含 notes 等字段）。
 // 注意：普通用户接口不得返回 notes 等内部信息。
 type AdminRedeemCode struct {
@@ -793,6 +840,13 @@ type UserSubscription struct {
 
 	User  *User  `json:"user,omitempty"`
 	Group *Group `json:"group,omitempty"`
+}
+
+// UserFacingSubscription is the subscription returned by /subscriptions.
+// Group shadows the embedded UserSubscription.Group, see UserFacingAPIKey.
+type UserFacingSubscription struct {
+	UserSubscription
+	Group *UserFacingGroup `json:"group,omitempty"`
 }
 
 // AdminUserSubscription 是管理员接口使用的订阅 DTO（包含分配信息/备注等字段）。

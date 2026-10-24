@@ -125,19 +125,47 @@ func APIKeyFromService(k *service.APIKey) *APIKey {
 	return out
 }
 
+// UserAPIKeyFromService converts a service APIKey for the key's owner.
+// The nested group is reduced to UserFacingGroup.
+func UserAPIKeyFromService(k *service.APIKey) *UserFacingAPIKey {
+	base := APIKeyFromService(k)
+	if base == nil {
+		return nil
+	}
+	base.Group = nil
+	return &UserFacingAPIKey{APIKey: *base, Group: UserGroupFromService(k.Group)}
+}
+
+// UserGroupFromService converts a service Group for regular-user endpoints.
+// See UserFacingGroup for what is left out.
+func UserGroupFromService(g *service.Group) *UserFacingGroup {
+	if g == nil {
+		return nil
+	}
+	return &UserFacingGroup{
+		ID:                        g.ID,
+		Name:                      g.Name,
+		Platform:                  g.Platform,
+		RateMultiplier:            g.RateMultiplier,
+		SubscriptionType:          g.SubscriptionType,
+		DailyLimitUSD:             g.DailyLimitUSD,
+		WeeklyLimitUSD:            g.WeeklyLimitUSD,
+		MonthlyLimitUSD:           g.MonthlyLimitUSD,
+		PeakRateEnabled:           g.PeakRateEnabled,
+		PeakStart:                 g.PeakStart,
+		PeakEnd:                   g.PeakEnd,
+		PeakRateMultiplier:        g.PeakRateMultiplier,
+		AllowMessagesDispatch:     g.AllowMessagesDispatch,
+		AllowBatchImageGeneration: g.AllowBatchImageGeneration,
+	}
+}
+
 func GroupFromServiceShallow(g *service.Group) *Group {
 	if g == nil {
 		return nil
 	}
 	out := groupFromServiceBase(g)
 	return &out
-}
-
-func GroupFromService(g *service.Group) *Group {
-	if g == nil {
-		return nil
-	}
-	return GroupFromServiceShallow(g)
 }
 
 // GroupFromServiceAdmin converts a service Group to DTO for admin users.
@@ -617,12 +645,15 @@ func ProxyAccountSummaryFromService(a *service.ProxyAccountSummary) *ProxyAccoun
 	}
 }
 
-func RedeemCodeFromService(rc *service.RedeemCode) *RedeemCode {
+// RedeemCodeFromService converts a service RedeemCode for the user who redeemed it.
+// The nested group is reduced to UserFacingGroup.
+func RedeemCodeFromService(rc *service.RedeemCode) *UserFacingRedeemCode {
 	if rc == nil {
 		return nil
 	}
 	out := redeemCodeFromServiceBase(rc)
-	return &out
+	out.Group = nil
+	return &UserFacingRedeemCode{RedeemCode: out, Group: UserGroupFromService(rc.Group)}
 }
 
 // RedeemCodeFromServiceAdmin converts a service RedeemCode to DTO for admin users.
@@ -886,6 +917,17 @@ func UserSubscriptionFromService(sub *service.UserSubscription) *UserSubscriptio
 	}
 	out := userSubscriptionFromServiceBase(sub)
 	return &out
+}
+
+// UserSubscriptionFromServiceUser converts a service UserSubscription for its owner.
+// The nested group is reduced to UserFacingGroup.
+func UserSubscriptionFromServiceUser(sub *service.UserSubscription) *UserFacingSubscription {
+	base := UserSubscriptionFromService(sub)
+	if base == nil {
+		return nil
+	}
+	base.Group = nil
+	return &UserFacingSubscription{UserSubscription: *base, Group: UserGroupFromService(sub.Group)}
 }
 
 // UserSubscriptionFromServiceAdmin converts a service UserSubscription to DTO for admin users.

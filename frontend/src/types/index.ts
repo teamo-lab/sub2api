@@ -615,6 +615,31 @@ export interface Group {
   updated_at: string
 }
 
+/**
+ * Group shape returned by regular-user endpoints: /groups/available and the
+ * groups nested in the user's own API keys, subscriptions and redeem codes.
+ * Mirrors backend dto.UserFacingGroup; description, fallback routing, RPM caps
+ * and reasoning-effort config are admin-only. Admin responses still return the
+ * full Group in the same places, so shared types use this subset.
+ */
+export type UserGroup = Pick<
+  Group,
+  | 'id'
+  | 'name'
+  | 'platform'
+  | 'rate_multiplier'
+  | 'subscription_type'
+  | 'daily_limit_usd'
+  | 'weekly_limit_usd'
+  | 'monthly_limit_usd'
+  | 'peak_rate_enabled'
+  | 'peak_start'
+  | 'peak_end'
+  | 'peak_rate_multiplier'
+  | 'allow_messages_dispatch'
+  | 'allow_batch_image_generation'
+>
+
 export interface AdminGroup extends Group {
   force_openai_fast: boolean
   free_openai_fast: boolean
@@ -736,7 +761,7 @@ export interface ApiKey {
   created_at: string
   updated_at: string
   current_concurrency: number
-  group?: Group
+  group?: UserGroup
   rate_limit_5h: number
   rate_limit_1d: number
   rate_limit_7d: number
@@ -1832,7 +1857,7 @@ export interface RedeemCode {
   group_id?: number | null // 订阅类型专用
   validity_days?: number // 订阅类型专用
   user?: User
-  group?: Group // 关联的分组
+  group?: UserGroup // 关联的分组
 }
 
 export interface GenerateRedeemCodesRequest {
@@ -2070,7 +2095,7 @@ export interface UserSubscription {
   revoked_at?: string | null
   expires_at: string | null
   user?: User
-  group?: Group
+  group?: UserGroup
 }
 
 export interface SubscriptionProgress {

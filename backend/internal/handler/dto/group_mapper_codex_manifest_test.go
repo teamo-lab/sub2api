@@ -35,7 +35,7 @@ func TestGroupMapperRoundTripsCodexModelsManifestConfig(t *testing.T) {
 	require.Equal(t, []int64{101, 202}, adminEnvelope.CodexModelsManifestConfig.AccountIDs)
 	require.True(t, adminEnvelope.CodexModelsManifestConfig.FallbackToScheduler)
 
-	userJSON, err := json.Marshal(GroupFromService(group))
+	userJSON, err := json.Marshal(UserGroupFromService(group))
 	require.NoError(t, err)
 	require.NotContains(t, string(userJSON), "codex_models_manifest_config", "用户侧分组 DTO 不得暴露管理端 manifest 配置")
 }

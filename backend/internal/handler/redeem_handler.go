@@ -77,7 +77,7 @@ func (h *RedeemHandler) GetHistory(c *gin.Context) {
 		return
 	}
 
-	out := make([]dto.RedeemCode, 0, len(codes))
+	out := make([]dto.UserFacingRedeemCode, 0, len(codes))
 	for i := range codes {
 		out = append(out, *dto.RedeemCodeFromService(&codes[i]))
 	}
