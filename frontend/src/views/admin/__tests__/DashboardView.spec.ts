@@ -5,8 +5,9 @@ import { createPinia, setActivePinia } from 'pinia'
 import type { DashboardStats } from '@/types'
 import DashboardView from '../DashboardView.vue'
 
-const { getSnapshotV2, getUserUsageTrend, getUserSpendingRanking } = vi.hoisted(() => ({
+const { getSnapshotV2, getQualityTrend, getUserUsageTrend, getUserSpendingRanking } = vi.hoisted(() => ({
   getSnapshotV2: vi.fn(),
+  getQualityTrend: vi.fn(),
   getUserUsageTrend: vi.fn(),
   getUserSpendingRanking: vi.fn()
 }))
@@ -15,6 +16,7 @@ vi.mock('@/api/admin', () => ({
   adminAPI: {
     dashboard: {
       getSnapshotV2,
+      getQualityTrend,
       getUserUsageTrend,
       getUserSpendingRanking
     }
@@ -91,6 +93,7 @@ describe('admin DashboardView', () => {
     setActivePinia(createPinia())
 
     getSnapshotV2.mockReset()
+    getQualityTrend.mockReset()
     getUserUsageTrend.mockReset()
     getUserSpendingRanking.mockReset()
 
@@ -98,6 +101,12 @@ describe('admin DashboardView', () => {
       stats: createDashboardStats(),
       trend: [],
       models: []
+    })
+    getQualityTrend.mockResolvedValue({
+      start: '',
+      end: '',
+      granularity: 'hour',
+      points: [{ bucket: '2026-10-24 01:00', success: 99, failed: 1, sla: 0.99, duration_p50_ms: 1200, duration_p90_ms: 5400 }]
     })
     getUserUsageTrend.mockResolvedValue({
       trend: [],
@@ -116,7 +125,7 @@ describe('admin DashboardView', () => {
   })
 
   it('uses last 24 hours as default dashboard range', async () => {
-    mount(DashboardView, {
+    const wrapper = mount(DashboardView, {
       global: {
         stubs: {
           AppLayout: { template: '<div><slot /></div>' },
@@ -126,6 +135,7 @@ describe('admin DashboardView', () => {
           Select: true,
           ModelDistributionChart: true,
           TokenUsageTrend: true,
+          QualityTrendCharts: true,
           Line: true
         }
       }
@@ -142,5 +152,15 @@ describe('admin DashboardView', () => {
       end_date: formatLocalDate(now),
       granularity: 'hour'
     }))
+
+    // 总耗时/SLA 趋势与 Token 趋势同一时间范围和粒度,管理员看全站
+    expect(getQualityTrend).toHaveBeenCalledWith({
+      start_date: formatLocalDate(yesterday),
+      end_date: formatLocalDate(now),
+      granularity: 'hour'
+    })
+    const quality = wrapper.findComponent({ name: 'QualityTrendCharts' })
+    expect(quality.exists()).toBe(true)
+    expect(quality.props('points')).toHaveLength(1)
   })
 })
