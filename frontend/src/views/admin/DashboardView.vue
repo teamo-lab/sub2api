@@ -316,8 +316,8 @@
             <TokenUsageTrend :trend-data="trendData" :loading="chartsLoading" />
           </div>
 
-          <!-- Total Duration P50/P90 + SLA Trend (site-wide) -->
-          <QualityTrendCharts :points="qualityPoints" :loading="qualityLoading" />
+          <!-- Total Duration P50/P90 + SLA Trend (site-wide); hidden when ops data is unavailable -->
+          <QualityTrendCharts v-if="qualityAvailable" :points="qualityPoints" :loading="qualityLoading" />
 
           <!-- User Usage Trend (Full Width) -->
           <div class="card p-4">
@@ -408,6 +408,8 @@ const modelStats = ref<ModelStat[]>([])
 const userTrend = ref<UserUsageTrendPoint[]>([])
 const qualityPoints = ref<QualityTrendPoint[]>([])
 const qualityLoading = ref(false)
+// 依赖 ops 监控:监控关闭(接口 404)或加载失败时整块不显示,避免两张空图
+const qualityAvailable = ref(true)
 const rankingItems = ref<UserSpendingRankingItem[]>([])
 const rankingTotalActualCost = ref(0)
 const rankingTotalRequests = ref(0)
@@ -698,10 +700,12 @@ const loadQualityTrend = async () => {
     })
     if (currentSeq !== qualityLoadSeq) return
     qualityPoints.value = response.points || []
+    qualityAvailable.value = true
   } catch (error) {
     if (currentSeq !== qualityLoadSeq) return
     console.error('Error loading quality trend:', error)
     qualityPoints.value = []
+    qualityAvailable.value = false
   } finally {
     if (currentSeq === qualityLoadSeq) {
       qualityLoading.value = false
