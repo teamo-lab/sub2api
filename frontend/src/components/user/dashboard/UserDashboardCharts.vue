@@ -62,7 +62,7 @@
     </div>
 
     <!-- Total Duration P50/P90 + SLA Trend -->
-    <QualityTrendCharts :points="qualityPoints" :loading="qualityLoading" />
+    <QualityTrendCharts v-if="qualityAvailable" :points="qualityPoints" :loading="qualityLoading" />
   </div>
 </template>
 
@@ -80,7 +80,7 @@ import { formatCostFixed as formatCost, formatNumberLocaleString as formatNumber
 import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, ArcElement, Title, Tooltip, Legend, Filler } from 'chart.js'
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, ArcElement, Title, Tooltip, Legend, Filler)
 
-const props = defineProps<{ loading: boolean, startDate: string, endDate: string, granularity: string, trend: TrendDataPoint[], models: ModelStat[], qualityPoints: QualityTrendPoint[], qualityLoading: boolean }>()
+const props = defineProps<{ loading: boolean, startDate: string, endDate: string, granularity: string, trend: TrendDataPoint[], models: ModelStat[], qualityPoints: QualityTrendPoint[], qualityLoading: boolean, qualityAvailable: boolean }>()
 defineEmits(['update:startDate', 'update:endDate', 'update:granularity', 'dateRangeChange', 'granularityChange', 'refresh'])
 const { t } = useI18n()
 

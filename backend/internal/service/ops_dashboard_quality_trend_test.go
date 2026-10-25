@@ -110,72 +110,101 @@ func TestGetDashboardQualityTrend_ValidatesScopeAndRange(t *testing.T) {
 	}
 }
 
-func TestGetDashboardQualityTrend_AllUsersCombinesPreaggAndRawTail(t *testing.T) {
+func TestLoadAllUsersQuality_CombinesPreaggAndRawTail(t *testing.T) {
 	start := time.Date(2026, 10, 24, 0, 0, 0, 0, time.UTC)
 	end := start.Add(24 * time.Hour)
 	now := start.Add(10*time.Hour + 20*time.Minute)
 	latestHour := start.Add(9 * time.Hour) // 预聚合覆盖到 10:00
 
-	var preStart, preEnd time.Time
-	var tailFilter *OpsQualityTrendFilter
+	var preStart, preEnd, preFailEnd time.Time
+	var preGranularity string
+	var tailFilter, tailFailFilter *OpsQualityTrendFilter
 	repo := &opsRepoMock{
 		GetLatestHourlyBucketStartFn: func(ctx context.Context) (time.Time, bool, error) { return latestHour, true, nil },
 		GetQualityTrendUsagePreaggFn: func(ctx context.Context, s, e time.Time, granularity string) ([]OpsQualityTrendBucket, error) {
-			preStart, preEnd = s, e
-			return []OpsQualityTrendBucket{{Bucket: "2026-10-24", SuccessCount: 900, DurationP50Ms: f64(1000)}}, nil
+			preStart, preEnd, preGranularity = s, e, granularity
+			return []OpsQualityTrendBucket{{Bucket: "2026-10-24 09:00", SuccessCount: 900, DurationP50Ms: f64(1000)}}, nil
 		},
 		GetQualityTrendUsageRawFn: func(ctx context.Context, filter *OpsQualityTrendFilter) ([]OpsQualityTrendBucket, error) {
 			tailFilter = filter
-			return []OpsQualityTrendBucket{{Bucket: "2026-10-24", SuccessCount: 100, DurationP50Ms: f64(2000)}}, nil
+			return []OpsQualityTrendBucket{{Bucket: "2026-10-24 10:00", SuccessCount: 100, DurationP50Ms: f64(2000)}}, nil
+		},
+		GetQualityTrendFailuresFn: func(ctx context.Context, filter *OpsQualityTrendFilter) ([]OpsUserBucketCount, error) {
+			if filter.StartTime.Equal(start) {
+				preFailEnd = filter.EndTime
+				return []OpsUserBucketCount{{Bucket: "2026-10-24 09:00", Count: 9}}, nil
+			}
+			tailFailFilter = filter
+			return []OpsUserBucketCount{{Bucket: "2026-10-24 10:00", Count: 1}}, nil
 		},
 	}
 	svc := &OpsService{opsRepo: repo}
 	f := &OpsQualityTrendFilter{AllUsers: true, StartTime: start, EndTime: end, Granularity: "day"}
 
-	rows, coveredEnd, err := svc.loadAllUsersQualityUsage(context.Background(), f, now)
+	usage, failures, err := svc.loadAllUsersQuality(context.Background(), f, now)
 	require.NoError(t, err)
 	require.Equal(t, start, preStart)
 	require.Equal(t, start.Add(10*time.Hour), preEnd)
+	require.Equal(t, "hour", preGranularity, "always fetch hourly so coverage can be checked per hour")
+	require.Equal(t, start.Add(10*time.Hour), preFailEnd)
 	require.True(t, tailFilter.AllUsers)
 	require.Equal(t, start.Add(10*time.Hour), tailFilter.StartTime)
 	require.Equal(t, now, tailFilter.EndTime)
-	require.Equal(t, now, coveredEnd)
-	require.Len(t, rows, 2)
+	require.Equal(t, now, tailFailFilter.EndTime)
 
+	// 按天时小时桶归并到当天
+	out := buildDashboardQualityTrend(f, usage, failures)
+	require.Len(t, out.Points, 1)
+	require.Equal(t, "2026-10-24", out.Points[0].Bucket)
+	require.Equal(t, int64(1000), out.Points[0].Success)
+	require.Equal(t, int64(10), out.Points[0].Failed)
+	require.InDelta(t, 1100, *out.Points[0].DurationP50Ms, 1e-9)
 }
 
-func TestGetDashboardQualityTrend_AllUsersPastRangeUsesPreaggOnly(t *testing.T) {
+func TestGetDashboardQualityTrend_AllUsersDropsFailuresInRollupGaps(t *testing.T) {
 	start := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
-	end := start.Add(7 * 24 * time.Hour)
-	var failureFilter *OpsQualityTrendFilter
+	end := start.Add(3 * 24 * time.Hour)
 	repo := &opsRepoMock{
 		GetLatestHourlyBucketStartFn: func(ctx context.Context) (time.Time, bool, error) { return end.Add(30 * 24 * time.Hour), true, nil },
 		GetQualityTrendUsagePreaggFn: func(ctx context.Context, s, e time.Time, granularity string) ([]OpsQualityTrendBucket, error) {
 			require.Equal(t, start, s)
 			require.Equal(t, end, e)
-			return []OpsQualityTrendBucket{{Bucket: "2026-09-01", SuccessCount: 999, DurationP50Ms: f64(1000)}}, nil
+			// 9-02 整天缺预聚合;9-03 只有 05:00 有行(含一个全失败的小时)
+			return []OpsQualityTrendBucket{
+				{Bucket: "2026-09-01 08:00", SuccessCount: 99, DurationP50Ms: f64(1000)},
+				{Bucket: "2026-09-03 05:00", SuccessCount: 0},
+			}, nil
 		},
 		GetQualityTrendUsageRawFn: func(ctx context.Context, filter *OpsQualityTrendFilter) ([]OpsQualityTrendBucket, error) {
 			t.Fatal("fully preaggregated range must not scan usage_logs")
 			return nil, nil
 		},
 		GetQualityTrendFailuresFn: func(ctx context.Context, filter *OpsQualityTrendFilter) ([]OpsUserBucketCount, error) {
-			failureFilter = filter
-			return []OpsUserBucketCount{{Bucket: "2026-09-01", Count: 1}}, nil
+			require.Equal(t, "hour", filter.Granularity)
+			return []OpsUserBucketCount{
+				{Bucket: "2026-09-01 08:00", Count: 1},
+				{Bucket: "2026-09-01 09:00", Count: 50}, // 当天另一个没有预聚合的小时
+				{Bucket: "2026-09-02 12:00", Count: 7},
+				{Bucket: "2026-09-03 05:00", Count: 4},
+			}, nil
 		},
 	}
 	svc := &OpsService{opsRepo: repo}
 
 	out, err := svc.GetDashboardQualityTrend(context.Background(), &OpsQualityTrendFilter{AllUsers: true, StartTime: start, EndTime: end, Granularity: "day"})
 	require.NoError(t, err)
-	require.True(t, failureFilter.AllUsers)
-	require.Equal(t, end, failureFilter.EndTime)
-	require.Len(t, out.Points, 1)
-	require.InDelta(t, 0.999, *out.Points[0].SLA, 1e-9)
+	require.Len(t, out.Points, 2, "the uncovered day must not appear as an SLA=0 bucket")
+	require.Equal(t, "2026-09-01", out.Points[0].Bucket)
+	require.Equal(t, int64(1), out.Points[0].Failed)
+	require.InDelta(t, 0.99, *out.Points[0].SLA, 1e-9)
+	// 预聚合里有行、真的全失败的小时照算 0
+	require.Equal(t, "2026-09-03", out.Points[1].Bucket)
+	require.InDelta(t, 0.0, *out.Points[1].SLA, 1e-9)
 }
 
-func TestLoadAllUsersQualityUsage_StalePreaggSkipsRawScan(t *testing.T) {
+func TestLoadAllUsersQuality_StalePreaggSkipsRawScan(t *testing.T) {
 	start := time.Date(2026, 10, 24, 0, 0, 0, 0, time.UTC)
+	var failureCalls int
 	repo := &opsRepoMock{
 		GetLatestHourlyBucketStartFn: func(ctx context.Context) (time.Time, bool, error) { return start.Add(2 * time.Hour), true, nil },
 		GetQualityTrendUsagePreaggFn: func(ctx context.Context, s, e time.Time, granularity string) ([]OpsQualityTrendBucket, error) {
@@ -185,12 +214,18 @@ func TestLoadAllUsersQualityUsage_StalePreaggSkipsRawScan(t *testing.T) {
 			t.Fatal("must not scan site-wide usage_logs when preaggregation is far behind")
 			return nil, nil
 		},
+		GetQualityTrendFailuresFn: func(ctx context.Context, filter *OpsQualityTrendFilter) ([]OpsUserBucketCount, error) {
+			failureCalls++
+			require.Equal(t, start.Add(3*time.Hour), filter.EndTime)
+			return []OpsUserBucketCount{{Bucket: "2026-10-24 01:00", Count: 1}}, nil
+		},
 	}
 	svc := &OpsService{opsRepo: repo}
 	f := &OpsQualityTrendFilter{AllUsers: true, StartTime: start, EndTime: start.Add(24 * time.Hour), Granularity: "hour"}
 
-	rows, coveredEnd, err := svc.loadAllUsersQualityUsage(context.Background(), f, start.Add(12*time.Hour))
+	usage, failures, err := svc.loadAllUsersQuality(context.Background(), f, start.Add(12*time.Hour))
 	require.NoError(t, err)
-	require.Len(t, rows, 1)
-	require.Equal(t, start.Add(3*time.Hour), coveredEnd, "failures beyond the covered window would otherwise show SLA 0")
+	require.Len(t, usage, 1)
+	require.Len(t, failures, 1)
+	require.Equal(t, 1, failureCalls, "failures are only read for the preaggregated window")
 }

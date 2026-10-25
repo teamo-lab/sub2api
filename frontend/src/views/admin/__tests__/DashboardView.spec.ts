@@ -163,4 +163,31 @@ describe('admin DashboardView', () => {
     expect(quality.exists()).toBe(true)
     expect(quality.props('points')).toHaveLength(1)
   })
+
+  it('hides quality trend charts when ops data is unavailable', async () => {
+    getQualityTrend.mockRejectedValue({ status: 404, message: 'Ops monitoring is disabled' })
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const wrapper = mount(DashboardView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          LoadingSpinner: true,
+          Icon: true,
+          DateRangePicker: true,
+          Select: true,
+          ModelDistributionChart: true,
+          TokenUsageTrend: true,
+          QualityTrendCharts: true,
+          Line: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    expect(getQualityTrend).toHaveBeenCalledTimes(1)
+    expect(wrapper.findComponent({ name: 'QualityTrendCharts' }).exists()).toBe(false)
+    expect(wrapper.findComponent({ name: 'TokenUsageTrend' }).exists()).toBe(true)
+    errorSpy.mockRestore()
+  })
 })

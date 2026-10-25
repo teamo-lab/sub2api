@@ -61,7 +61,7 @@ type DashboardQualityTrend struct {
 //
 // 用户:直接按 (user_id, created_at) 扫原始表,分位是精确值。
 // 全站:成功侧读 ops_metrics_hourly 的全局行(按天时 P50/P90 是各小时按成功数加权的近似值,
-// 与 ops_metrics_daily 同一近似),预聚合之后的尾巴扫原始表补齐。
+// 与 ops_metrics_daily 同一近似),预聚合之后的尾巴扫原始表补齐;失败只算成功侧覆盖到的小时。
 func (s *OpsService) GetDashboardQualityTrend(ctx context.Context, filter *OpsQualityTrendFilter) (*DashboardQualityTrend, error) {
 	if err := s.RequireMonitoringEnabled(ctx); err != nil {
 		return nil, err
@@ -87,72 +87,112 @@ func (s *OpsService) GetDashboardQualityTrend(ctx context.Context, filter *OpsQu
 		f.Granularity = "day"
 	}
 
-	var usage []OpsQualityTrendBucket
-	failureFilter := f
+	var (
+		usage    []OpsQualityTrendBucket
+		failures []OpsUserBucketCount
+		err      error
+	)
 	if f.AllUsers {
-		rows, coveredEnd, err := s.loadAllUsersQualityUsage(ctx, &f, time.Now())
-		if err != nil {
-			return nil, infraerrors.InternalServer("OPS_QUALITY_TREND_FAILED", "Failed to load quality trend").WithCause(err)
-		}
-		usage = rows
-		// 成功侧没覆盖到的时段不算失败,否则这些桶的 SLA 会被算成 0。
-		failureFilter.EndTime = coveredEnd
+		usage, failures, err = s.loadAllUsersQuality(ctx, &f, time.Now())
 	} else {
-		rows, err := s.opsRepo.GetQualityTrendUsageRaw(ctx, &f)
-		if err != nil {
-			return nil, infraerrors.InternalServer("OPS_QUALITY_TREND_FAILED", "Failed to load quality trend").WithCause(err)
-		}
-		usage = rows
+		usage, failures, err = s.loadRawQuality(ctx, &f)
 	}
-
-	var failures []OpsUserBucketCount
-	if failureFilter.EndTime.After(failureFilter.StartTime) {
-		rows, err := s.opsRepo.GetQualityTrendFailures(ctx, &failureFilter)
-		if err != nil {
-			return nil, infraerrors.InternalServer("OPS_QUALITY_TREND_FAILED", "Failed to load quality trend").WithCause(err)
-		}
-		failures = rows
+	if err != nil {
+		return nil, infraerrors.InternalServer("OPS_QUALITY_TREND_FAILED", "Failed to load quality trend").WithCause(err)
 	}
 	return buildDashboardQualityTrend(&f, usage, failures), nil
 }
 
-// loadAllUsersQualityUsage 读全站成功侧:预聚合覆盖的部分走 ops_metrics_hourly,
-// 之后到 now 的尾巴(不超过 opsQualityTrendRawTailMax)扫 usage_logs。返回成功侧实际覆盖到的结束时间。
-func (s *OpsService) loadAllUsersQualityUsage(ctx context.Context, f *OpsQualityTrendFilter, now time.Time) ([]OpsQualityTrendBucket, time.Time, error) {
+func (s *OpsService) loadRawQuality(ctx context.Context, f *OpsQualityTrendFilter) ([]OpsQualityTrendBucket, []OpsUserBucketCount, error) {
+	usage, err := s.opsRepo.GetQualityTrendUsageRaw(ctx, f)
+	if err != nil {
+		return nil, nil, err
+	}
+	failures, err := s.opsRepo.GetQualityTrendFailures(ctx, f)
+	if err != nil {
+		return nil, nil, err
+	}
+	return usage, failures, nil
+}
+
+// loadAllUsersQuality 读全站成功/失败,统一按小时取数再按需归并到天:
+//   - 预聚合覆盖的部分走 ops_metrics_hourly,失败只保留预聚合里有全局行的小时。聚合任务停过、
+//     回填不全或小时表已过保留期时,这些小时成功侧是空的,失败若照算会产出 SLA=0 的假桶。
+//     (有失败的小时预聚合一定会写全局行:成功和错误是 FULL OUTER JOIN 合并的。)
+//   - 预聚合之后到 now 的尾巴(不超过 opsQualityTrendRawTailMax)成功和失败都扫原始表;
+//     尾巴更长说明预聚合停了,不再扫全站原始表兜底,图上就停在预聚合覆盖到的位置。
+func (s *OpsService) loadAllUsersQuality(ctx context.Context, f *OpsQualityTrendFilter, now time.Time) ([]OpsQualityTrendBucket, []OpsUserBucketCount, error) {
+	hourly := *f
+	hourly.Granularity = "hour"
+
 	coveredUntil := f.StartTime
 	latest, ok, err := s.opsRepo.GetLatestHourlyBucketStart(ctx)
 	if err != nil {
-		return nil, time.Time{}, err
+		return nil, nil, err
 	}
 	if ok && latest.Add(time.Hour).After(coveredUntil) {
 		coveredUntil = latest.Add(time.Hour)
 	}
 
-	var rows []OpsQualityTrendBucket
-	coveredEnd := f.StartTime
+	var (
+		usage    []OpsQualityTrendBucket
+		failures []OpsUserBucketCount
+	)
+	tailStart := f.StartTime
 	if preEnd := minTime(f.EndTime, coveredUntil); preEnd.After(f.StartTime) {
-		pre, err := s.opsRepo.GetQualityTrendUsagePreagg(ctx, f.StartTime, preEnd, f.Granularity)
+		pre, err := s.opsRepo.GetQualityTrendUsagePreagg(ctx, f.StartTime, preEnd, "hour")
 		if err != nil {
-			return nil, time.Time{}, err
+			return nil, nil, err
 		}
-		rows = append(rows, pre...)
-		coveredEnd = preEnd
+		window := hourly
+		window.EndTime = preEnd
+		preFailures, err := s.opsRepo.GetQualityTrendFailures(ctx, &window)
+		if err != nil {
+			return nil, nil, err
+		}
+		covered := make(map[string]struct{}, len(pre))
+		for _, row := range pre {
+			covered[row.Bucket] = struct{}{}
+		}
+		for _, row := range preFailures {
+			if _, ok := covered[row.Bucket]; ok {
+				failures = append(failures, row)
+			}
+		}
+		usage = append(usage, pre...)
+		tailStart = preEnd
 	}
 
-	tailStart := coveredEnd
 	tailEnd := minTime(f.EndTime, now)
 	if tailEnd.After(tailStart) && tailEnd.Sub(tailStart) <= opsQualityTrendRawTailMax {
-		tail := *f
-		tail.StartTime = tailStart
-		tail.EndTime = tailEnd
-		raw, err := s.opsRepo.GetQualityTrendUsageRaw(ctx, &tail)
+		window := hourly
+		window.StartTime = tailStart
+		window.EndTime = tailEnd
+		rawUsage, rawFailures, err := s.loadRawQuality(ctx, &window)
 		if err != nil {
-			return nil, time.Time{}, err
+			return nil, nil, err
 		}
-		rows = append(rows, raw...)
-		coveredEnd = tailEnd
+		usage = append(usage, rawUsage...)
+		failures = append(failures, rawFailures...)
 	}
-	return rows, coveredEnd, nil
+
+	if f.Granularity == "day" {
+		for i := range usage {
+			usage[i].Bucket = hourBucketToDay(usage[i].Bucket)
+		}
+		for i := range failures {
+			failures[i].Bucket = hourBucketToDay(failures[i].Bucket)
+		}
+	}
+	return usage, failures, nil
+}
+
+// hourBucketToDay 把 "YYYY-MM-DD HH24:00" 截成 "YYYY-MM-DD";两者都是同一会话时区下的 TO_CHAR,按天桶就是前缀。
+func hourBucketToDay(bucket string) string {
+	if len(bucket) >= len("2006-01-02") {
+		return bucket[:len("2006-01-02")]
+	}
+	return bucket
 }
 
 func buildDashboardQualityTrend(f *OpsQualityTrendFilter, usage []OpsQualityTrendBucket, failures []OpsUserBucketCount) *DashboardQualityTrend {
