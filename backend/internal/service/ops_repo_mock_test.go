@@ -15,6 +15,31 @@ type opsRepoMock struct {
 	DeleteSystemLogsFn            func(ctx context.Context, filter *OpsSystemLogCleanupFilter) (int64, error)
 	InsertSystemLogCleanupAuditFn func(ctx context.Context, input *OpsSystemLogCleanupAudit) error
 	GetUserErrorStatsRawFn        func(ctx context.Context, filter *OpsUserErrorStatsFilter) (*OpsUserErrorStatsRaw, error)
+	GetQualityTrendUsageRawFn     func(ctx context.Context, filter *OpsQualityTrendFilter) ([]OpsQualityTrendBucket, error)
+	GetQualityTrendUsagePreaggFn  func(ctx context.Context, startTime, endTime time.Time, granularity string) ([]OpsQualityTrendBucket, error)
+	GetQualityTrendFailuresFn     func(ctx context.Context, filter *OpsQualityTrendFilter) ([]OpsUserBucketCount, error)
+	GetLatestHourlyBucketStartFn  func(ctx context.Context) (time.Time, bool, error)
+}
+
+func (m *opsRepoMock) GetQualityTrendUsageRaw(ctx context.Context, filter *OpsQualityTrendFilter) ([]OpsQualityTrendBucket, error) {
+	if m.GetQualityTrendUsageRawFn != nil {
+		return m.GetQualityTrendUsageRawFn(ctx, filter)
+	}
+	return nil, nil
+}
+
+func (m *opsRepoMock) GetQualityTrendUsagePreagg(ctx context.Context, startTime, endTime time.Time, granularity string) ([]OpsQualityTrendBucket, error) {
+	if m.GetQualityTrendUsagePreaggFn != nil {
+		return m.GetQualityTrendUsagePreaggFn(ctx, startTime, endTime, granularity)
+	}
+	return nil, nil
+}
+
+func (m *opsRepoMock) GetQualityTrendFailures(ctx context.Context, filter *OpsQualityTrendFilter) ([]OpsUserBucketCount, error) {
+	if m.GetQualityTrendFailuresFn != nil {
+		return m.GetQualityTrendFailuresFn(ctx, filter)
+	}
+	return nil, nil
 }
 
 func (m *opsRepoMock) GetUserErrorStatsRaw(ctx context.Context, filter *OpsUserErrorStatsFilter) (*OpsUserErrorStatsRaw, error) {
@@ -198,6 +223,9 @@ func (m *opsRepoMock) UpsertDailyMetrics(ctx context.Context, startTime, endTime
 }
 
 func (m *opsRepoMock) GetLatestHourlyBucketStart(ctx context.Context) (time.Time, bool, error) {
+	if m.GetLatestHourlyBucketStartFn != nil {
+		return m.GetLatestHourlyBucketStartFn(ctx)
+	}
 	return time.Time{}, false, nil
 }
 

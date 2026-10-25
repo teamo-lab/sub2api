@@ -64,8 +64,6 @@
           />
           <TokenUsageTrend :trend-data="trendData" :loading="chartsLoading" />
         </div>
-
-        <UserErrorStatsCard :params="errorStatsParams" />
       </div>
 
       <div class="card p-6">
@@ -237,7 +235,6 @@ import EndpointDistributionChart from '@/components/charts/EndpointDistributionC
 import TokenUsageTrend from '@/components/charts/TokenUsageTrend.vue'
 import Icon from '@/components/icons/Icon.vue'
 import UserErrorRequestsTable from '@/components/user/UserErrorRequestsTable.vue'
-import UserErrorStatsCard from '@/components/user/UserErrorStatsCard.vue'
 import { getPersistedPageSize } from '@/composables/usePersistedPageSize'
 import { formatReasoningEffort } from '@/utils/format'
 import { getBillingModeLabel, getDisplayBillingMode as resolveDisplayBillingMode } from '@/utils/billingMode'
@@ -434,16 +431,6 @@ const normalizedFilters = computed<UsageQueryParams>(() => {
     stream: legacyStream === null ? undefined : legacyStream,
   }
 })
-
-// 失败率卡片只认 API 密钥、模型、分组和时间范围;其余筛选项不适用于报错记录。
-const errorStatsParams = computed(() => ({
-  start_date: startDate.value,
-  end_date: endDate.value,
-  api_key_id: filters.value.api_key_id ?? undefined,
-  model: filters.value.model || undefined,
-  group_id: filters.value.group_id ?? undefined,
-  granularity: granularity.value,
-}))
 
 const buildUsageListParams = (page: number, pageSize: number): UsageQueryParams => ({
   page,

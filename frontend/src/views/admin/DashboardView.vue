@@ -316,6 +316,9 @@
             <TokenUsageTrend :trend-data="trendData" :loading="chartsLoading" />
           </div>
 
+          <!-- Total Duration P50/P90 + SLA Trend (site-wide); hidden when ops data is unavailable -->
+          <QualityTrendCharts v-if="qualityAvailable" :points="qualityPoints" :loading="qualityLoading" />
+
           <!-- User Usage Trend (Full Width) -->
           <div class="card p-4">
             <h3 class="mb-4 text-sm font-semibold text-gray-900 dark:text-white">
@@ -353,7 +356,8 @@ import type {
   TrendDataPoint,
   ModelStat,
   UserUsageTrendPoint,
-  UserSpendingRankingItem
+  UserSpendingRankingItem,
+  QualityTrendPoint
 } from '@/types'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
@@ -362,6 +366,7 @@ import DateRangePicker from '@/components/common/DateRangePicker.vue'
 import Select from '@/components/common/Select.vue'
 import ModelDistributionChart from '@/components/charts/ModelDistributionChart.vue'
 import TokenUsageTrend from '@/components/charts/TokenUsageTrend.vue'
+import QualityTrendCharts from '@/components/charts/QualityTrendCharts.vue'
 import { useBatchImageAccess } from '@/composables/useBatchImageAccess'
 
 import {
@@ -401,12 +406,17 @@ const rankingError = ref(false)
 const trendData = ref<TrendDataPoint[]>([])
 const modelStats = ref<ModelStat[]>([])
 const userTrend = ref<UserUsageTrendPoint[]>([])
+const qualityPoints = ref<QualityTrendPoint[]>([])
+const qualityLoading = ref(false)
+// 依赖 ops 监控:监控关闭(接口 404)或加载失败时整块不显示,避免两张空图
+const qualityAvailable = ref(true)
 const rankingItems = ref<UserSpendingRankingItem[]>([])
 const rankingTotalActualCost = ref(0)
 const rankingTotalRequests = ref(0)
 const rankingTotalTokens = ref(0)
 let chartLoadSeq = 0
 let usersTrendLoadSeq = 0
+let qualityLoadSeq = 0
 let rankingLoadSeq = 0
 const rankingLimit = 12
 
@@ -679,6 +689,30 @@ const loadDashboardSnapshot = async (includeStats: boolean) => {
   }
 }
 
+const loadQualityTrend = async () => {
+  const currentSeq = ++qualityLoadSeq
+  qualityLoading.value = true
+  try {
+    const response = await adminAPI.dashboard.getQualityTrend({
+      start_date: startDate.value,
+      end_date: endDate.value,
+      granularity: granularity.value
+    })
+    if (currentSeq !== qualityLoadSeq) return
+    qualityPoints.value = response.points || []
+    qualityAvailable.value = true
+  } catch (error) {
+    if (currentSeq !== qualityLoadSeq) return
+    console.error('Error loading quality trend:', error)
+    qualityPoints.value = []
+    qualityAvailable.value = false
+  } finally {
+    if (currentSeq === qualityLoadSeq) {
+      qualityLoading.value = false
+    }
+  }
+}
+
 const loadUsersTrend = async () => {
   const currentSeq = ++usersTrendLoadSeq
   userTrendLoading.value = true
@@ -735,6 +769,7 @@ const loadUserSpendingRanking = async () => {
 const loadDashboardStats = async () => {
   await Promise.all([
     loadDashboardSnapshot(true),
+    loadQualityTrend(),
     loadUsersTrend(),
     loadUserSpendingRanking()
   ])
@@ -743,6 +778,7 @@ const loadDashboardStats = async () => {
 const loadChartData = async () => {
   await Promise.all([
     loadDashboardSnapshot(false),
+    loadQualityTrend(),
     loadUsersTrend(),
     loadUserSpendingRanking()
   ])

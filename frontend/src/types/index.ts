@@ -1971,6 +1971,29 @@ export interface TrendDataPoint {
   actual_cost: number // 实际扣除
 }
 
+// 仪表盘「总耗时 P50/P90 + SLA」趋势;sla 为 0~1,桶内没有样本时为 null。
+export interface QualityTrendPoint {
+  bucket: string
+  success: number
+  failed: number
+  sla: number | null
+  duration_p50_ms: number | null
+  duration_p90_ms: number | null
+}
+
+export interface QualityTrendParams {
+  start_date?: string
+  end_date?: string
+  granularity?: 'day' | 'hour'
+}
+
+export interface QualityTrendResponse {
+  start: string
+  end: string
+  granularity: 'day' | 'hour'
+  points: QualityTrendPoint[]
+}
+
 export interface ModelStat {
   model: string
   requests: number
