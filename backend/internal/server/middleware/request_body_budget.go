@@ -73,15 +73,20 @@ func (b *RequestBodyBudget) Max() int64 { return b.max }
 // Used 返回当前已占用的字节数。
 func (b *RequestBodyBudget) Used() int64 { return b.used.Load() }
 
+// reserve 只在 used+n 不超过上限时提交（CAS），失败的预占不会让其他请求看到临时的超额。
 func (b *RequestBodyBudget) reserve(n int64) bool {
 	if n <= 0 {
 		return true
 	}
-	if b.used.Add(n) > b.max {
-		b.used.Add(-n)
-		return false
+	for {
+		used := b.used.Load()
+		if used+n > b.max {
+			return false
+		}
+		if b.used.CompareAndSwap(used, used+n) {
+			return true
+		}
 	}
-	return true
 }
 
 func (b *RequestBodyBudget) release(n int64) {
@@ -103,6 +108,15 @@ type requestBodyReservation struct {
 }
 
 func (r *requestBodyReservation) total() int64 { return r.raw + r.decoded }
+
+// effective 是 raw 字节请求体在内存里的估算占用：带 Content-Encoding 时加上明文估算。
+// minBody 阈值按它比较，压缩后很小、解压后很大的请求体也会被计入。
+func (r *requestBodyReservation) effective(raw int64) int64 {
+	if r.encoded {
+		return raw + decodedEstimate(raw)
+	}
+	return raw
+}
 
 // reserveRaw 把按请求体预占的字节调到 raw，带 Content-Encoding 时同步调整明文估算。预算不够时不变。
 func (r *requestBodyReservation) reserveRaw(raw int64) bool {
@@ -179,11 +193,12 @@ func decodedEstimate(compressed int64) int64 {
 }
 
 // RequestBodyBudgetMiddleware 在 API Key 鉴权之后按全局在途预算准入，预占在请求结束时释放：
-//   - Content-Length 已知：不小于 minBody 时预占 min(Content-Length, 当前请求体上限)，带 Content-Encoding
+//   - Content-Length 已知：估算占用不小于 minBody 时预占 min(Content-Length, 当前请求体上限)，带 Content-Encoding
 //     的再加上解压明文的估算；预占不到直接回 503 + Retry-After，不读请求体。之后更小的路由级上限会把
 //     预占缩下来。
-//   - 未知长度（chunked）：在这里把请求体读进内存，前 minBody 字节不计，之后按缓冲区实际分配的容量
-//     预占；预算不够时还没写响应，同样回 503。交给后续 handler 的是内存里的副本。
+//   - 未知长度（chunked）：在这里把请求体读进内存。读到的字节不到 minBody 时不计；一过 minBody 就按
+//     缓冲区实际分配的完整容量预占（和已知长度一过阈值就按完整长度计一致）；预算不够时还没写响应，
+//     同样回 503。交给后续 handler 的是内存里的副本。
 //
 // 同一个请求经过多次（分组级和路由级）只计一次。budget 为 nil 时直接放行。
 func RequestBodyBudgetMiddleware(budget *RequestBodyBudget) gin.HandlerFunc {
@@ -205,12 +220,12 @@ func RequestBodyBudgetMiddleware(budget *RequestBodyBudget) gin.HandlerFunc {
 		switch {
 		case length == 0:
 		case length > 0:
-			if length < budget.minBody {
-				break
-			}
 			raw := length
 			if limit > 0 {
 				raw = min(raw, limit)
+			}
+			if res.effective(raw) < budget.minBody {
+				break
 			}
 			res.shrinkable = true
 			if !res.reserveRaw(raw) {
@@ -235,8 +250,8 @@ func RequestBodyBudgetMiddleware(budget *RequestBodyBudget) gin.HandlerFunc {
 	}
 }
 
-// readBudgetedBody 读完未知长度的请求体，按缓冲区实际分配的容量（不止已读字节）预占，
-// 前 minBody 字节不计；带 Content-Encoding 时连同明文估算一起预占。admitted 为 false 表示预算不够。
+// readBudgetedBody 读完未知长度的请求体。已读字节不到 minBody 时不计；过了之后按缓冲区实际分配的
+// 完整容量（不止已读字节）预占，带 Content-Encoding 时连同明文估算一起预占。admitted 为 false 表示预算不够。
 func readBudgetedBody(r io.Reader, res *requestBodyReservation) (body []byte, readErr error, admitted bool) {
 	var buf bytes.Buffer
 	chunk := make([]byte, 32<<10)
@@ -244,7 +259,7 @@ func readBudgetedBody(r io.Reader, res *requestBodyReservation) (body []byte, re
 		n, err := r.Read(chunk)
 		if n > 0 {
 			buf.Write(chunk[:n])
-			if !res.reserveRaw(max(int64(buf.Cap())-res.budget.minBody, res.raw)) {
+			if res.effective(int64(buf.Len())) >= res.budget.minBody && !res.reserveRaw(max(int64(buf.Cap()), res.raw)) {
 				return buf.Bytes(), nil, false
 			}
 		}
