@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/googleapi"
@@ -223,16 +224,122 @@ func TestRequestBodyBudget_ChunkedBodyIsReadAfterAuthAndRejectedWith503(t *testi
 	require.Equal(t, int64(0), budget.Used())
 }
 
-// chunked 请求体按缓冲区实际分配的容量预占，而不只是已读字节。
-func TestRequestBodyBudget_ChunkedChargesBufferCapacity(t *testing.T) {
-	budget := &RequestBodyBudget{max: 10 << 20, minBody: 0}
+// chunked 请求体：不到 minBody 不计；一过 minBody 就按缓冲区实际分配的完整容量预占。
+func TestRequestBodyBudget_ChunkedChargesFullBufferCapacityOnceOverThreshold(t *testing.T) {
+	budget := &RequestBodyBudget{max: 10 << 20, minBody: 64 << 10}
+
 	res := &requestBodyReservation{budget: budget}
-	body, err, admitted := readBudgetedBody(strings.NewReader(strings.Repeat("x", 300<<10)), res)
+	body, err, admitted := readBudgetedBody(strings.NewReader(strings.Repeat("x", 60<<10)), res)
 	require.NoError(t, err)
 	require.True(t, admitted)
-	require.Len(t, body, 300<<10)
-	require.GreaterOrEqual(t, res.total(), int64(cap(body)), "reservation must cover the allocated buffer")
-	res.releaseAll()
+	require.Len(t, body, 60<<10)
+	require.Equal(t, int64(0), res.total(), "a body that never reaches min_body_bytes is not counted")
+
+	for _, size := range []int{64 << 10, 65 << 10, 300 << 10} {
+		res = &requestBodyReservation{budget: budget}
+		body, err, admitted = readBudgetedBody(strings.NewReader(strings.Repeat("x", size)), res)
+		require.NoError(t, err)
+		require.True(t, admitted)
+		require.Len(t, body, size)
+		require.GreaterOrEqual(t, res.total(), int64(cap(body)),
+			"size %d: once over min_body_bytes the whole allocated buffer is charged, with no min discount", size)
+		res.releaseAll()
+	}
+	require.Equal(t, int64(0), budget.Used())
+}
+
+// 多个刚过阈值的 chunked 请求并发：每个都按完整容量计，总占用不超过预算，超出的回 503。
+func TestRequestBodyBudget_ConcurrentChunkedNearThresholdIsFullyCharged(t *testing.T) {
+	const minBody = 64 << 10
+	budget := &RequestBodyBudget{max: 4 * 128 << 10, minBody: minBody}
+	br := newBudgetRouter(budget, 1<<20, 0)
+	var wg sync.WaitGroup
+	results := make(chan int, 16)
+	for range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results <- br.do(chunkedRequest("/v1/responses?hold=1", strings.Repeat("x", minBody+1))).Code
+		}()
+	}
+	admitted, rejected := 0, 0
+	for admitted+rejected < 16 {
+		select {
+		case <-br.entered:
+			admitted++
+			require.LessOrEqual(t, budget.Used(), budget.Max())
+		case code := <-results:
+			require.Equal(t, http.StatusServiceUnavailable, code)
+			rejected++
+		}
+	}
+	// 刚过 64KiB 的缓冲区容量是 128KiB 级别：按完整容量计，预算只容得下 4 个左右，而不是按
+	// 「容量减 64KiB」时的 8 个。
+	require.LessOrEqual(t, admitted, 4)
+	require.Positive(t, rejected)
+	close(br.release)
+	wg.Wait()
+	require.Equal(t, int64(0), budget.Used())
+}
+
+// 预占用 CAS：放不下的大预占失败时不会让 used 临时超额，放得下的小预占不会因此被误拒。
+// 先占 80/100；8 个 goroutine 不停地预占 30（永远放不下），同时只有一个 goroutine 预占 10 再释放
+// （80+10 永远放得下）。旧的「先加再回滚」写法会让小预占看到 110/120 而失败。
+func TestRequestBodyBudget_FailedReserveNeverBlocksOneThatFits(t *testing.T) {
+	budget := &RequestBodyBudget{max: 100}
+	require.True(t, budget.reserve(80))
+	var wg, started sync.WaitGroup
+	var overMax, peak atomic.Int64
+	stop := make(chan struct{})
+	for range max(runtime.GOMAXPROCS(0), 4) {
+		wg.Add(1)
+		started.Add(1)
+		go func() {
+			defer wg.Done()
+			started.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if budget.reserve(30) {
+					overMax.Add(1)
+					budget.release(30)
+				}
+			}
+		}()
+	}
+	// 另起一个观察者不停采样 used，抓临时超额。
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if used := budget.Used(); used > peak.Load() {
+				peak.Store(used)
+			}
+		}
+	}()
+	started.Wait()
+	spuriousRejects := 0
+	for deadline := time.Now().Add(200 * time.Millisecond); time.Now().Before(deadline); {
+		if budget.reserve(10) {
+			budget.release(10)
+		} else {
+			spuriousRejects++
+		}
+	}
+	close(stop)
+	wg.Wait()
+	require.Zero(t, overMax.Load(), "80+30 never fits")
+	require.Zero(t, spuriousRejects, "a reservation that fits must not fail because a larger one is being rolled back")
+	require.LessOrEqual(t, peak.Load(), budget.Max(), "used must never exceed max, even transiently")
+	budget.release(80)
 	require.Equal(t, int64(0), budget.Used())
 }
 
@@ -246,6 +353,25 @@ func TestRequestBodyBudget_EncodedBodyReservesDecodedEstimate(t *testing.T) {
 	close(br.release)
 	<-held
 	require.Equal(t, int64(0), budget.Used())
+}
+
+// 压缩后小于 minBody、解压后可能远大于它的请求体也要计入。
+func TestRequestBodyBudget_SmallCompressedBodyIsCountedByDecodedEstimate(t *testing.T) {
+	budget := &RequestBodyBudget{max: 100 << 20, minBody: 1 << 20}
+	br := newBudgetRouter(budget, 64<<20, 0)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses?hold=1", bytes.NewReader(make([]byte, 512<<10)))
+	req.Header.Set("Content-Encoding", "gzip")
+	held := br.holdAsync(t, req)
+	require.Equal(t, int64(512<<10+8*(512<<10)), budget.Used())
+	close(br.release)
+	<-held
+
+	plain := newBudgetRouter(budget, 64<<20, 0)
+	close(plain.release)
+	rec := plain.do(httptest.NewRequest(http.MethodPost, "/v1/responses?hold=1", bytes.NewReader(make([]byte, 512<<10))))
+	require.Equal(t, http.StatusOK, rec.Code)
+	<-plain.entered
+	require.Equal(t, int64(0), budget.Used(), "an uncompressed body under min_body_bytes is not counted")
 }
 
 func TestRequestBodyBudget_NilBudgetPassesThrough(t *testing.T) {
@@ -311,6 +437,8 @@ func TestRequestBodyBudget_ConcurrentLargeRequestsStayWithinBudget(t *testing.T)
 		}
 	}
 
+	// 只看存活的堆：先回收 io.ReadAll 扩容留下的旧数组，剩下的就是被放进来的请求体。
+	runtime.GC()
 	var during runtime.MemStats
 	runtime.ReadMemStats(&during)
 	require.Equal(t, int64(budgetSz/bodySize), admitted.Load(), "exactly budget/bodySize requests are admitted")

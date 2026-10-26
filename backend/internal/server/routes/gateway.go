@@ -43,6 +43,12 @@ func RegisterGatewayRoutes(
 		logger.L().Info("gateway.request_body_budget_enabled",
 			zap.Int64("max_inflight_bytes", budget.Max()),
 			zap.Int64("min_body_bytes", cfg.Gateway.RequestBodyBudget.MinBodyBytes))
+		if budget.Max() < cfg.Gateway.MaxBodySize {
+			// 比单个请求体上限还小：接近上限的请求永远拿不到预占，会一直回 503。
+			logger.L().Warn("gateway.request_body_budget_below_max_body_size",
+				zap.Int64("max_inflight_bytes", budget.Max()),
+				zap.Int64("max_body_size", cfg.Gateway.MaxBodySize))
+		}
 	}
 	bodyBudget := middleware.RequestBodyBudgetMiddleware(budget)
 	textBodyLimit := middleware.RequestBodyLimit(cfg.Gateway.TextMaxBodySize)
