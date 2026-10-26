@@ -1030,7 +1030,7 @@ type UpstreamUploadWatchdogConfig struct {
 
 // RequestBodyBudgetConfig 控制 API Key 鉴权之后的全局在途请求体预算（见
 // middleware.RequestBodyBudgetMiddleware）：限制同时在处理的大请求体总字节数，超出时新的大请求直接回
-// 503 + Retry-After。小于 MinBodyBytes 的请求不计入、也不会被拒绝。
+// 503 + Retry-After。未压缩且小于 MinBodyBytes 的请求不计入；压缩请求始终预占解压上限。
 //
 // MaxInflightBytes：>0 为固定预算；0 为自动，取 Go 运行时内存上限的 1/10（没有内存上限时不启用）；
 // <0 关闭。

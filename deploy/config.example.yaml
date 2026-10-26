@@ -269,9 +269,11 @@ gateway:
   # Global budget for large request bodies in flight, checked right after API key auth; a large request
   # over budget gets 503 + Retry-After. Bodies are copied several times in the gateway (~5-6x memory).
   # 鉴权之后的全局在途请求体预算，超出时新的大请求直接回 503 + Retry-After。
+  # Compressed requests always reserve the 64 MiB decode limit plus their raw body size before reading.
+  # 压缩请求无论多小都在读入前预占 64 MiB 解压上限，再计原始体积；chunked 在扩容前预占缓冲区容量。
   request_body_budget:
     max_inflight_bytes: 0       # >0 fixed; 0 = auto (Go memory limit / 10, off without a limit); <0 off
-    min_body_bytes: 1048576     # bodies below 1 MiB are never counted or rejected
+    min_body_bytes: 1048576     # only uncompressed bodies below 1 MiB are exempt
   # Return X-Oneapi-Request-Id = client_request_id on every gateway response so a
   # fronting new-api stores it in logs.upstream_request_id (joins to usage_logs / ops_error_logs).
   # 在网关响应头回 X-Oneapi-Request-Id，供前置 new-api 串联请求。

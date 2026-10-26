@@ -2,11 +2,14 @@ package middleware
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +17,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/googleapi"
+	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -260,7 +264,7 @@ func TestRequestBodyBudget_NoUpstreamLimitFallsBackToBodyLimit(t *testing.T) {
 	budget.release(3 << 20)
 }
 
-// 预占和明文估算都不会溢出：已有占用时，声明接近 MaxInt64 的预占只是放不下，used 保持不变。
+// 预占不会溢出，包括预算本身接近 MaxInt64、且已有明文占用的情况。
 func TestRequestBodyBudget_HugeReservationsDoNotOverflow(t *testing.T) {
 	budget := &RequestBodyBudget{max: 1 << 30}
 	require.True(t, budget.reserve(100))
@@ -273,15 +277,20 @@ func TestRequestBodyBudget_HugeReservationsDoNotOverflow(t *testing.T) {
 	require.False(t, budget.reserve(1))
 	budget.release(1<<30 - 100)
 
-	for _, compressed := range []int64{math.MaxInt64, math.MaxInt64 / 8, math.MaxInt64/8 + 1, 8 << 20, 1 << 62} {
-		require.Equal(t, int64(requestBodyBudgetMaxDecodedBytes), decodedEstimate(compressed), "compressed=%d", compressed)
-	}
-	require.Equal(t, int64(8*1000), decodedEstimate(1000))
-
-	res := &requestBodyReservation{budget: budget, encoded: true}
+	res := &requestBodyReservation{budget: budget}
 	require.False(t, res.reserveRaw(math.MaxInt64))
 	require.Equal(t, int64(100), budget.Used())
 	budget.release(100)
+
+	budget = &RequestBodyBudget{max: math.MaxInt64}
+	require.True(t, budget.reserve(pkghttputil.MaxDecompressedBodySize))
+	res = &requestBodyReservation{budget: budget, decoded: pkghttputil.MaxDecompressedBodySize}
+	require.False(t, res.reserveRaw(math.MaxInt64))
+	require.Equal(t, int64(pkghttputil.MaxDecompressedBodySize), budget.Used())
+	require.True(t, res.reserveRaw(math.MaxInt64-pkghttputil.MaxDecompressedBodySize))
+	require.Equal(t, int64(math.MaxInt64), budget.Used())
+	res.releaseAll()
+	require.Zero(t, budget.Used())
 }
 
 // GET/HEAD 的 handler 不读请求体：预算既不预占也不读。
@@ -366,6 +375,92 @@ func TestRequestBodyBudget_ChunkedChargesFullBufferCapacityOnceOverThreshold(t *
 		res.releaseAll()
 	}
 	require.Equal(t, int64(0), budget.Used())
+}
+
+// A rejected growth must not allocate the new buffer first: concurrent rejected
+// uploads must not each allocate a body larger than the remaining budget.
+func TestRequestBodyBudget_ChunkedReservesBeforeGrowing(t *testing.T) {
+	budget := &RequestBodyBudget{max: 64 << 10, minBody: 1}
+	res := &requestBodyReservation{budget: budget}
+	defer res.releaseAll()
+	body, err, admitted := readBudgetedBody(io.LimitReader(zeroReader{}, 1<<20), res)
+	require.NoError(t, err)
+	require.False(t, admitted)
+	require.LessOrEqual(t, int64(cap(body)), res.total(), "rejected growth must leave only the previously reserved buffer")
+	require.LessOrEqual(t, res.total(), budget.Max())
+}
+
+// Real high-ratio gzip bodies exercise the same decoding boundary as gateway
+// handlers. Even a tiny compressed body must hold its decoded reservation until
+// the handler finishes, and excess clients must be rejected before reading.
+func TestRequestBodyBudget_ConcurrentHighRatioCompressedBodies(t *testing.T) {
+	const decodedSize, clients = 32 << 20, 4
+	var compressed bytes.Buffer
+	zw := gzip.NewWriter(&compressed)
+	_, err := io.Copy(zw, io.LimitReader(zeroReader{}, decodedSize))
+	require.NoError(t, err)
+	require.NoError(t, zw.Close())
+	require.Less(t, compressed.Len()*9, 1<<20, "the old 8x estimate exempted this body entirely")
+
+	for _, chunked := range []bool{false, true} {
+		t.Run(strconv.FormatBool(chunked), func(t *testing.T) {
+			budget := &RequestBodyBudget{max: 64<<20 + 256<<10, minBody: 1 << 20}
+			gin.SetMode(gin.TestMode)
+			r := gin.New()
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			defer unblock()
+			entered := make(chan int, clients)
+			results := make(chan *httptest.ResponseRecorder, clients)
+			var read atomic.Int64
+			r.POST("/v1/responses", RequestBodyLimit(64<<20), RequestBodyBudgetMiddleware(budget), func(c *gin.Context) {
+				body, err := pkghttputil.ReadRequestBodyWithPrealloc(c.Request)
+				if err != nil {
+					c.String(http.StatusBadRequest, "%v", err)
+					return
+				}
+				entered <- len(body)
+				<-release
+				runtime.KeepAlive(body)
+				c.Status(http.StatusOK)
+			})
+			for range clients {
+				go func() {
+					req := httptest.NewRequest(http.MethodPost, "/v1/responses", &countingReader{r: bytes.NewReader(compressed.Bytes()), n: &read})
+					req.ContentLength = int64(compressed.Len())
+					if chunked {
+						req.ContentLength = -1
+					}
+					req.Header.Set("Content-Encoding", "gzip")
+					rec := httptest.NewRecorder()
+					r.ServeHTTP(rec, req)
+					results <- rec
+				}()
+			}
+			admitted, rejected := 0, 0
+			for admitted+rejected < clients {
+				select {
+				case size := <-entered:
+					require.Equal(t, decodedSize, size)
+					admitted++
+				case rec := <-results:
+					require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+					require.Equal(t, "10", rec.Header().Get("Retry-After"))
+					rejected++
+				}
+			}
+			require.Equal(t, 1, admitted, "only one worst-case decoded body fits")
+			require.Equal(t, int64(compressed.Len()), read.Load(), "rejected clients must not read a body")
+			require.GreaterOrEqual(t, budget.Used(), int64(64<<20+compressed.Len()))
+			require.LessOrEqual(t, budget.Used(), budget.Max())
+			unblock()
+			for range admitted {
+				require.Equal(t, http.StatusOK, (<-results).Code)
+			}
+			require.Zero(t, budget.Used())
+		})
+	}
 }
 
 // 多个刚过阈值的 chunked 请求并发：每个都按完整容量计，总占用不超过预算，超出的回 503。
@@ -466,26 +561,34 @@ func TestRequestBodyBudget_FailedReserveNeverBlocksOneThatFits(t *testing.T) {
 	require.Equal(t, int64(0), budget.Used())
 }
 
-func TestRequestBodyBudget_EncodedBodyReservesDecodedEstimate(t *testing.T) {
-	budget := &RequestBodyBudget{max: 100 << 20, minBody: 100}
-	br := newBudgetRouter(budget, 1<<20, 0)
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses?hold=1", bytes.NewReader(make([]byte, 1000)))
-	req.Header.Set("Content-Encoding", "zstd")
-	held := br.holdAsync(t, req)
-	require.Equal(t, int64(1000+8*1000), budget.Used(), "compressed size plus the decoded estimate")
-	close(br.release)
-	<-held
-	require.Equal(t, int64(0), budget.Used())
+func TestRequestBodyBudget_EncodedBodyReservesDecodeLimit(t *testing.T) {
+	for _, encoding := range []string{"gzip", "x-gzip", "zstd", "deflate", " GZip ", "identity", ""} {
+		t.Run(encoding, func(t *testing.T) {
+			budget := &RequestBodyBudget{max: 100 << 20, minBody: 100}
+			br := newBudgetRouter(budget, 1<<20, 0)
+			req := httptest.NewRequest(http.MethodPost, "/v1/responses?hold=1", bytes.NewReader(make([]byte, 1000)))
+			req.Header.Set("Content-Encoding", encoding)
+			held := br.holdAsync(t, req)
+			want := int64(1000)
+			if encoding != "identity" && encoding != "" {
+				want += pkghttputil.MaxDecompressedBodySize
+			}
+			require.Equal(t, want, budget.Used())
+			close(br.release)
+			<-held
+			require.Zero(t, budget.Used())
+		})
+	}
 }
 
 // 压缩后小于 minBody、解压后可能远大于它的请求体也要计入。
-func TestRequestBodyBudget_SmallCompressedBodyIsCountedByDecodedEstimate(t *testing.T) {
+func TestRequestBodyBudget_SmallCompressedBodyIsCountedByDecodeLimit(t *testing.T) {
 	budget := &RequestBodyBudget{max: 100 << 20, minBody: 1 << 20}
 	br := newBudgetRouter(budget, 64<<20, 0)
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses?hold=1", bytes.NewReader(make([]byte, 512<<10)))
 	req.Header.Set("Content-Encoding", "gzip")
 	held := br.holdAsync(t, req)
-	require.Equal(t, int64(512<<10+8*(512<<10)), budget.Used())
+	require.Equal(t, int64(512<<10+pkghttputil.MaxDecompressedBodySize), budget.Used())
 	close(br.release)
 	<-held
 

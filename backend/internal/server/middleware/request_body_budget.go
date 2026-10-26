@@ -10,13 +10,14 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/googleapi"
+	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/memlimit"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
 
-// 全局在途请求体预算：限制同时在处理的大请求体总字节数，给进程内存一个硬性的总量上界。
+// 全局在途请求体预算：限制同时在处理的大请求体总字节数，为请求体驻留设置总量上界。
 //
 // 每个在途请求的请求体在网关里会被复制好几份（原文落盘、改写、每一跳的上游请求体），10-26 sv-1 实测
 // 每 1 字节请求体约占 5–6 字节进程内存。上传看门狗只管单个请求挂住；一批并发大请求各自都传得动时，
@@ -25,21 +26,16 @@ import (
 // 放在 API Key 鉴权之后：未鉴权的请求碰不到预算，也不会在这里被读请求体。
 //
 // 每个预占都有一个有限的上界：按前面 RequestBodyLimit 记下的上限截断；前面没有上限时，这里按
-// gateway.max_body_size 补一层 MaxBytesReader。所以无论客户端声明多大的 Content-Length，预占都不会
-// 超过单个请求体上限，也不会溢出。
+// gateway.max_body_size 补一层 MaxBytesReader。原始体积按该上限截断预占；压缩请求另预占解压上限。
+// 无论客户端声明多大的 Content-Length，都不会溢出。
 
 const (
 	// requestBodyBudgetMemoryDivisor：自动预算取内存上限的 1/10。按 5–6 倍放大，预算打满时请求体约用掉
-	// 软上限的一半多，剩下的留给进程基线（sv-1 平时 1–3GB）。平时在途大请求体只有 0.4–0.8GB，不会被误拒。
+	// 软上限的一半多，给进程基线及其他分配留出余量；这不是宿主机合计 RSS 的硬限制。
 	requestBodyBudgetMemoryDivisor = 10
 	// requestBodyBudgetRetryAfterSeconds 是拒绝时建议客户端等待的秒数。
 	requestBodyBudgetRetryAfterSeconds = 10
-	// requestBodyBudgetDecodeExpansion：带 Content-Encoding 的请求体，handler 会解压出最多
-	// requestBodyBudgetMaxDecodedBytes（与 httputil 的解压上限一致）的明文，按压缩体的 8 倍估算明文。
-	requestBodyBudgetDecodeExpansion = 8
-	requestBodyBudgetMaxDecodedBytes = 64 << 20
-
-	requestBodyBudgetMessage = "Server is busy processing other large requests, please retry later"
+	requestBodyBudgetMessage           = "Server is busy processing other large requests, please retry later"
 
 	requestBodyLimitKey       = "request_body_limit_bytes"
 	requestBodyReservationKey = "request_body_budget_reservation"
@@ -109,39 +105,23 @@ func (b *RequestBodyBudget) release(n int64) {
 // requestBodyReservation 是一个请求占用的预算，放在 gin.Context 里，保证每个请求只计一次。
 type requestBodyReservation struct {
 	budget *RequestBodyBudget
-	// raw 是按请求体预占的字节，decoded 是带 Content-Encoding 时按明文估算追加的字节。
+	// raw 按请求体预占；decoded 在读压缩体之前按解压上限一次性预占。
 	raw     int64
 	decoded int64
-	encoded bool
 }
 
 func (r *requestBodyReservation) total() int64 { return r.raw + r.decoded }
 
-// effective 是 raw 字节请求体在内存里的估算占用：带 Content-Encoding 时加上明文估算。
-// minBody 阈值按它比较，压缩后很小、解压后很大的请求体也会被计入。
-func (r *requestBodyReservation) effective(raw int64) int64 {
-	if r.encoded {
-		return raw + decodedEstimate(raw)
-	}
-	return raw
-}
-
 // reserveRaw 把按请求体预占的字节增加到 raw（只增不减：已知长度只预占一次，chunked 的缓冲区只会变大），
-// 带 Content-Encoding 时同步追加明文估算。预算不够时不变。
+// 明文上限已单独预占，不与 raw 相加再判断，避免溢出。预算不够时不变。
 func (r *requestBodyReservation) reserveRaw(raw int64) bool {
 	if raw <= r.raw {
 		return true
 	}
-	decoded := int64(0)
-	if r.encoded {
-		decoded = decodedEstimate(raw)
-	}
-	needRaw, needDecoded := raw-r.raw, decoded-r.decoded
-	// needDecoded 不超过明文估算的上限；先把 needRaw 和预算上限比，两者相加就不会溢出。
-	if needRaw > r.budget.max || !r.budget.reserve(needRaw+needDecoded) {
+	if !r.budget.reserve(raw - r.raw) {
 		return false
 	}
-	r.raw, r.decoded = raw, decoded
+	r.raw = raw
 	return true
 }
 
@@ -178,23 +158,12 @@ func requestBodyEncoded(req *http.Request) bool {
 	return enc != "" && enc != "identity"
 }
 
-// decodedEstimate 是压缩请求体解压后明文的估算字节数，封顶 requestBodyBudgetMaxDecodedBytes。
-// 先比较再乘，compressed 再大也不会溢出。
-func decodedEstimate(compressed int64) int64 {
-	if compressed <= 0 {
-		return 0
-	}
-	if compressed >= requestBodyBudgetMaxDecodedBytes/requestBodyBudgetDecodeExpansion {
-		return requestBodyBudgetMaxDecodedBytes
-	}
-	return compressed * requestBodyBudgetDecodeExpansion
-}
-
 // RequestBodyBudgetMiddleware 在 API Key 鉴权之后按全局在途预算准入，预占在请求结束时释放：
 //   - 请求体上限：取前面 RequestBodyLimit 记下的上限；没有时在这里按 gateway.max_body_size 补一层
 //     MaxBytesReader。预占和读入的字节都不会超过它。
-//   - Content-Length 已知：估算占用不小于 minBody 时预占 min(Content-Length, 上限)，带 Content-Encoding
-//     的再加上解压明文的估算；预占不到直接回 503 + Retry-After，不读请求体。
+//   - 压缩请求体：先预占 httputil 的解压上限，不受 minBody 豁免；压缩比不能作为内存上界。
+//   - Content-Length 已知：不小于 minBody 或带 Content-Encoding 时预占 min(Content-Length, 上限)，
+//     预占不到直接回 503 + Retry-After，不读请求体。
 //   - 未知长度（chunked）：在这里把请求体读进内存。读到的字节不到 minBody 时不计；一过 minBody 就按
 //     缓冲区实际分配的完整容量预占（和已知长度一过阈值就按完整长度计一致）；预算不够时还没写响应，
 //     同样回 503。交给后续 handler 的是内存里的副本。
@@ -219,15 +188,22 @@ func RequestBodyBudgetMiddleware(budget *RequestBodyBudget) gin.HandlerFunc {
 			req.Body = http.MaxBytesReader(c.Writer, req.Body, limit)
 			noteRequestBodyLimit(c, limit)
 		}
-		res := &requestBodyReservation{budget: budget, encoded: requestBodyEncoded(req)}
+		res := &requestBodyReservation{budget: budget}
 		c.Set(requestBodyReservationKey, res)
 		defer res.releaseAll()
+		if requestBodyEncoded(req) {
+			if !budget.reserve(pkghttputil.MaxDecompressedBodySize) {
+				rejectRequestBodyBudget(c, req.ContentLength, budget)
+				return
+			}
+			res.decoded = pkghttputil.MaxDecompressedBodySize
+		}
 
 		switch length := req.ContentLength; {
 		case length == 0:
 		case length > 0:
 			raw := min(length, limit)
-			if res.effective(raw) >= budget.minBody && !res.reserveRaw(raw) {
+			if (res.decoded > 0 || raw >= budget.minBody) && !res.reserveRaw(raw) {
 				rejectRequestBodyBudget(c, length, budget)
 				return
 			}
@@ -250,23 +226,33 @@ func RequestBodyBudgetMiddleware(budget *RequestBodyBudget) gin.HandlerFunc {
 }
 
 // readBudgetedBody 读完未知长度的请求体。已读字节不到 minBody 时不计；过了之后按缓冲区实际分配的
-// 完整容量（不止已读字节）预占，带 Content-Encoding 时连同明文估算一起预占。admitted 为 false 表示预算不够。
+// 完整容量（不止已读字节）预占，压缩体始终计入。扩容前申请预算，避免被拒请求先分配大缓冲区。
+// admitted 为 false 表示预算不够。
 func readBudgetedBody(r io.Reader, res *requestBodyReservation) (body []byte, readErr error, admitted bool) {
-	var buf bytes.Buffer
 	chunk := make([]byte, 32<<10)
 	for {
 		n, err := r.Read(chunk)
 		if n > 0 {
-			buf.Write(chunk[:n])
-			if res.effective(int64(buf.Len())) >= res.budget.minBody && !res.reserveRaw(int64(buf.Cap())) {
-				return buf.Bytes(), nil, false
+			newLen := len(body) + n
+			newCap := cap(body)
+			if newLen > newCap {
+				newCap = max(newLen, 2*newCap)
 			}
+			if (res.decoded > 0 || int64(newLen) >= res.budget.minBody) && !res.reserveRaw(int64(newCap)) {
+				return body, nil, false
+			}
+			if newCap > cap(body) {
+				grown := make([]byte, len(body), newCap)
+				copy(grown, body)
+				body = grown
+			}
+			body = append(body, chunk[:n]...)
 		}
 		if err == io.EOF {
-			return buf.Bytes(), nil, true
+			return body, nil, true
 		}
 		if err != nil {
-			return buf.Bytes(), err, true
+			return body, err, true
 		}
 	}
 }
