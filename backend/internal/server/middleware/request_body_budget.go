@@ -23,6 +23,10 @@ import (
 // 只有这个总量上限能防 OOM。
 //
 // 放在 API Key 鉴权之后：未鉴权的请求碰不到预算，也不会在这里被读请求体。
+//
+// 每个预占都有一个有限的上界：按前面 RequestBodyLimit 记下的上限截断；前面没有上限时，这里按
+// gateway.max_body_size 补一层 MaxBytesReader。所以无论客户端声明多大的 Content-Length，预占都不会
+// 超过单个请求体上限，也不会溢出。
 
 const (
 	// requestBodyBudgetMemoryDivisor：自动预算取内存上限的 1/10。按 5–6 倍放大，预算打满时请求体约用掉
@@ -45,12 +49,15 @@ const (
 type RequestBodyBudget struct {
 	max     int64
 	minBody int64
-	used    atomic.Int64
+	// bodyLimit 是请求在预算之前没经过 RequestBodyLimit 时补上的请求体上限。
+	bodyLimit int64
+	// used 始终在 [0, max] 之间：只有放得下的预占才会提交，释放的都是之前预占的。
+	used atomic.Int64
 }
 
-// NewRequestBodyBudget 按配置构造预算；memoryLimit 是 Go 运行时内存上限，用于自动取值。
-// 返回 nil 表示不启用。
-func NewRequestBodyBudget(cfg config.RequestBodyBudgetConfig, memoryLimit int64) *RequestBodyBudget {
+// NewRequestBodyBudget 按配置构造预算；maxBodySize 是网关的单个请求体上限（gateway.max_body_size），
+// memoryLimit 是 Go 运行时内存上限，用于自动取值。返回 nil 表示不启用。
+func NewRequestBodyBudget(cfg config.RequestBodyBudgetConfig, maxBodySize, memoryLimit int64) *RequestBodyBudget {
 	limit := cfg.MaxInflightBytes
 	switch {
 	case limit < 0:
@@ -64,7 +71,10 @@ func NewRequestBodyBudget(cfg config.RequestBodyBudgetConfig, memoryLimit int64)
 	if limit <= 0 {
 		return nil
 	}
-	return &RequestBodyBudget{max: limit, minBody: max(cfg.MinBodyBytes, 0)}
+	if maxBodySize <= 0 {
+		maxBodySize = limit
+	}
+	return &RequestBodyBudget{max: limit, minBody: max(cfg.MinBodyBytes, 0), bodyLimit: maxBodySize}
 }
 
 // Max 返回预算上限字节数。
@@ -74,13 +84,14 @@ func (b *RequestBodyBudget) Max() int64 { return b.max }
 func (b *RequestBodyBudget) Used() int64 { return b.used.Load() }
 
 // reserve 只在 used+n 不超过上限时提交（CAS），失败的预占不会让其他请求看到临时的超额。
+// 用 n > max-used 比较：used 在 [0, max] 之间，减法不会溢出，n 再大也只是放不下。
 func (b *RequestBodyBudget) reserve(n int64) bool {
 	if n <= 0 {
 		return true
 	}
 	for {
 		used := b.used.Load()
-		if used+n > b.max {
+		if n > b.max-used {
 			return false
 		}
 		if b.used.CompareAndSwap(used, used+n) {
@@ -102,9 +113,6 @@ type requestBodyReservation struct {
 	raw     int64
 	decoded int64
 	encoded bool
-	// shrinkable：只有按 Content-Length 预占（还没读请求体）时，才能按更小的路由级上限缩减。
-	// chunked 请求体已经读进内存，缩了就和实际占用对不上。
-	shrinkable bool
 }
 
 func (r *requestBodyReservation) total() int64 { return r.raw + r.decoded }
@@ -118,33 +126,23 @@ func (r *requestBodyReservation) effective(raw int64) int64 {
 	return raw
 }
 
-// reserveRaw 把按请求体预占的字节调到 raw，带 Content-Encoding 时同步调整明文估算。预算不够时不变。
+// reserveRaw 把按请求体预占的字节增加到 raw（只增不减：已知长度只预占一次，chunked 的缓冲区只会变大），
+// 带 Content-Encoding 时同步追加明文估算。预算不够时不变。
 func (r *requestBodyReservation) reserveRaw(raw int64) bool {
+	if raw <= r.raw {
+		return true
+	}
 	decoded := int64(0)
 	if r.encoded {
 		decoded = decodedEstimate(raw)
 	}
-	need := (raw - r.raw) + (decoded - r.decoded)
-	if need > 0 && !r.budget.reserve(need) {
+	needRaw, needDecoded := raw-r.raw, decoded-r.decoded
+	// needDecoded 不超过明文估算的上限；先把 needRaw 和预算上限比，两者相加就不会溢出。
+	if needRaw > r.budget.max || !r.budget.reserve(needRaw+needDecoded) {
 		return false
-	}
-	if need < 0 {
-		r.budget.release(-need)
 	}
 	r.raw, r.decoded = raw, decoded
 	return true
-}
-
-func (r *requestBodyReservation) shrinkTo(limit int64) {
-	if !r.shrinkable || limit >= r.raw {
-		return
-	}
-	before := r.total()
-	r.raw = limit
-	if r.encoded {
-		r.decoded = decodedEstimate(limit)
-	}
-	r.budget.release(before - r.total())
 }
 
 func (r *requestBodyReservation) releaseAll() {
@@ -152,7 +150,8 @@ func (r *requestBodyReservation) releaseAll() {
 	r.raw, r.decoded = 0, 0
 }
 
-// noteRequestBodyLimit 记下这一层的请求体上限（取最小值），已有预占时缩到新上限。
+// noteRequestBodyLimit 记下这一层的请求体上限（多层时取最小值），供预算按它截断预占。
+// 网关路由每个请求只经过一层上限，而且都在预算之前（见 RequestBodyLimitByRoute）。
 func noteRequestBodyLimit(c *gin.Context, maxBytes int64) {
 	if maxBytes <= 0 {
 		return
@@ -163,11 +162,6 @@ func noteRequestBodyLimit(c *gin.Context, maxBytes int64) {
 		}
 	}
 	c.Set(requestBodyLimitKey, maxBytes)
-	if v, ok := c.Get(requestBodyReservationKey); ok {
-		if r, _ := v.(*requestBodyReservation); r != nil {
-			r.shrinkTo(maxBytes)
-		}
-	}
 }
 
 func requestBodyLimitFromContext(c *gin.Context) int64 {
@@ -184,26 +178,34 @@ func requestBodyEncoded(req *http.Request) bool {
 	return enc != "" && enc != "identity"
 }
 
-// decodedEstimate 是压缩请求体解压后明文的估算字节数。
+// decodedEstimate 是压缩请求体解压后明文的估算字节数，封顶 requestBodyBudgetMaxDecodedBytes。
+// 先比较再乘，compressed 再大也不会溢出。
 func decodedEstimate(compressed int64) int64 {
 	if compressed <= 0 {
 		return 0
 	}
-	return min(compressed*requestBodyBudgetDecodeExpansion, requestBodyBudgetMaxDecodedBytes)
+	if compressed >= requestBodyBudgetMaxDecodedBytes/requestBodyBudgetDecodeExpansion {
+		return requestBodyBudgetMaxDecodedBytes
+	}
+	return compressed * requestBodyBudgetDecodeExpansion
 }
 
 // RequestBodyBudgetMiddleware 在 API Key 鉴权之后按全局在途预算准入，预占在请求结束时释放：
-//   - Content-Length 已知：估算占用不小于 minBody 时预占 min(Content-Length, 当前请求体上限)，带 Content-Encoding
-//     的再加上解压明文的估算；预占不到直接回 503 + Retry-After，不读请求体。之后更小的路由级上限会把
-//     预占缩下来。
+//   - 请求体上限：取前面 RequestBodyLimit 记下的上限；没有时在这里按 gateway.max_body_size 补一层
+//     MaxBytesReader。预占和读入的字节都不会超过它。
+//   - Content-Length 已知：估算占用不小于 minBody 时预占 min(Content-Length, 上限)，带 Content-Encoding
+//     的再加上解压明文的估算；预占不到直接回 503 + Retry-After，不读请求体。
 //   - 未知长度（chunked）：在这里把请求体读进内存。读到的字节不到 minBody 时不计；一过 minBody 就按
 //     缓冲区实际分配的完整容量预占（和已知长度一过阈值就按完整长度计一致）；预算不够时还没写响应，
 //     同样回 503。交给后续 handler 的是内存里的副本。
+//   - GET/HEAD 的 handler 不读请求体，不经过预算。
 //
 // 同一个请求经过多次（分组级和路由级）只计一次。budget 为 nil 时直接放行。
 func RequestBodyBudgetMiddleware(budget *RequestBodyBudget) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if budget == nil || c.Request == nil || c.Request.Body == nil || c.Request.Body == http.NoBody {
+		req := c.Request
+		if budget == nil || req == nil || req.Body == nil || req.Body == http.NoBody ||
+			req.Method == http.MethodGet || req.Method == http.MethodHead {
 			c.Next()
 			return
 		}
@@ -211,39 +213,36 @@ func RequestBodyBudgetMiddleware(budget *RequestBodyBudget) gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		res := &requestBodyReservation{budget: budget, encoded: requestBodyEncoded(c.Request)}
+		limit := requestBodyLimitFromContext(c)
+		if limit <= 0 {
+			limit = budget.bodyLimit
+			req.Body = http.MaxBytesReader(c.Writer, req.Body, limit)
+			noteRequestBodyLimit(c, limit)
+		}
+		res := &requestBodyReservation{budget: budget, encoded: requestBodyEncoded(req)}
 		c.Set(requestBodyReservationKey, res)
 		defer res.releaseAll()
 
-		limit := requestBodyLimitFromContext(c)
-		length := c.Request.ContentLength
-		switch {
+		switch length := req.ContentLength; {
 		case length == 0:
 		case length > 0:
-			raw := length
-			if limit > 0 {
-				raw = min(raw, limit)
-			}
-			if res.effective(raw) < budget.minBody {
-				break
-			}
-			res.shrinkable = true
-			if !res.reserveRaw(raw) {
+			raw := min(length, limit)
+			if res.effective(raw) >= budget.minBody && !res.reserveRaw(raw) {
 				rejectRequestBodyBudget(c, length, budget)
 				return
 			}
 		default:
-			body, readErr, admitted := readBudgetedBody(c.Request.Body, res)
+			body, readErr, admitted := readBudgetedBody(req.Body, res)
 			if !admitted {
 				rejectRequestBodyBudget(c, int64(len(body)), budget)
 				return
 			}
 			if readErr != nil {
 				// 交还已读部分和同一个错误（如 MaxBytesError），让 handler 按原逻辑回 413/400。
-				c.Request.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), errReader{readErr}))
+				req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), errReader{readErr}))
 			} else {
-				c.Request.Body = io.NopCloser(bytes.NewReader(body))
-				c.Request.ContentLength = int64(len(body))
+				req.Body = io.NopCloser(bytes.NewReader(body))
+				req.ContentLength = int64(len(body))
 			}
 		}
 		c.Next()
@@ -259,7 +258,7 @@ func readBudgetedBody(r io.Reader, res *requestBodyReservation) (body []byte, re
 		n, err := r.Read(chunk)
 		if n > 0 {
 			buf.Write(chunk[:n])
-			if res.effective(int64(buf.Len())) >= res.budget.minBody && !res.reserveRaw(max(int64(buf.Cap()), res.raw)) {
+			if res.effective(int64(buf.Len())) >= res.budget.minBody && !res.reserveRaw(int64(buf.Cap())) {
 				return buf.Bytes(), nil, false
 			}
 		}
@@ -280,8 +279,11 @@ func rejectRequestBodyBudget(c *gin.Context, length int64, budget *RequestBodyBu
 		zap.Int64("budget_max", budget.Max()),
 	)
 	c.Header("Retry-After", strconv.Itoa(requestBodyBudgetRetryAfterSeconds))
-	// 没读完请求体就回了错误，让 net/http 在响应后关掉连接，而不是为了复用连接去读完剩下的请求体。
-	c.Header("Connection", "close")
+	// HTTP/1.x 没读完请求体就回了错误：让 net/http 在响应后关掉连接，而不是为了复用连接去读完剩下的
+	// 请求体。HTTP/2 只会重置这一条流；在那里设 Connection: close 会让整条多路复用连接 GOAWAY。
+	if c.Request.ProtoMajor < 2 {
+		c.Header("Connection", "close")
+	}
 	status := http.StatusServiceUnavailable
 	path := c.Request.URL.Path
 	switch {

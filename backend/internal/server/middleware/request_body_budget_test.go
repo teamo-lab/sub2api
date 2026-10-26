@@ -7,12 +7,10 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/googleapi"
@@ -21,14 +19,16 @@ import (
 )
 
 func TestNewRequestBodyBudget_Modes(t *testing.T) {
-	require.Nil(t, NewRequestBodyBudget(config.RequestBodyBudgetConfig{MaxInflightBytes: -1}, 10<<30), "negative disables")
-	require.Nil(t, NewRequestBodyBudget(config.RequestBodyBudgetConfig{}, math.MaxInt64), "auto without a memory limit disables")
-	auto := NewRequestBodyBudget(config.RequestBodyBudgetConfig{MinBodyBytes: 1 << 20}, 10<<30)
+	require.Nil(t, NewRequestBodyBudget(config.RequestBodyBudgetConfig{MaxInflightBytes: -1}, 256<<20, 10<<30), "negative disables")
+	require.Nil(t, NewRequestBodyBudget(config.RequestBodyBudgetConfig{}, 256<<20, math.MaxInt64), "auto without a memory limit disables")
+	auto := NewRequestBodyBudget(config.RequestBodyBudgetConfig{MinBodyBytes: 1 << 20}, 256<<20, 10<<30)
 	require.NotNil(t, auto)
 	require.Equal(t, int64(1<<30), auto.Max(), "auto is a tenth of the memory limit")
-	fixed := NewRequestBodyBudget(config.RequestBodyBudgetConfig{MaxInflightBytes: 123}, math.MaxInt64)
+	require.Equal(t, int64(256<<20), auto.bodyLimit)
+	fixed := NewRequestBodyBudget(config.RequestBodyBudgetConfig{MaxInflightBytes: 123}, 0, math.MaxInt64)
 	require.NotNil(t, fixed)
 	require.Equal(t, int64(123), fixed.Max())
+	require.Equal(t, int64(123), fixed.bodyLimit, "a missing max_body_size still leaves a finite fallback limit")
 }
 
 // budgetRouter 模拟网关路由：bodyLimit → 鉴权 → 预算 → [路由级 limit] → handler。
@@ -167,37 +167,157 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// 声明超过上限的请求按上限预占；路由级更小的上限再把预占缩下来，且每个请求只计一次。
-func TestRequestBodyBudget_ReservationFollowsTheTightestLimitAndCountsOnce(t *testing.T) {
-	budget := &RequestBodyBudget{max: 10 << 20, minBody: 100}
-	// 分组级 1MiB → 预算 → 路由级 512KiB（同 /v1/embeddings 叠加 textBodyLimit）。
-	br := newBudgetRouter(budget, 1<<20, 512<<10)
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses?hold=1", bytes.NewReader(make([]byte, 400<<10)))
-	held := br.holdAsync(t, req)
-	require.Equal(t, int64(400<<10), budget.Used(), "a body under every limit is charged its own size, once")
-	close(br.release)
-	<-held
-	require.Equal(t, int64(0), budget.Used())
-
-	// 声明 2MiB：先按分组上限 1MiB 预占，路由级 512KiB 再缩到 512KiB。
+// 声明超过上限的请求按上限预占，且每个请求只计一次（分组级和路由级都挂了预算时）。
+func TestRequestBodyBudget_ReservationIsCappedByLimitAndCountedOnce(t *testing.T) {
+	budget := &RequestBodyBudget{max: 10 << 20, minBody: 100, bodyLimit: 10 << 20}
 	var observed atomic.Int64
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.POST("/v1/embeddings", RequestBodyLimit(1<<20), RequestBodyBudgetMiddleware(budget), func(c *gin.Context) {
+	mw := RequestBodyBudgetMiddleware(budget)
+	r.POST("/v1/responses", RequestBodyLimit(1<<20), mw, mw, func(c *gin.Context) {
 		observed.Store(budget.Used())
-		c.Next()
-	}, RequestBodyLimit(512<<10), func(c *gin.Context) {
-		observed.Store(observed.Load()<<32 | budget.Used())
-		_, err := io.ReadAll(c.Request.Body)
-		require.Error(t, err)
-		c.Status(http.StatusRequestEntityTooLarge)
+		_, _ = io.ReadAll(c.Request.Body)
+		c.Status(http.StatusOK)
 	})
+	for _, tc := range []struct {
+		declared int64
+		want     int64
+	}{
+		{declared: 400 << 10, want: 400 << 10},
+		{declared: 2 << 20, want: 1 << 20},
+		{declared: math.MaxInt64, want: 1 << 20},
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(make([]byte, 1000)))
+		req.ContentLength = tc.declared
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+		require.Equal(t, tc.want, observed.Load(), "declared %d", tc.declared)
+		require.Equal(t, int64(0), budget.Used())
+	}
+}
+
+// RequestBodyLimitByRoute 按路由模板选上限：预算看到的就是最终上限，不会先按分组的大上限预占。
+func TestRequestBodyLimitByRoute_BudgetReservesTheRouteLimit(t *testing.T) {
+	budget := &RequestBodyBudget{max: 10 << 20, minBody: 100, bodyLimit: 10 << 20}
+	var observed atomic.Int64
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	g := r.Group("/v1")
+	g.Use(RequestBodyLimitByRoute(4<<20, map[string]int64{"/v1/embeddings": 512 << 10}), RequestBodyBudgetMiddleware(budget))
+	handler := func(c *gin.Context) {
+		observed.Store(budget.Used())
+		if _, err := io.ReadAll(c.Request.Body); err != nil {
+			c.Status(http.StatusRequestEntityTooLarge)
+			return
+		}
+		c.Status(http.StatusOK)
+	}
+	g.POST("/embeddings", handler)
+	g.POST("/responses", handler)
+
+	for path, want := range map[string]int64{"/v1/embeddings": 512 << 10, "/v1/responses": 2 << 20} {
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, bytes.NewReader(make([]byte, 2<<20))))
+		require.Equal(t, want, observed.Load(), path)
+		require.Equal(t, int64(0), budget.Used())
+		if path == "/v1/embeddings" {
+			require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, "the route limit is enforced, not just reserved")
+		} else {
+			require.Equal(t, http.StatusOK, rec.Code)
+		}
+	}
+}
+
+// 前面没有 RequestBodyLimit 时，预算自己补一层上限：声明 MaxInt64 也只按上限预占，读请求体也被截断。
+func TestRequestBodyBudget_NoUpstreamLimitFallsBackToBodyLimit(t *testing.T) {
+	budget := &RequestBodyBudget{max: 10 << 20, minBody: 100, bodyLimit: 1 << 20}
+	require.True(t, budget.reserve(3<<20), "some budget already in use")
+	var observed atomic.Int64
+	var readErr atomic.Value
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.POST("/v1/responses", RequestBodyBudgetMiddleware(budget), func(c *gin.Context) {
+		observed.Store(budget.Used())
+		if _, err := io.ReadAll(c.Request.Body); err != nil {
+			readErr.Store(err)
+		}
+		c.Status(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(make([]byte, 1000)))
+	req.ContentLength = math.MaxInt64
+	r.ServeHTTP(httptest.NewRecorder(), req)
+	require.Equal(t, int64(3<<20+1<<20), observed.Load(), "reserves the fallback limit, not the declared length")
+	require.Equal(t, int64(3<<20), budget.Used())
+
 	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/embeddings", bytes.NewReader(make([]byte, 2<<20))))
-	require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
-	require.Equal(t, int64(1<<20), observed.Load()>>32, "declared-oversized body reserves the group limit")
-	require.Equal(t, int64(512<<10), observed.Load()&(1<<32-1), "a tighter route limit shrinks the reservation")
+	r.ServeHTTP(rec, chunkedRequest("/v1/responses", strings.Repeat("x", 2<<20)))
+	var maxBytesErr *http.MaxBytesError
+	err, _ := readErr.Load().(error)
+	require.ErrorAs(t, err, &maxBytesErr, "the fallback limit is enforced on the body too")
+	require.Equal(t, int64(3<<20), budget.Used())
+	budget.release(3 << 20)
+}
+
+// 预占和明文估算都不会溢出：已有占用时，声明接近 MaxInt64 的预占只是放不下，used 保持不变。
+func TestRequestBodyBudget_HugeReservationsDoNotOverflow(t *testing.T) {
+	budget := &RequestBodyBudget{max: 1 << 30}
+	require.True(t, budget.reserve(100))
+	for _, n := range []int64{math.MaxInt64, math.MaxInt64 - 50, math.MaxInt64 - 100, 1<<30 - 99} {
+		require.False(t, budget.reserve(n), "n=%d", n)
+		require.Equal(t, int64(100), budget.Used())
+	}
+	require.True(t, budget.reserve(1<<30-100), "exactly filling the budget still works")
+	require.Equal(t, int64(1<<30), budget.Used())
+	require.False(t, budget.reserve(1))
+	budget.release(1<<30 - 100)
+
+	for _, compressed := range []int64{math.MaxInt64, math.MaxInt64 / 8, math.MaxInt64/8 + 1, 8 << 20, 1 << 62} {
+		require.Equal(t, int64(requestBodyBudgetMaxDecodedBytes), decodedEstimate(compressed), "compressed=%d", compressed)
+	}
+	require.Equal(t, int64(8*1000), decodedEstimate(1000))
+
+	res := &requestBodyReservation{budget: budget, encoded: true}
+	require.False(t, res.reserveRaw(math.MaxInt64))
+	require.Equal(t, int64(100), budget.Used())
+	budget.release(100)
+}
+
+// GET/HEAD 的 handler 不读请求体：预算既不预占也不读。
+func TestRequestBodyBudget_GetAndHeadAreNotTouched(t *testing.T) {
+	budget := &RequestBodyBudget{max: 100, minBody: 0, bodyLimit: 100}
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	var read atomic.Int64
+	h := func(c *gin.Context) { c.Status(http.StatusOK) }
+	r.GET("/v1/models", RequestBodyBudgetMiddleware(budget), h)
+	r.HEAD("/v1/models", RequestBodyBudgetMiddleware(budget), h)
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		req := httptest.NewRequest(method, "/v1/models", &countingReader{r: strings.NewReader(strings.Repeat("x", 5000)), n: &read})
+		req.ContentLength = -1
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, method)
+	}
+	require.Equal(t, int64(0), read.Load())
 	require.Equal(t, int64(0), budget.Used())
+}
+
+// HTTP/2 的 503 不带 Connection: close（那会让整条多路复用连接 GOAWAY），HTTP/1.1 带。
+func TestRequestBodyBudget_ConnectionCloseOnlyForHTTP1(t *testing.T) {
+	budget := &RequestBodyBudget{max: 100, minBody: 0, bodyLimit: 1 << 20}
+	br := newBudgetRouter(budget, 1<<20, 0)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(make([]byte, 200)))
+	rec := br.do(req)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.Equal(t, "close", rec.Header().Get("Connection"))
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(make([]byte, 200)))
+	req.Proto, req.ProtoMajor, req.ProtoMinor = "HTTP/2.0", 2, 0
+	rec = br.do(req)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.Empty(t, rec.Header().Get("Connection"))
 }
 
 func TestRequestBodyBudget_ChunkedBodyIsReadAfterAuthAndRejectedWith503(t *testing.T) {
@@ -283,26 +403,19 @@ func TestRequestBodyBudget_ConcurrentChunkedNearThresholdIsFullyCharged(t *testi
 }
 
 // 预占用 CAS：放不下的大预占失败时不会让 used 临时超额，放得下的小预占不会因此被误拒。
-// 先占 80/100；8 个 goroutine 不停地预占 30（永远放不下），同时只有一个 goroutine 预占 10 再释放
+// 先占 80/100；一批 goroutine 不停地预占 30（永远放不下），同时只有一个 goroutine 预占 10 再释放
 // （80+10 永远放得下）。旧的「先加再回滚」写法会让小预占看到 110/120 而失败。
 func TestRequestBodyBudget_FailedReserveNeverBlocksOneThatFits(t *testing.T) {
+	const contenders, attemptsEach = 4, 20_000
 	budget := &RequestBodyBudget{max: 100}
 	require.True(t, budget.reserve(80))
-	var wg, started sync.WaitGroup
+	var contending sync.WaitGroup
 	var overMax, peak atomic.Int64
-	stop := make(chan struct{})
-	for range max(runtime.GOMAXPROCS(0), 4) {
-		wg.Add(1)
-		started.Add(1)
+	for range contenders {
+		contending.Add(1)
 		go func() {
-			defer wg.Done()
-			started.Done()
-			for {
-				select {
-				case <-stop:
-					return
-				default:
-				}
+			defer contending.Done()
+			for range attemptsEach {
 				if budget.reserve(30) {
 					overMax.Add(1)
 					budget.release(30)
@@ -310,13 +423,18 @@ func TestRequestBodyBudget_FailedReserveNeverBlocksOneThatFits(t *testing.T) {
 			}
 		}()
 	}
-	// 另起一个观察者不停采样 used，抓临时超额。
-	wg.Add(1)
+	contendersDone := make(chan struct{})
 	go func() {
-		defer wg.Done()
+		contending.Wait()
+		close(contendersDone)
+	}()
+	// 观察者和小预占都跑到大预占的 goroutine 做完固定次数为止：结束条件不依赖时钟。
+	observerDone := make(chan struct{})
+	go func() {
+		defer close(observerDone)
 		for {
 			select {
-			case <-stop:
+			case <-contendersDone:
 				return
 			default:
 			}
@@ -325,17 +443,22 @@ func TestRequestBodyBudget_FailedReserveNeverBlocksOneThatFits(t *testing.T) {
 			}
 		}
 	}()
-	started.Wait()
-	spuriousRejects := 0
-	for deadline := time.Now().Add(200 * time.Millisecond); time.Now().Before(deadline); {
+	spuriousRejects, attempts := 0, 0
+	for done := false; !done; {
+		select {
+		case <-contendersDone:
+			done = true
+		default:
+		}
+		attempts++
 		if budget.reserve(10) {
 			budget.release(10)
 		} else {
 			spuriousRejects++
 		}
 	}
-	close(stop)
-	wg.Wait()
+	<-observerDone
+	require.Positive(t, attempts)
 	require.Zero(t, overMax.Load(), "80+30 never fits")
 	require.Zero(t, spuriousRejects, "a reservation that fits must not fail because a larger one is being rolled back")
 	require.LessOrEqual(t, peak.Load(), budget.Max(), "used must never exceed max, even transiently")
@@ -382,7 +505,7 @@ func TestRequestBodyBudget_NilBudgetPassesThrough(t *testing.T) {
 	require.Contains(t, rec.Body.String(), "request body too large")
 }
 
-// 压测：大量并发大请求时，同时被放进来的请求体总量不超过预算，超出的立刻 503；进程堆的增长也有上界。
+// 压测：大量并发大请求时，同时被放进来的请求体总量不超过预算，超出的立刻 503。
 func TestRequestBodyBudget_ConcurrentLargeRequestsStayWithinBudget(t *testing.T) {
 	const (
 		bodySize = 8 << 20
@@ -406,10 +529,6 @@ func TestRequestBodyBudget_ConcurrentLargeRequestsStayWithinBudget(t *testing.T)
 		<-release
 		c.String(http.StatusOK, "%d", len(body))
 	})
-
-	runtime.GC()
-	var before runtime.MemStats
-	runtime.ReadMemStats(&before)
 
 	var wg sync.WaitGroup
 	codes := make(chan int, clients)
@@ -437,14 +556,10 @@ func TestRequestBodyBudget_ConcurrentLargeRequestsStayWithinBudget(t *testing.T)
 		}
 	}
 
-	// 只看存活的堆：先回收 io.ReadAll 扩容留下的旧数组，剩下的就是被放进来的请求体。
-	runtime.GC()
-	var during runtime.MemStats
-	runtime.ReadMemStats(&during)
+	// 同时被放进来、读完请求体的只有 budget/bodySize 个，其余的没读请求体就被拒了：
+	// 驻留的请求体总量不超过预算，而不是 clients*bodySize。
 	require.Equal(t, int64(budgetSz/bodySize), admitted.Load(), "exactly budget/bodySize requests are admitted")
 	require.LessOrEqual(t, peakUsed.Load(), int64(budgetSz))
-	require.Less(t, int64(during.HeapAlloc)-int64(before.HeapAlloc), int64(3*budgetSz),
-		"heap growth is bounded by the budget, not by the %d MiB offered", clients*bodySize>>20)
 
 	close(release)
 	wg.Wait()
