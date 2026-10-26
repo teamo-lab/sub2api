@@ -6,6 +6,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -318,11 +319,23 @@ func noAvailableOpenAISelectionError(requestedModel string, compactBlocked bool,
 	if details != "" {
 		message += " (" + details + ")"
 	}
-	return openAINoAvailableSelectionError{message: message}
+	return openAINoAvailableSelectionError{
+		message: message,
+		// 有号是因为请求体超过它的上限才被跳过的：换一个更小的请求体就可能成功，
+		// 应该回 413 让客户端知道该缩小请求，而不是笼统的「没有可用账号」。
+		requestBodyTooLarge: strings.Contains(details, openAIAccountRequestBodyTooLargeReason+"="),
+	}
 }
 
 type openAINoAvailableSelectionError struct {
-	message string
+	message             string
+	requestBodyTooLarge bool
+}
+
+// IsOpenAIRequestBodyTooLargeSelectionError 判断选号失败里是否有账号因为请求体超过上限被跳过。
+func IsOpenAIRequestBodyTooLargeSelectionError(err error) bool {
+	var selectionErr openAINoAvailableSelectionError
+	return errors.As(err, &selectionErr) && selectionErr.requestBodyTooLarge
 }
 
 func (e openAINoAvailableSelectionError) Error() string {

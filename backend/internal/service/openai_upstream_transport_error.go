@@ -120,6 +120,20 @@ func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Co
 		Message:            safeErr,
 	})
 
+	// 上传看门狗中止：这个号在可接受的时间内收不完这么大的请求体。换号，不冷却、不计账号健康；
+	// 所有号都这样时回 413。必须在 context.Canceled 判断之前：中止靠取消这一跳的 context 实现。
+	if errors.Is(err, ErrOpenAIUpstreamUploadStalled) {
+		logger.FromContext(ctx).Warn("openai.upstream_upload_stalled",
+			zap.Int64("account_id", account.ID),
+			zap.Error(err))
+		failoverErr := &UpstreamFailoverError{
+			StatusCode:   http.StatusRequestEntityTooLarge,
+			ResponseBody: openAITransportFailoverBody,
+		}
+		markOpenAIRequestBodyTooLarge(failoverErr)
+		return failoverErr
+	}
+
 	// Client disconnected: do NOT fail over to another account and do NOT evict
 	// this one — the upstream never had a chance to exhibit a fault.
 	if errors.Is(err, context.Canceled) || (errors.Is(err, context.DeadlineExceeded) && errors.Is(ctx.Err(), context.DeadlineExceeded)) {

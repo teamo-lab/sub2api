@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -150,4 +151,21 @@ func TestOpenAIRequestBodyCap_ChatPathNewAPIInvalidTaskProtocolOnLargeBodySwitch
 
 	small := WithOpenAIInboundRequestBodyBytes(context.Background(), 1<<20)
 	require.Nil(t, svc.failoverOpenAIUpstreamHTTPError(small, c, bodyCapTestAccount(nil), upstream.resp, respBody, upstreamMsg, "gpt-6.1-sol"))
+}
+
+func TestIsOpenAIRequestBodyTooLargeSelectionError(t *testing.T) {
+	stats := openAISelectionFilterStats{pool: 3}
+	stats.exclude("model_not_supported")
+	stats.exclude(openAIAccountRequestBodyTooLargeReason)
+	stats.exclude(openAIAccountRequestBodyTooLargeReason)
+	err := noAvailableOpenAISelectionError("gpt-6.1-sol", false, stats.summary(""))
+	require.ErrorIs(t, err, ErrNoAvailableAccounts)
+	require.True(t, IsOpenAIRequestBodyTooLargeSelectionError(err))
+	require.True(t, IsOpenAIRequestBodyTooLargeSelectionError(fmt.Errorf("select: %w", err)))
+
+	other := openAISelectionFilterStats{pool: 2}
+	other.exclude("model_not_supported")
+	require.False(t, IsOpenAIRequestBodyTooLargeSelectionError(noAvailableOpenAISelectionError("gpt-6.1-sol", false, other.summary(""))))
+	require.False(t, IsOpenAIRequestBodyTooLargeSelectionError(ErrNoAvailableAccounts))
+	require.False(t, IsOpenAIRequestBodyTooLargeSelectionError(nil))
 }
