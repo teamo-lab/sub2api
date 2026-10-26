@@ -20,7 +20,7 @@ func TestNewRequestBodyBudget_Modes(t *testing.T) {
 	require.Nil(t, NewRequestBodyBudget(config.RequestBodyBudgetConfig{}, math.MaxInt64), "auto without a memory limit disables")
 	auto := NewRequestBodyBudget(config.RequestBodyBudgetConfig{MinBodyBytes: 1 << 20}, 10<<30)
 	require.NotNil(t, auto)
-	require.Equal(t, int64(2<<30), auto.Max(), "auto is a fifth of the memory limit")
+	require.Equal(t, int64(1<<30), auto.Max(), "auto is a tenth of the memory limit")
 	fixed := NewRequestBodyBudget(config.RequestBodyBudgetConfig{MaxInflightBytes: 123}, math.MaxInt64)
 	require.NotNil(t, fixed)
 	require.Equal(t, int64(123), fixed.Max())
@@ -98,7 +98,7 @@ func TestRequestBodyLimitWithBudget_RejectsLargeBodyWhenBudgetIsHeld(t *testing.
 	require.Equal(t, "300", rec.Body.String())
 }
 
-func TestRequestBodyLimitWithBudget_ChunkedBodyIsCountedAboveMinAndRejectedWith503(t *testing.T) {
+func TestRequestBodyLimitWithBudget_ChunkedBodyIsCountedAboveMinWhileStreaming(t *testing.T) {
 	budget := &RequestBodyBudget{max: 1000, minBody: 100}
 	r := budgetTestRouter(budget, nil, nil)
 
@@ -110,25 +110,52 @@ func TestRequestBodyLimitWithBudget_ChunkedBodyIsCountedAboveMinAndRejectedWith5
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, newChunked(500))
 	require.Equal(t, http.StatusOK, rec.Code)
-	require.Equal(t, "500", rec.Body.String(), "handler sees the whole buffered body")
+	require.Equal(t, "500", rec.Body.String())
 	require.Equal(t, int64(0), budget.Used())
 
-	// 1500 - 100（不计的部分）> 1000：还没写响应，回 503 而不是读错误。
+	// 1500 - 100（不计的部分）> 1000：handler 读请求体时失败。
 	rec = httptest.NewRecorder()
 	r.ServeHTTP(rec, newChunked(1500))
-	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
-	require.Equal(t, "10", rec.Header().Get("Retry-After"))
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), errRequestBodyBudgetExceeded.Error())
 	require.Equal(t, int64(0), budget.Used())
 
-	// 预算基本占满时，小于 minBody 的 chunked 请求照常通过，超过的回 503。
+	// 预算基本占满时，小于 minBody 的 chunked 请求照常通过，超过的读失败。
 	require.True(t, budget.reserve(950))
 	rec = httptest.NewRecorder()
 	r.ServeHTTP(rec, newChunked(80))
 	require.Equal(t, http.StatusOK, rec.Code)
 	rec = httptest.NewRecorder()
 	r.ServeHTTP(rec, newChunked(200))
-	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
 	budget.release(950)
+	require.Equal(t, int64(0), budget.Used())
+}
+
+func TestRequestBodyLimitWithBudget_StackedLimitsReserveOnce(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	budget := &RequestBodyBudget{max: 1000, minBody: 100}
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	r := gin.New()
+	// 和 /v1/embeddings 一样：分组级 bodyLimit 之后再挂一层路由级 textBodyLimit。
+	group := r.Group("/v1", RequestBodyLimitWithBudget(1<<20, budget))
+	group.POST("/embeddings", RequestBodyLimitWithBudget(512<<10, budget), func(c *gin.Context) {
+		_, _ = io.ReadAll(c.Request.Body)
+		entered <- struct{}{}
+		<-release
+		c.Status(http.StatusOK)
+	})
+	done := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/embeddings", bytes.NewReader(make([]byte, 600))))
+		done <- rec.Code
+	}()
+	<-entered
+	require.Equal(t, int64(600), budget.Used(), "a request passing two body limits is charged once")
+	close(release)
+	require.Equal(t, http.StatusOK, <-done)
 	require.Equal(t, int64(0), budget.Used())
 }
 

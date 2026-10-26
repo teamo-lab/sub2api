@@ -1034,7 +1034,7 @@ type UpstreamUploadWatchdogConfig struct {
 // 请求体的数倍，慢上游上挂住的大请求会把进程撑到 OOM。预算按 Content-Length 预占，请求结束释放；
 // 小于 MinBodyBytes 的请求不计入、也不会被拒绝。
 //
-// MaxInflightBytes：>0 为固定预算；0 为自动，取 Go 运行时内存上限的 1/5（没有内存上限时不启用）；
+// MaxInflightBytes：>0 为固定预算；0 为自动，取 Go 运行时内存上限的 1/10（没有内存上限时不启用）；
 // <0 关闭。
 type RequestBodyBudgetConfig struct {
 	MaxInflightBytes int64 `mapstructure:"max_inflight_bytes"`

@@ -1,7 +1,7 @@
 package middleware
 
 import (
-	"bytes"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -16,9 +16,14 @@ import (
 	"go.uber.org/zap"
 )
 
-// requestBodyBudgetMemoryDivisor：自动预算取内存上限的 1/5。
-// 10-26 sv-1 实测在途请求体每 1 字节约占 5–6 字节进程内存（几份拷贝加 GC 余量）。
-const requestBodyBudgetMemoryDivisor = 5
+// requestBodyBudgetMemoryDivisor：自动预算取内存上限的 1/10。
+// 10-26 sv-1 实测在途请求体每 1 字节约占 5–6 字节进程内存（几份拷贝加 GC 余量），预算打满时请求体
+// 约用掉软上限的一半多，剩下的留给进程基线（sv-1 平时 1–3GB）。平时在途大请求体只有 0.4–0.8GB，
+// 不会被误拒。
+const requestBodyBudgetMemoryDivisor = 10
+
+// requestBodyBudgetAppliedKey 标记这个请求已经过预算中间件：分组和路由两级都挂了 body limit 时只计一次。
+const requestBodyBudgetAppliedKey = "request_body_budget_applied"
 
 // requestBodyBudgetRetryAfterSeconds 是拒绝时建议客户端等待的秒数。
 const requestBodyBudgetRetryAfterSeconds = 10
@@ -78,16 +83,23 @@ func (b *RequestBodyBudget) release(n int64) {
 // RequestBodyLimitWithBudget 在 MaxBytesReader 限制单个请求体大小的基础上，按全局在途预算准入：
 //   - Content-Length 已知且不小于 minBody：先预占（超过单请求上限的按上限预占——MaxBytesReader 要读满
 //     上限才报错，这期间请求体照样占内存），预占不到直接回 503 + Retry-After，不读请求体。
-//   - 未知长度（chunked）：中间件先把请求体读进来，前 minBody 字节不计，之后边读边预占；超出预算时
-//     还没写响应，同样回 503。读完后交给后续 handler 的是内存里的副本。
+//     这一步在 API Key 鉴权之前，但不读请求体；鉴权失败的请求会立刻结束并释放预占。
+//   - 未知长度（chunked）：不在这里读（这里还没鉴权），由后续 handler 读的时候计数，前 minBody 字节
+//     不计，超出预算时读请求体失败。
 //
-// 预占在请求结束时释放。budget 为 nil 时行为与 RequestBodyLimit 相同。
+// 预占在请求结束时释放。同一个请求经过多层 body limit 时只计一次。budget 为 nil 时行为与
+// RequestBodyLimit 相同。
 func RequestBodyLimitWithBudget(maxBytes int64, budget *RequestBodyBudget) gin.HandlerFunc {
 	if budget == nil {
 		return RequestBodyLimit(maxBytes)
 	}
 	return func(c *gin.Context) {
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBytes)
+		if _, applied := c.Get(requestBodyBudgetAppliedKey); applied {
+			c.Next()
+			return
+		}
+		c.Set(requestBodyBudgetAppliedKey, true)
 		length := c.Request.ContentLength
 		switch {
 		case c.Request.Body == nil || c.Request.Body == http.NoBody || length == 0:
@@ -105,45 +117,10 @@ func RequestBodyLimitWithBudget(maxBytes int64, budget *RequestBodyBudget) gin.H
 			defer budget.release(reserved)
 			c.Next()
 		default:
-			body, reserved, readErr, admitted := readBudgetedBody(c.Request.Body, budget)
-			defer budget.release(reserved)
-			if !admitted {
-				rejectRequestBodyBudget(c, int64(len(body)), budget)
-				return
-			}
-			if readErr != nil {
-				// 交还已读部分和同一个错误，让 handler 按原逻辑回 413/400。
-				c.Request.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), errReader{readErr}))
-			} else {
-				c.Request.Body = io.NopCloser(bytes.NewReader(body))
-				c.Request.ContentLength = int64(len(body))
-			}
+			body := &budgetedBody{ReadCloser: c.Request.Body, budget: budget}
+			c.Request.Body = body
+			defer body.releaseAll()
 			c.Next()
-		}
-	}
-}
-
-// readBudgetedBody 读完未知长度的请求体：前 minBody 字节不计入预算，之后边读边预占。
-// admitted 为 false 表示预算不够，此时已预占的字节仍由调用方释放。
-func readBudgetedBody(r io.Reader, budget *RequestBodyBudget) (body []byte, reserved int64, readErr error, admitted bool) {
-	var buf bytes.Buffer
-	chunk := make([]byte, 32<<10)
-	for {
-		n, err := r.Read(chunk)
-		if n > 0 {
-			buf.Write(chunk[:n])
-			if need := int64(buf.Len()) - budget.minBody - reserved; need > 0 {
-				if !budget.reserve(need) {
-					return buf.Bytes(), reserved, nil, false
-				}
-				reserved += need
-			}
-		}
-		if err == io.EOF {
-			return buf.Bytes(), reserved, nil, true
-		}
-		if err != nil {
-			return buf.Bytes(), reserved, err, true
 		}
 	}
 }
@@ -176,4 +153,39 @@ func rejectRequestBodyBudget(c *gin.Context, length int64, budget *RequestBodyBu
 		})
 	}
 	c.Abort()
+}
+
+// errRequestBodyBudgetExceeded 是未知长度请求体读到一半超出预算时返回的读错误。
+var errRequestBodyBudgetExceeded = errors.New("request body budget exceeded, please retry later")
+
+// budgetedBody 给未知长度的请求体边读边计数：前 minBody 字节不计，之后边读边预占。
+type budgetedBody struct {
+	io.ReadCloser
+	budget   *RequestBodyBudget
+	read     int64
+	reserved int64
+	exceeded bool
+}
+
+func (b *budgetedBody) Read(p []byte) (int, error) {
+	if b.exceeded {
+		return 0, errRequestBodyBudgetExceeded
+	}
+	n, err := b.ReadCloser.Read(p)
+	if n > 0 {
+		b.read += int64(n)
+		if need := b.read - b.budget.minBody - b.reserved; need > 0 {
+			if !b.budget.reserve(need) {
+				b.exceeded = true
+				return 0, errRequestBodyBudgetExceeded
+			}
+			b.reserved += need
+		}
+	}
+	return n, err
+}
+
+func (b *budgetedBody) releaseAll() {
+	b.budget.release(b.reserved)
+	b.reserved = 0
 }
