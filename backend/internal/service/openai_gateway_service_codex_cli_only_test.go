@@ -352,11 +352,17 @@ func TestOpenAITransientAndCapacityClassificationIgnoresEchoedJSON(t *testing.T)
 	require.True(t, isOpenAIRequestScopedCapacityShed("", plainText))
 }
 
-func TestShouldFailoverOpenAIUpstreamResponseContextWindow502(t *testing.T) {
+func TestShouldFailoverOpenAIUpstreamResponseContextWindow502SwitchesAccount(t *testing.T) {
 	svc := &OpenAIGatewayService{}
 	body := []byte(`{"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","type":"upstream_error","code":null}}`)
 
-	require.False(t, svc.shouldFailoverOpenAIUpstreamResponse(http.StatusBadGateway, "", body))
+	require.True(t, svc.shouldFailoverOpenAIUpstreamResponse(http.StatusBadGateway, "", body))
+	failoverErr := newOpenAIUpstreamFailoverError(http.StatusBadGateway, http.Header{}, body, "", true)
+	require.True(t, failoverErr.IsOpenAIContextWindowExceeded())
+	require.False(t, failoverErr.RetryableOnSameAccount)
+	require.False(t, failoverErr.ShouldReportAccountScheduleFailure())
+	require.Equal(t, http.StatusBadRequest, failoverErr.ClientStatusCode)
+	require.Equal(t, "Your input exceeds the context window of this model. Please adjust your input and try again.", failoverErr.ClientMessage)
 	require.True(t, svc.shouldFailoverOpenAIUpstreamResponse(http.StatusBadGateway, "temporary upstream outage", []byte(`{"error":{"message":"temporary upstream outage"}}`)))
 	require.True(t, svc.shouldFailoverOpenAIUpstreamResponse(
 		http.StatusBadGateway,

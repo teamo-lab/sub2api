@@ -85,6 +85,25 @@ func TestNonStreamingSSEToJSON_CapacityFailedEventFailsOver(t *testing.T) {
 	require.Empty(t, rec.Body.String())
 }
 
+// 超窗口换号：各上游同一模型的窗口不一样大，下一个号可能接得住。不在同号重试。
+func TestNonStreamingSSEToJSON_ContextWindowFailedEventFailsOver(t *testing.T) {
+	c, rec := newNonStreamingFailoverContext(t)
+	svc := newNonStreamingFailoverService()
+	body := sseTerminalBody("response.failed",
+		`{"type":"response.failed","response":{"id":"resp_failed","status":"failed","output":[],"error":{"code":"upstream_error","message":"input exceeds the context window"}}}`)
+
+	result, err := svc.handleSSEToJSON(newNonStreamingSSEResponse(), c, newNonStreamingFailoverAccount(), body, "model", "model")
+
+	require.Nil(t, result)
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.True(t, failoverErr.IsOpenAIContextWindowExceeded())
+	require.False(t, failoverErr.RetryableOnSameAccount)
+	require.Equal(t, "input exceeds the context window", failoverErr.ClientMessage)
+	require.False(t, c.Writer.Written())
+	require.Empty(t, rec.Body.String())
+}
+
 // 行为翻转点：未被分类为不可重试的泛化 response.failed，此前回 502，现在换号。
 // 与流式路径对齐的结果，显式钉住以免被当成回归。
 func TestNonStreamingSSEToJSON_UnclassifiedFailedEventFailsOver(t *testing.T) {
@@ -116,11 +135,6 @@ func TestNonStreamingSSEToJSON_NonRetryableFailedEventStillWritesProtocolError(t
 			name:    "invalid_request",
 			data:    `{"type":"response.failed","error":{"type":"invalid_request_error","code":"invalid_request","message":"unknown parameter foo"}}`,
 			wantMsg: "unknown parameter foo",
-		},
-		{
-			name:    "context_window",
-			data:    `{"type":"response.failed","response":{"id":"resp_failed","status":"failed","output":[],"error":{"code":"upstream_error","message":"input exceeds the context window"}}}`,
-			wantMsg: "input exceeds the context window",
 		},
 		{
 			name:    "content_policy",

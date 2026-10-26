@@ -3,7 +3,6 @@ package service
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -91,7 +90,7 @@ func TestOpenAIRequestBodyLimitFailover_HTTP413SwitchesAccountsBeforeWrite(t *te
 	}
 }
 
-func TestOpenAIRequestBodyLimitFailover_ContextWindow413DoesNotSwitchAccounts(t *testing.T) {
+func TestOpenAIRequestBodyLimitFailover_ContextWindow413SwitchesAsContextWindow(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	requestBody := []byte(`{"model":"gpt-5.2","stream":false,"input":"hello"}`)
 
@@ -126,9 +125,10 @@ func TestOpenAIRequestBodyLimitFailover_ContextWindow413DoesNotSwitchAccounts(t 
 			require.Nil(t, result)
 			require.Error(t, err)
 			var failoverErr *UpstreamFailoverError
-			require.False(t, errors.As(err, &failoverErr), "context-window failures are deterministic request errors")
-			require.True(t, c.Writer.Written())
-			require.Contains(t, rec.Body.String(), "exceeds the context window")
+			require.ErrorAs(t, err, &failoverErr)
+			require.True(t, failoverErr.IsOpenAIContextWindowExceeded())
+			require.False(t, failoverErr.IsOpenAIRequestBodyTooLarge(), "a 413 context-window error is not a body size limit")
+			require.False(t, c.Writer.Written())
 			require.True(t, body.closed)
 		})
 	}

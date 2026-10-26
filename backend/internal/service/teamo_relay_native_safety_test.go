@@ -68,7 +68,7 @@ func TestNativeRelayToolsAndTerminalVerdictsAreNotReplayed(t *testing.T) {
 		{"opaque_tool", created + reasoning + nativeSafetyFrame(`{"type":"response.web_search_call.in_progress","item_id":"ws_1"}`) + failed, false},
 		{"unknown_reasoning_family", created + nativeSafetyFrame(`{"type":"response.reasoning_side_effect.delta","delta":"opaque"}`) + failed, false},
 		{"policy", created + reasoning + nativeSafetyFrame(`{"type":"response.failed","response":{"error":{"type":"invalid_request_error","code":"content_policy_violation","message":"request violates policy"}}}`), false},
-		{"context", created + reasoning + nativeSafetyFrame(`{"type":"response.failed","response":{"error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"maximum context length exceeded"}}}`), false},
+		{"context", created + reasoning + nativeSafetyFrame(`{"type":"response.failed","response":{"error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"maximum context length exceeded"}}}`), true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -475,7 +475,7 @@ func TestOpenAIGatewayForwardDoesNotRecurseWhenCompactFallbackAlsoFails(t *testi
 	}
 }
 
-func TestOpenAIPassthroughCompactFallbackSecondStreamFailureUsesStandardErrorPath(t *testing.T) {
+func TestOpenAIPassthroughCompactFallbackSecondContextWindowFailureSwitchesAccount(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	body := []byte(`{"model":"gpt-5.5","stream":true,"input":[{"type":"compaction_trigger"}]}`)
 	recorder := httptest.NewRecorder()
@@ -505,8 +505,11 @@ func TestOpenAIPassthroughCompactFallbackSecondStreamFailureUsesStandardErrorPat
 	require.Len(t, upstream.bodies, 2)
 	var compactSignal *openAICompactFallbackSignal
 	require.False(t, errors.As(err, &compactSignal))
-	require.Equal(t, http.StatusBadRequest, recorder.Code)
-	require.Contains(t, recorder.Body.String(), "context window exceeded")
+	// 回退模型在这个号上也超窗口：换下一个号，而不是直接回给客户端。
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.True(t, failoverErr.IsOpenAIContextWindowExceeded())
+	require.Zero(t, recorder.Body.Len())
 	rawEvents, ok := c.Get(OpsUpstreamErrorsKey)
 	require.True(t, ok)
 	events, ok := rawEvents.([]*OpsUpstreamErrorEvent)
@@ -514,7 +517,7 @@ func TestOpenAIPassthroughCompactFallbackSecondStreamFailureUsesStandardErrorPat
 	require.Len(t, events, 2)
 	require.Equal(t, "retry", events[0].Kind)
 	require.Equal(t, "compact_model_fallback", events[0].Reason)
-	require.Equal(t, "http_error", events[1].Kind)
+	require.Equal(t, "failover", events[1].Kind)
 	require.True(t, events[1].Passthrough)
 	require.Equal(t, proxy.URL(), upstream.lastProxyURL)
 	requireCompactEventsAttributedTo(t, events, proxy)

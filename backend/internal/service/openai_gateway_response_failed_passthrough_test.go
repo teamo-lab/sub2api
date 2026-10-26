@@ -21,8 +21,10 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func buildContextLengthFailedSSE() string {
-	failed := `{"type":"response.failed","response":{"id":"resp_err","object":"response","status":"failed","error":{"code":"context_length_exceeded","type":"invalid_request_error","message":"Your input exceeds the context window of this model. Please adjust your input and try again."},"output":[],"usage":{"input_tokens":100000,"output_tokens":0,"total_tokens":100000}}}`
+// 不换号的确定性请求错误。超窗口（context_length_exceeded）会换号，不能用作这里的样例；
+// compat 路径解析 response 时会丢掉 error.type，这类错误的语义状态推断为 502。
+func buildContentPolicyFailedSSE() string {
+	failed := `{"type":"response.failed","response":{"id":"resp_err","object":"response","status":"failed","error":{"code":"content_policy_violation","type":"invalid_request_error","message":"Your request was rejected by our content policy."},"output":[],"usage":{"input_tokens":100000,"output_tokens":0,"total_tokens":100000}}}`
 	return fmt.Sprintf("data: %s\n\n", failed)
 }
 
@@ -60,12 +62,12 @@ func TestForwardAsChatCompletions_ResponseFailed_PassthroughRule(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
 	c.Request.Header.Set("Content-Type", "application/json")
 
-	bindPassthroughRule(c, "openai", []string{"context_length_exceeded"}, 400)
+	bindPassthroughRule(c, "openai", []string{"content_policy_violation"}, 400)
 
 	upstream := &httpUpstreamRecorder{resp: &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-		Body:       io.NopCloser(strings.NewReader(buildContextLengthFailedSSE())),
+		Body:       io.NopCloser(strings.NewReader(buildContentPolicyFailedSSE())),
 	}}
 	svc := &OpenAIGatewayService{
 		cfg:          rawChatCompletionsTestConfig(),
@@ -84,7 +86,7 @@ func TestForwardAsChatCompletions_ResponseFailed_PassthroughRule(t *testing.T) {
 	require.Equal(t, "upstream_error", errType)
 	errMsg := gjson.Get(respBody, "error.message").String()
 	require.NotEmpty(t, errMsg, "passthrough should preserve error message")
-	require.Contains(t, errMsg, "context window")
+	require.Contains(t, errMsg, "content policy")
 }
 
 func TestResponsesStreamAccessStateFailoverPrecedesPassthroughRule(t *testing.T) {
@@ -131,6 +133,38 @@ func TestResponsesStreamAccessStateFailoverPrecedesPassthroughRule(t *testing.T)
 			require.False(t, failoverErr.RetryableOnSameAccount)
 			require.Equal(t, http.StatusBadGateway, failoverErr.ClientStatusCode)
 			require.False(t, c.Writer.Written(), "passthrough rule must not commit a response before account failover")
+		})
+	}
+}
+
+func TestResponsesStreamContextWindowFailoverPrecedesPassthroughRule(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	stream := "event: response.failed\n" +
+		`data: {"type":"response.failed","response":{"status":"failed","error":{"code":"context_length_exceeded","type":"invalid_request_error","message":"Your input exceeds the context window of this model. Please adjust your input and try again."}}}` + "\n\n"
+	for _, passthrough := range []bool{false, true} {
+		t.Run(fmt.Sprintf("passthrough_%t", passthrough), func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			bindPassthroughRule(c, PlatformOpenAI, []string{"context_length_exceeded"}, http.StatusBadRequest)
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(stream)),
+			}
+			svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
+			account := &Account{ID: 12, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+			var err error
+			if passthrough {
+				_, err = svc.handleStreamingResponsePassthrough(c.Request.Context(), resp, c, account, time.Now(), "gpt-5", "gpt-5")
+			} else {
+				_, err = svc.handleStreamingResponse(c.Request.Context(), resp, c, account, time.Now(), "gpt-5", "gpt-5")
+			}
+
+			var failoverErr *UpstreamFailoverError
+			require.ErrorAs(t, err, &failoverErr)
+			require.True(t, failoverErr.IsOpenAIContextWindowExceeded())
+			require.False(t, c.Writer.Written(), "another account may have a larger context window; the rule applies once every account fails")
 		})
 	}
 }
@@ -191,12 +225,12 @@ func TestForwardAsAnthropic_ResponseFailed_PassthroughRule(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
 	c.Request.Header.Set("Content-Type", "application/json")
 
-	bindPassthroughRule(c, "openai", []string{"context_length_exceeded"}, 400)
+	bindPassthroughRule(c, "openai", []string{"content_policy_violation"}, 400)
 
 	upstream := &httpUpstreamRecorder{resp: &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-		Body:       io.NopCloser(strings.NewReader(buildContextLengthFailedSSE())),
+		Body:       io.NopCloser(strings.NewReader(buildContentPolicyFailedSSE())),
 	}}
 	svc := &OpenAIGatewayService{
 		cfg:          rawChatCompletionsTestConfig(),
@@ -226,7 +260,7 @@ func TestForwardAsChatCompletions_ResponseFailed_NoRule_Still502(t *testing.T) {
 	upstream := &httpUpstreamRecorder{resp: &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-		Body:       io.NopCloser(strings.NewReader(buildContextLengthFailedSSE())),
+		Body:       io.NopCloser(strings.NewReader(buildContentPolicyFailedSSE())),
 	}}
 	svc := &OpenAIGatewayService{
 		cfg:          rawChatCompletionsTestConfig(),
@@ -269,12 +303,12 @@ func TestForwardAsChatCompletions_ResponseFailed_ErrorCodeRuleMatchesViaSemantic
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
 	c.Request.Header.Set("Content-Type", "application/json")
 
-	bindStatusCodePassthroughRule(c, "openai", http.StatusBadRequest, "context_length_exceeded", http.StatusBadRequest)
+	bindStatusCodePassthroughRule(c, "openai", http.StatusBadGateway, "content_policy_violation", http.StatusBadRequest)
 
 	upstream := &httpUpstreamRecorder{resp: &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-		Body:       io.NopCloser(strings.NewReader(buildContextLengthFailedSSE())),
+		Body:       io.NopCloser(strings.NewReader(buildContentPolicyFailedSSE())),
 	}}
 	svc := &OpenAIGatewayService{
 		cfg:          rawChatCompletionsTestConfig(),
@@ -288,7 +322,7 @@ func TestForwardAsChatCompletions_ResponseFailed_ErrorCodeRuleMatchesViaSemantic
 	require.Equal(t, http.StatusBadRequest, rec.Code, "error-code-conditioned rule should match via semantic status inference")
 	respBody := rec.Body.String()
 	require.Equal(t, "upstream_error", gjson.Get(respBody, "error.type").String())
-	require.Contains(t, gjson.Get(respBody, "error.message").String(), "context window")
+	require.Contains(t, gjson.Get(respBody, "error.message").String(), "content policy")
 }
 
 func TestForwardAsAnthropic_ResponseFailed_ErrorCodeRuleMatchesViaSemanticStatus(t *testing.T) {
@@ -300,12 +334,12 @@ func TestForwardAsAnthropic_ResponseFailed_ErrorCodeRuleMatchesViaSemanticStatus
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
 	c.Request.Header.Set("Content-Type", "application/json")
 
-	bindStatusCodePassthroughRule(c, "openai", http.StatusBadRequest, "context_length_exceeded", http.StatusBadRequest)
+	bindStatusCodePassthroughRule(c, "openai", http.StatusBadGateway, "content_policy_violation", http.StatusBadRequest)
 
 	upstream := &httpUpstreamRecorder{resp: &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-		Body:       io.NopCloser(strings.NewReader(buildContextLengthFailedSSE())),
+		Body:       io.NopCloser(strings.NewReader(buildContentPolicyFailedSSE())),
 	}}
 	svc := &OpenAIGatewayService{
 		cfg:          rawChatCompletionsTestConfig(),

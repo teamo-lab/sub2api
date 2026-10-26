@@ -97,18 +97,19 @@ func TestOpenAIStreamingPassthroughPendingCapFailsOpen(t *testing.T) {
 // 从不经过透传规则判定：读取分支先置位 sawBareError，规则检查被 `!sawBareError`
 // 短路。命中 skip_monitoring 的规则因此抑制不了这类失败的落库。线上回放样本：
 // {"type":"error","code":"context_too_large","message":"Your input exceeds the
-// context window of this model. ..."}
+// context window of this model. ..."}。超窗口现在会换号，这里改用同样不换号的
+// invalid_request_error 帧。
 func TestOpenAIStreamingPassthroughBareErrorConsultsPassthroughRule(t *testing.T) {
 	upstream := "event: response.created\n" +
 		`data: {"type":"response.created","response":{"id":"resp_ctx"}}` + "\n\n" +
 		"event: error\n" +
-		`data: {"type":"error","code":"context_too_large","message":"Your input exceeds the context window of this model. Please adjust your input and try again.","sequence_number":0}` + "\n\n"
+		`data: {"type":"error","error":{"type":"invalid_request_error","code":"invalid_value","message":"Invalid value for 'tools[0].name'."},"sequence_number":0}` + "\n\n"
 
 	var requestContext *gin.Context
 	ruleSvc := &ErrorPassthroughService{}
 	ruleSvc.setLocalCache([]*model.ErrorPassthroughRule{{
 		ID:              1,
-		Name:            "skip context-window monitoring",
+		Name:            "skip invalid-request monitoring",
 		Enabled:         true,
 		Priority:        1,
 		ErrorCodes:      []int{http.StatusBadRequest},
@@ -123,10 +124,10 @@ func TestOpenAIStreamingPassthroughBareErrorConsultsPassthroughRule(t *testing.T
 		BindErrorPassthroughService(c, ruleSvc)
 	})
 
-	// 上下文超限不换号（isOpenAIContextWindowError），所以这里不是 failover 错误。
+	// invalid_request_error 是确定性请求错误，不换号。
 	require.Error(t, err)
 	var failoverErr *UpstreamFailoverError
-	require.False(t, errors.As(err, &failoverErr), "上下文超限不得触发换号")
+	require.False(t, errors.As(err, &failoverErr), "确定性请求错误不得触发换号")
 	// 客户端仍收到合成的终态，行为不变。
 	require.Contains(t, recorder.Body.String(), "response.failed")
 	value, exists := requestContext.Get(OpsSkipPassthroughKey)

@@ -22,7 +22,7 @@ func TestOpenAIStreamBareStructuredTransientError(t *testing.T) {
 		{"invalid_code_wins", `{"type":"error","error":{"code":"invalid_request_error","type":"server_error","message":"Bad request"}}`, "Bad request", false},
 		{"invalid_type", `{"type":"error","error":{"code":"server_error","type":"invalid_request_error","message":"Bad request"}}`, "Bad request", false},
 		{"policy_type", `{"type":"error","error":{"code":"server_error","type":"content_policy_violation","message":"Blocked by content policy"}}`, "Blocked by content policy", false},
-		{"context_window", `{"type":"error","error":{"code":"context_length_exceeded","type":"server_error","message":"Your input exceeds the context window of this model"}}`, "Your input exceeds the context window of this model", false},
+		{"context_window", `{"type":"error","error":{"code":"context_length_exceeded","type":"server_error","message":"Your input exceeds the context window of this model"}}`, "Your input exceeds the context window of this model", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.Equal(t, tc.want, openAIStreamErrorEventShouldFailover([]byte(tc.payload), tc.message))

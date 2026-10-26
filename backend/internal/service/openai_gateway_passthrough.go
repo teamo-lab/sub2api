@@ -790,7 +790,7 @@ func shouldFailoverOpenAIPassthroughResponse(account *Account, statusCode int, r
 		return false
 	}
 	if isOpenAIContextWindowError("", responseBody) {
-		return false
+		return true
 	}
 	if isOpenAIHTTPUpstreamAccessStateError(statusCode, "", responseBody) {
 		return true
@@ -1002,9 +1002,9 @@ func (s *OpenAIGatewayService) handleErrorResponsePassthrough(
 		Detail:               upstreamDetail,
 		UpstreamResponseBody: upstreamDetail,
 	})
-	// context-window 超限是确定性请求失败（shouldFailoverOpenAIPassthroughResponse
-	// 已保证不切号），其文案对客户端可操作（如触发自动压缩）；在净化信封内保留
-	// 脱敏后的上游消息，而不是抹成通用文案。
+	// context-window 超限通常先换号（shouldFailoverOpenAIPassthroughResponse），走到这里
+	// 时其文案对客户端可操作（如触发自动压缩）；在净化信封内保留脱敏后的上游消息，
+	// 而不是抹成通用文案。
 	if isOpenAIContextWindowError(upstreamMsg, body) && upstreamMsg != "" {
 		writeOpenAIPassthroughErrorEnvelope(c, resp.StatusCode, resp.Header, upstreamMsg)
 	} else {
@@ -1741,8 +1741,9 @@ func openAIStreamFailedEventShouldFailover(payload []byte, message string) bool 
 	if hit, _, _ := detectOpenAICyberPolicy(payload); hit {
 		return false
 	}
+	// 换一个窗口更大的号可能成功；见 openai_context_window_failover.go。
 	if isOpenAIContextWindowError(message, payload) {
-		return false
+		return true
 	}
 	if isOpenAIUpstreamAccessStateError(message, payload) {
 		return true
@@ -1798,8 +1799,9 @@ func openAIStreamErrorEventShouldFailover(payload []byte, message string) bool {
 	if hit, _, _ := detectOpenAICyberPolicy(payload); hit {
 		return false
 	}
+	// 换一个窗口更大的号可能成功；见 openai_context_window_failover.go。
 	if isOpenAIContextWindowError(message, payload) {
-		return false
+		return true
 	}
 	if isOpenAIUpstreamAccessStateError(message, payload) {
 		return true
