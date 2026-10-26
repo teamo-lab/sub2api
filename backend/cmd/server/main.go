@@ -19,6 +19,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/memlimit"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/setup"
 	"github.com/Wei-Shaw/sub2api/internal/web"
@@ -141,6 +142,12 @@ func runMainServer() {
 	}
 	if cfg.RunMode == config.RunModeSimple {
 		log.Println("⚠️  WARNING: Running in SIMPLE mode - billing and quota checks are DISABLED")
+	}
+	// 要在初始化应用之前设：网关的在途请求体预算按这里定下的内存上限自动取值。
+	if limit, source := memlimit.Configure(cfg.Server.MemoryLimitRatio); memlimit.IsLimited(limit) {
+		log.Printf("Go memory limit: %d MiB (source=%s)", limit>>20, source)
+	} else {
+		log.Printf("Go memory limit: none (source=%s)", source)
 	}
 
 	buildInfo := handler.BuildInfo{

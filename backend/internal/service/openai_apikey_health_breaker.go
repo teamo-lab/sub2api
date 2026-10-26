@@ -30,6 +30,7 @@ func classifyOpenAIAPIKeyHealthFailure(err error) (int, []byte, bool) {
 		// attributable to the selected account.
 		if failoverErr.IsCredentialFailure() ||
 			failoverErr.IsOpenAIContextWindowExceeded() ||
+			failoverErr.IsOpenAIRequestBodyTooLarge() ||
 			failoverErr.RequestScopedTransient ||
 			failoverErr.RetryableOnSameAccount ||
 			failoverErr.Scope == GatewayFailureScopeRequest ||

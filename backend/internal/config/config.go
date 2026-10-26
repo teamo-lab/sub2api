@@ -697,6 +697,9 @@ type ServerConfig struct {
 	TrustedProxiesConfigured bool      `mapstructure:"-" json:"-" yaml:"-"`   // 是否显式配置了可信代理列表
 	MaxRequestBodySize       int64     `mapstructure:"max_request_body_size"` // 全局最大请求体限制
 	H2C                      H2CConfig `mapstructure:"h2c"`                   // HTTP/2 Cleartext 配置
+	// MemoryLimitRatio 在没有设置 GOMEMLIMIT 时，按「容器内存上限（没有就取整机内存）× 比例」
+	// 给 Go 运行时设软内存上限，让 GC 在接近上限时提前回收。0 表示不设。
+	MemoryLimitRatio float64 `mapstructure:"memory_limit_ratio"`
 }
 
 // DeploymentConfig identifies this process inside a blue-green release and
@@ -1012,6 +1015,32 @@ const (
 	ImageConcurrencyOverflowModeWait   = "wait"
 )
 
+// UpstreamUploadWatchdogConfig 控制上游请求体上传看门狗。
+//
+// 只看请求体不小于 MinBodyBytes 的请求。上传开始 WindowSeconds 之后，每隔一小段时间用最近
+// WindowSeconds 的速度估算「已用时间 + 剩余字节 / 当前速度」，超过 MaxUploadSeconds（或这段时间
+// 一个字节都没传出去）就中止这一跳，按「这个号接不住这么大的请求体」换号，不冷却、不计账号健康；
+// 所有号都接不住时回 413。上游响应头到达后不再计时，不影响流式输出。
+type UpstreamUploadWatchdogConfig struct {
+	Enabled          bool  `mapstructure:"enabled"`
+	MinBodyBytes     int64 `mapstructure:"min_body_bytes"`
+	MaxUploadSeconds int   `mapstructure:"max_upload_seconds"`
+	WindowSeconds    int   `mapstructure:"window_seconds"`
+}
+
+// RequestBodyBudgetConfig 控制全局在途请求体预算。
+//
+// 每个在途请求的请求体在网关里会被复制好几份（原文落盘、改写、每一跳的上游请求体），内存大约是
+// 请求体的数倍，慢上游上挂住的大请求会把进程撑到 OOM。预算按 Content-Length 预占，请求结束释放；
+// 小于 MinBodyBytes 的请求不计入、也不会被拒绝。
+//
+// MaxInflightBytes：>0 为固定预算；0 为自动，取 Go 运行时内存上限的 1/5（没有内存上限时不启用）；
+// <0 关闭。
+type RequestBodyBudgetConfig struct {
+	MaxInflightBytes int64 `mapstructure:"max_inflight_bytes"`
+	MinBodyBytes     int64 `mapstructure:"min_body_bytes"`
+}
+
 // GatewayConfig API网关相关配置
 // RawCaptureConfig 控制请求原文落盘。上传在后台队列完成，队列满时丢弃，不阻塞请求；
 // 对象过期由桶的生命周期规则负责。
@@ -1068,6 +1097,10 @@ type GatewayConfig struct {
 	ExposeOneAPIRequestID bool `mapstructure:"expose_oneapi_request_id"`
 	// RawCapture 把网关请求原文异步写到 S3 兼容对象存储。默认关闭。
 	RawCapture RawCaptureConfig `mapstructure:"raw_capture"`
+	// UpstreamUploadWatchdog 盯住发往上游的大请求体：按最近的上传速度估算，传不完就提前中止这一跳并换号。
+	UpstreamUploadWatchdog UpstreamUploadWatchdogConfig `mapstructure:"upstream_upload_watchdog"`
+	// RequestBodyBudget 限制同时在处理的大请求体总字节数，超出时新的大请求直接回 503。
+	RequestBodyBudget RequestBodyBudgetConfig `mapstructure:"request_body_budget"`
 	// OpenAIFirstOutputTimeoutSeconds: native HTTP Responses 首个语义输出超时（秒），0表示禁用。
 	OpenAIFirstOutputTimeoutSeconds int `mapstructure:"openai_first_output_timeout_seconds"`
 	// OpenAIHighEffortFirstOutputTimeoutSeconds: high/xhigh/max 推理的首个语义输出超时（秒）。
@@ -2172,6 +2205,7 @@ func setDefaults() {
 	viper.SetDefault("server.idle_timeout", 120) // 120秒空闲超时
 	viper.SetDefault("server.shutdown_timeout", 900)
 	viper.SetDefault("server.max_request_body_size", int64(256*1024*1024))
+	viper.SetDefault("server.memory_limit_ratio", 0.7)
 	// H2C 默认配置
 	viper.SetDefault("server.h2c.enabled", false)
 	viper.SetDefault("server.h2c.max_concurrent_streams", uint32(50))      // 50 个并发流
@@ -2538,6 +2572,12 @@ func setDefaults() {
 	viper.SetDefault("gateway.openai_strip_schema_ref_siblings_group_ids", []int64{})
 	viper.SetDefault("gateway.expose_oneapi_request_id", false)
 	viper.SetDefault("gateway.raw_capture.enabled", false)
+	viper.SetDefault("gateway.upstream_upload_watchdog.enabled", true)
+	viper.SetDefault("gateway.upstream_upload_watchdog.min_body_bytes", int64(8*1024*1024))
+	viper.SetDefault("gateway.upstream_upload_watchdog.max_upload_seconds", 180)
+	viper.SetDefault("gateway.upstream_upload_watchdog.window_seconds", 30)
+	viper.SetDefault("gateway.request_body_budget.max_inflight_bytes", int64(0))
+	viper.SetDefault("gateway.request_body_budget.min_body_bytes", int64(1024*1024))
 	viper.SetDefault("gateway.raw_capture.group_ids", []int64{})
 	viper.SetDefault("gateway.raw_capture.endpoint", "")
 	viper.SetDefault("gateway.raw_capture.region", "")
@@ -3482,6 +3522,15 @@ func (c *Config) Validate() error {
 	}
 	if c.Gateway.MaxBodySize <= 0 {
 		return fmt.Errorf("gateway.max_body_size must be positive")
+	}
+	if c.Server.MemoryLimitRatio < 0 || c.Server.MemoryLimitRatio >= 1 {
+		return fmt.Errorf("server.memory_limit_ratio must be in [0, 1)")
+	}
+	if w := c.Gateway.UpstreamUploadWatchdog; w.Enabled && (w.MinBodyBytes <= 0 || w.MaxUploadSeconds <= 0 || w.WindowSeconds <= 0 || w.WindowSeconds > w.MaxUploadSeconds) {
+		return fmt.Errorf("gateway.upstream_upload_watchdog: min_body_bytes, max_upload_seconds and window_seconds must be positive, and window_seconds must not exceed max_upload_seconds")
+	}
+	if c.Gateway.RequestBodyBudget.MinBodyBytes < 0 {
+		return fmt.Errorf("gateway.request_body_budget.min_body_bytes must be non-negative")
 	}
 	if c.Gateway.TextMaxBodySize <= 0 || c.Gateway.TextMaxBodySize > c.Gateway.MaxBodySize {
 		return fmt.Errorf("gateway.text_max_body_size must be positive and no greater than gateway.max_body_size")
