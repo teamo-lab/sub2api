@@ -2179,7 +2179,7 @@ func TestOpenAIStreamingResponseFailedAfterOutputSanitizesVerboseResponseForClie
 	require.NotContains(t, body, `"usage"`)
 }
 
-func TestOpenAIStreamingContextWindowResponseFailedBeforeOutputPassesThrough(t *testing.T) {
+func TestOpenAIStreamingContextWindowResponseFailedBeforeOutputTriggersFailover(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	cfg := &config.Config{
 		Gateway: config.GatewayConfig{
@@ -2210,14 +2210,15 @@ func TestOpenAIStreamingContextWindowResponseFailedBeforeOutputPassesThrough(t *
 	_, err := svc.handleStreamingResponse(c.Request.Context(), resp, c, &Account{ID: 1, Platform: PlatformOpenAI, Name: "acc"}, time.Now(), "model", "model")
 	require.Error(t, err)
 	var failoverErr *UpstreamFailoverError
-	require.False(t, errors.As(err, &failoverErr))
-	require.True(t, c.Writer.Written())
-	require.Contains(t, rec.Body.String(), "response.failed")
-	require.Contains(t, rec.Body.String(), `"type":"upstream_error"`)
-	require.Contains(t, rec.Body.String(), "Your input exceeds the context window")
+	require.ErrorAs(t, err, &failoverErr)
+	require.True(t, failoverErr.IsOpenAIContextWindowExceeded())
+	require.False(t, failoverErr.ShouldReportAccountScheduleFailure())
+	require.Equal(t, http.StatusBadRequest, failoverErr.ClientStatusCode)
+	require.Contains(t, failoverErr.ClientMessage, "Your input exceeds the context window")
+	require.False(t, c.Writer.Written())
 }
 
-func TestOpenAIStreamingContextWindowResponseFailedBeforeOutputAppliesPassthroughRule(t *testing.T) {
+func TestOpenAIStreamingContextWindowResponseFailedBeforeOutputFailsOverDespitePassthroughRule(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	cfg := &config.Config{
 		Gateway: config.GatewayConfig{
@@ -2255,18 +2256,15 @@ func TestOpenAIStreamingContextWindowResponseFailedBeforeOutputAppliesPassthroug
 
 	_, err := svc.handleStreamingResponse(c.Request.Context(), resp, c, &Account{ID: 1, Platform: PlatformOpenAI, Name: "acc"}, time.Now(), "model", "model")
 	require.Error(t, err)
+	// 换号优先于透传规则：规则在全部号用尽后由 handler 的 handleFailoverExhausted 应用。
 	var failoverErr *UpstreamFailoverError
-	require.False(t, errors.As(err, &failoverErr))
-	require.True(t, IsResponseCommitted(c))
-	require.Equal(t, http.StatusBadRequest, rec.Code)
-	body := rec.Body.String()
-	require.Equal(t, "upstream_error", gjson.Get(body, "error.type").String())
-	require.Equal(t, upstreamMessage, gjson.Get(body, "error.message").String())
-	require.NotContains(t, body, "response.failed")
-	require.NotContains(t, body, "Upstream request failed")
-	// 命中透传规则也应记录 ops 上游错误事件（对齐 CC/Messages 与 antigravity 先例）。
+	require.ErrorAs(t, err, &failoverErr)
+	require.True(t, failoverErr.IsOpenAIContextWindowExceeded())
+	require.Equal(t, upstreamMessage, failoverErr.ClientMessage)
+	require.False(t, IsResponseCommitted(c))
+	require.False(t, c.Writer.Written())
 	opsVal, opsRecorded := c.Get(OpsUpstreamErrorsKey)
-	require.True(t, opsRecorded, "passthrough hit should record an ops upstream error event")
+	require.True(t, opsRecorded, "the failed hop should record an ops upstream error event")
 	opsEvents, _ := opsVal.([]*OpsUpstreamErrorEvent)
 	require.NotEmpty(t, opsEvents)
 }
@@ -2652,7 +2650,7 @@ func TestOpenAIStreamingPassthroughResponseFailedBeforeOutputReturnsFailover(t *
 	require.Empty(t, rec.Body.String())
 }
 
-func TestOpenAIStreamingPassthroughContextWindowResponseFailedBeforeOutputAppliesPassthroughRule(t *testing.T) {
+func TestOpenAIStreamingPassthroughContextWindowResponseFailedBeforeOutputFailsOverDespitePassthroughRule(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	cfg := &config.Config{
 		Gateway: config.GatewayConfig{
@@ -2688,23 +2686,20 @@ func TestOpenAIStreamingPassthroughContextWindowResponseFailedBeforeOutputApplie
 
 	_, err := svc.handleStreamingResponsePassthrough(c.Request.Context(), resp, c, &Account{ID: 1, Platform: PlatformOpenAI, Name: "acc"}, time.Now(), "", "")
 	require.Error(t, err)
+	// 换号优先于透传规则：规则在全部号用尽后由 handler 的 handleFailoverExhausted 应用。
 	var failoverErr *UpstreamFailoverError
-	require.False(t, errors.As(err, &failoverErr))
-	require.True(t, IsResponseCommitted(c))
-	require.Equal(t, http.StatusBadRequest, rec.Code)
-	body := rec.Body.String()
-	require.Equal(t, "upstream_error", gjson.Get(body, "error.type").String())
-	require.Equal(t, upstreamMessage, gjson.Get(body, "error.message").String())
-	require.NotContains(t, body, "response.failed")
-	require.NotContains(t, body, "Upstream request failed")
-	// 命中透传规则也应记录 ops 上游错误事件（对齐 CC/Messages 与 antigravity 先例）。
+	require.ErrorAs(t, err, &failoverErr)
+	require.True(t, failoverErr.IsOpenAIContextWindowExceeded())
+	require.Equal(t, upstreamMessage, failoverErr.ClientMessage)
+	require.False(t, IsResponseCommitted(c))
+	require.False(t, c.Writer.Written())
 	opsVal, opsRecorded := c.Get(OpsUpstreamErrorsKey)
-	require.True(t, opsRecorded, "passthrough hit should record an ops upstream error event")
+	require.True(t, opsRecorded, "the failed hop should record an ops upstream error event")
 	opsEvents, _ := opsVal.([]*OpsUpstreamErrorEvent)
 	require.NotEmpty(t, opsEvents)
 }
 
-func TestOpenAIStreamingPassthroughContextWindowResponseFailedBeforeOutputWithoutRulePassesThrough(t *testing.T) {
+func TestOpenAIStreamingPassthroughContextWindowResponseFailedBeforeOutputWithoutRuleTriggersFailover(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	cfg := &config.Config{
 		Gateway: config.GatewayConfig{
@@ -2733,11 +2728,10 @@ func TestOpenAIStreamingPassthroughContextWindowResponseFailedBeforeOutputWithou
 	_, err := svc.handleStreamingResponsePassthrough(c.Request.Context(), resp, c, &Account{ID: 1, Platform: PlatformOpenAI, Name: "acc"}, time.Now(), "", "")
 	require.Error(t, err)
 	var failoverErr *UpstreamFailoverError
-	require.False(t, errors.As(err, &failoverErr))
-	body := rec.Body.String()
-	require.Contains(t, body, "event: response.failed")
-	require.Contains(t, body, "context_length_exceeded")
-	require.Contains(t, body, "Your input exceeds the context window")
+	require.ErrorAs(t, err, &failoverErr)
+	require.True(t, failoverErr.IsOpenAIContextWindowExceeded())
+	require.Contains(t, string(failoverErr.ResponseBody), "context_length_exceeded")
+	require.NotContains(t, rec.Body.String(), "event: response.failed")
 }
 
 func TestOpenAIStreamingPassthroughResponseFailedAfterOutputSanitizesVerboseResponseForClient(t *testing.T) {
