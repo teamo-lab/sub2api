@@ -98,7 +98,7 @@ func TestRequestBodyLimitWithBudget_RejectsLargeBodyWhenBudgetIsHeld(t *testing.
 	require.Equal(t, "300", rec.Body.String())
 }
 
-func TestRequestBodyLimitWithBudget_ChunkedBodyIsCountedAndCapped(t *testing.T) {
+func TestRequestBodyLimitWithBudget_ChunkedBodyIsCountedAboveMinAndRejectedWith503(t *testing.T) {
 	budget := &RequestBodyBudget{max: 1000, minBody: 100}
 	r := budgetTestRouter(budget, nil, nil)
 
@@ -110,13 +110,42 @@ func TestRequestBodyLimitWithBudget_ChunkedBodyIsCountedAndCapped(t *testing.T) 
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, newChunked(500))
 	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "500", rec.Body.String(), "handler sees the whole buffered body")
 	require.Equal(t, int64(0), budget.Used())
 
+	// 1500 - 100（不计的部分）> 1000：还没写响应，回 503 而不是读错误。
 	rec = httptest.NewRecorder()
 	r.ServeHTTP(rec, newChunked(1500))
-	require.Equal(t, http.StatusBadRequest, rec.Code)
-	require.Contains(t, rec.Body.String(), errRequestBodyBudgetExceeded.Error())
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.Equal(t, "10", rec.Header().Get("Retry-After"))
 	require.Equal(t, int64(0), budget.Used())
+
+	// 预算基本占满时，小于 minBody 的 chunked 请求照常通过，超过的回 503。
+	require.True(t, budget.reserve(950))
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, newChunked(80))
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, newChunked(200))
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	budget.release(950)
+	require.Equal(t, int64(0), budget.Used())
+}
+
+func TestRequestBodyLimitWithBudget_DeclaredOversizedBodyStillReservesUpToLimit(t *testing.T) {
+	// 路由的单请求上限是 1MiB；声明 2MiB 的请求要按 1MiB 预占，预算不够就直接 503。
+	tight := &RequestBodyBudget{max: 1<<20 - 1, minBody: 100}
+	rec := httptest.NewRecorder()
+	budgetTestRouter(tight, nil, nil).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(make([]byte, 2<<20))))
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+
+	// 预算够时交给 MaxBytesReader 拒绝，结束后释放。
+	roomy := &RequestBodyBudget{max: 3 << 20, minBody: 100}
+	rec = httptest.NewRecorder()
+	budgetTestRouter(roomy, nil, nil).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(make([]byte, 2<<20))))
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), "request body too large")
+	require.Equal(t, int64(0), roomy.Used())
 }
 
 func TestRequestBodyLimitWithBudget_NilBudgetKeepsPlainLimit(t *testing.T) {

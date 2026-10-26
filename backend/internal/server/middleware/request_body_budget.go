@@ -1,7 +1,7 @@
 package middleware
 
 import (
-	"errors"
+	"bytes"
 	"io"
 	"net/http"
 	"strconv"
@@ -24,9 +24,6 @@ const requestBodyBudgetMemoryDivisor = 5
 const requestBodyBudgetRetryAfterSeconds = 10
 
 const requestBodyBudgetMessage = "Server is busy processing other large requests, please retry later"
-
-// errRequestBodyBudgetExceeded 是未知长度（chunked）请求体读到一半超出预算时返回的读错误。
-var errRequestBodyBudgetExceeded = errors.New("request body budget exceeded")
 
 // RequestBodyBudget 是全局在途请求体预算：限制同时在处理的大请求体总字节数。
 // 零值不可用，用 NewRequestBodyBudget 构造；nil 表示不限制。
@@ -79,9 +76,12 @@ func (b *RequestBodyBudget) release(n int64) {
 }
 
 // RequestBodyLimitWithBudget 在 MaxBytesReader 限制单个请求体大小的基础上，按全局在途预算准入：
-// Content-Length 已知且不小于 minBody 的请求先预占，预占不到直接回 503 + Retry-After，不读请求体；
-// 未知长度的请求边读边预占，超出预算时读请求体失败。预占在请求结束时释放。budget 为 nil 时
-// 行为与 RequestBodyLimit 相同。
+//   - Content-Length 已知且不小于 minBody：先预占（超过单请求上限的按上限预占——MaxBytesReader 要读满
+//     上限才报错，这期间请求体照样占内存），预占不到直接回 503 + Retry-After，不读请求体。
+//   - 未知长度（chunked）：中间件先把请求体读进来，前 minBody 字节不计，之后边读边预占；超出预算时
+//     还没写响应，同样回 503。读完后交给后续 handler 的是内存里的副本。
+//
+// 预占在请求结束时释放。budget 为 nil 时行为与 RequestBodyLimit 相同。
 func RequestBodyLimitWithBudget(maxBytes int64, budget *RequestBodyBudget) gin.HandlerFunc {
 	if budget == nil {
 		return RequestBodyLimit(maxBytes)
@@ -93,22 +93,57 @@ func RequestBodyLimitWithBudget(maxBytes int64, budget *RequestBodyBudget) gin.H
 		case c.Request.Body == nil || c.Request.Body == http.NoBody || length == 0:
 			c.Next()
 		case length > 0:
-			if length < budget.minBody || length > maxBytes {
-				// 太小的不计入；超过单请求上限的交给 MaxBytesReader 回 413。
+			if length < budget.minBody {
 				c.Next()
 				return
 			}
-			if !budget.reserve(length) {
+			reserved := min(length, maxBytes)
+			if !budget.reserve(reserved) {
 				rejectRequestBodyBudget(c, length, budget)
 				return
 			}
-			defer budget.release(length)
+			defer budget.release(reserved)
 			c.Next()
 		default:
-			body := &budgetedBody{ReadCloser: c.Request.Body, budget: budget}
-			c.Request.Body = body
-			defer body.releaseAll()
+			body, reserved, readErr, admitted := readBudgetedBody(c.Request.Body, budget)
+			defer budget.release(reserved)
+			if !admitted {
+				rejectRequestBodyBudget(c, int64(len(body)), budget)
+				return
+			}
+			if readErr != nil {
+				// 交还已读部分和同一个错误，让 handler 按原逻辑回 413/400。
+				c.Request.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), errReader{readErr}))
+			} else {
+				c.Request.Body = io.NopCloser(bytes.NewReader(body))
+				c.Request.ContentLength = int64(len(body))
+			}
 			c.Next()
+		}
+	}
+}
+
+// readBudgetedBody 读完未知长度的请求体：前 minBody 字节不计入预算，之后边读边预占。
+// admitted 为 false 表示预算不够，此时已预占的字节仍由调用方释放。
+func readBudgetedBody(r io.Reader, budget *RequestBodyBudget) (body []byte, reserved int64, readErr error, admitted bool) {
+	var buf bytes.Buffer
+	chunk := make([]byte, 32<<10)
+	for {
+		n, err := r.Read(chunk)
+		if n > 0 {
+			buf.Write(chunk[:n])
+			if need := int64(buf.Len()) - budget.minBody - reserved; need > 0 {
+				if !budget.reserve(need) {
+					return buf.Bytes(), reserved, nil, false
+				}
+				reserved += need
+			}
+		}
+		if err == io.EOF {
+			return buf.Bytes(), reserved, nil, true
+		}
+		if err != nil {
+			return buf.Bytes(), reserved, err, true
 		}
 	}
 }
@@ -141,32 +176,4 @@ func rejectRequestBodyBudget(c *gin.Context, length int64, budget *RequestBodyBu
 		})
 	}
 	c.Abort()
-}
-
-// budgetedBody 给未知长度的请求体边读边预占预算。
-type budgetedBody struct {
-	io.ReadCloser
-	budget   *RequestBodyBudget
-	reserved int64
-	exceeded bool
-}
-
-func (b *budgetedBody) Read(p []byte) (int, error) {
-	if b.exceeded {
-		return 0, errRequestBodyBudgetExceeded
-	}
-	n, err := b.ReadCloser.Read(p)
-	if n > 0 {
-		if !b.budget.reserve(int64(n)) {
-			b.exceeded = true
-			return 0, errRequestBodyBudgetExceeded
-		}
-		b.reserved += int64(n)
-	}
-	return n, err
-}
-
-func (b *budgetedBody) releaseAll() {
-	b.budget.release(b.reserved)
-	b.reserved = 0
 }
