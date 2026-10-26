@@ -134,6 +134,31 @@ func TestOpenAIUploadWatchdog_ClientCancelStaysClientCancel(t *testing.T) {
 	require.NotErrorIs(t, err, ErrOpenAIUpstreamUploadStalled)
 }
 
+func TestOpenAIUploadWatchdog_ReplayedBodyIsWatchedAgain(t *testing.T) {
+	req, finish := watchOpenAIUpload(newUploadWatchdogRequest(t, 64<<10), uploadWatchdogTestSettings(), true)
+	ctx := req.Context()
+	// 第一次很快读完，等过几个 tick（看门狗不能因为读完就退出）。
+	_, err := io.Copy(io.Discard, req.Body)
+	require.NoError(t, err)
+	time.Sleep(100 * time.Millisecond)
+	// 传输层重放请求体，这次慢得传不完。
+	replay, err := req.GetBody()
+	require.NoError(t, err)
+	buf := make([]byte, 512)
+	var doErr error
+	for doErr == nil {
+		select {
+		case <-ctx.Done():
+			doErr = ctx.Err()
+		case <-time.After(20 * time.Millisecond):
+			if _, err := replay.Read(buf); err == io.EOF {
+				doErr = errors.New("replay finished: watchdog did not fire")
+			}
+		}
+	}
+	require.ErrorIs(t, finish(doErr), ErrOpenAIUpstreamUploadStalled)
+}
+
 func TestResolveOpenAIUploadWatchdogSettings(t *testing.T) {
 	_, ok := resolveOpenAIUploadWatchdogSettings(nil)
 	require.False(t, ok)

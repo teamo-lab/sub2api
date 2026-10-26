@@ -1,7 +1,6 @@
 package middleware
 
 import (
-	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -10,6 +9,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/googleapi"
+	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/memlimit"
 	"github.com/gin-gonic/gin"
@@ -24,11 +24,6 @@ const requestBodyBudgetMemoryDivisor = 10
 
 // requestBodyBudgetAppliedKey 标记这个请求已经过预算中间件：分组和路由两级都挂了 body limit 时只计一次。
 const requestBodyBudgetAppliedKey = "request_body_budget_applied"
-
-// requestBodyBudgetRetryAfterSeconds 是拒绝时建议客户端等待的秒数。
-const requestBodyBudgetRetryAfterSeconds = 10
-
-const requestBodyBudgetMessage = "Server is busy processing other large requests, please retry later"
 
 // RequestBodyBudget 是全局在途请求体预算：限制同时在处理的大请求体总字节数。
 // 零值不可用，用 NewRequestBodyBudget 构造；nil 表示不限制。
@@ -85,7 +80,7 @@ func (b *RequestBodyBudget) release(n int64) {
 //     上限才报错，这期间请求体照样占内存），预占不到直接回 503 + Retry-After，不读请求体。
 //     这一步在 API Key 鉴权之前，但不读请求体；鉴权失败的请求会立刻结束并释放预占。
 //   - 未知长度（chunked）：不在这里读（这里还没鉴权），由后续 handler 读的时候计数，前 minBody 字节
-//     不计，超出预算时读请求体失败。
+//     不计，超出预算时读请求体返回 pkghttputil.ErrRequestBodyBudgetExceeded，由 handler 回 503。
 //
 // 预占在请求结束时释放。同一个请求经过多层 body limit 时只计一次。budget 为 nil 时行为与
 // RequestBodyLimit 相同。
@@ -132,7 +127,7 @@ func rejectRequestBodyBudget(c *gin.Context, length int64, budget *RequestBodyBu
 		zap.Int64("budget_used", budget.Used()),
 		zap.Int64("budget_max", budget.Max()),
 	)
-	c.Header("Retry-After", strconv.Itoa(requestBodyBudgetRetryAfterSeconds))
+	c.Header("Retry-After", strconv.Itoa(pkghttputil.RequestBodyBudgetRetryAfterSeconds))
 	// 没读请求体就回了错误，让 net/http 在响应后关掉连接，而不是为了复用连接去读完剩下的请求体。
 	c.Header("Connection", "close")
 	status := http.StatusServiceUnavailable
@@ -141,22 +136,19 @@ func rejectRequestBodyBudget(c *gin.Context, length int64, budget *RequestBodyBu
 	case strings.Contains(path, "/messages"):
 		c.JSON(status, gin.H{
 			"type":  "error",
-			"error": gin.H{"type": "overloaded_error", "message": requestBodyBudgetMessage},
+			"error": gin.H{"type": "overloaded_error", "message": pkghttputil.RequestBodyBudgetMessage},
 		})
 	case strings.HasPrefix(path, "/v1beta/") || strings.Contains(path, ":generateContent") || strings.Contains(path, ":streamGenerateContent"):
 		c.JSON(status, gin.H{
-			"error": gin.H{"code": status, "message": requestBodyBudgetMessage, "status": googleapi.HTTPStatusToGoogleStatus(status)},
+			"error": gin.H{"code": status, "message": pkghttputil.RequestBodyBudgetMessage, "status": googleapi.HTTPStatusToGoogleStatus(status)},
 		})
 	default:
 		c.JSON(status, gin.H{
-			"error": gin.H{"message": requestBodyBudgetMessage, "type": "server_error", "param": nil, "code": "server_overloaded"},
+			"error": gin.H{"message": pkghttputil.RequestBodyBudgetMessage, "type": "server_error", "param": nil, "code": "server_overloaded"},
 		})
 	}
 	c.Abort()
 }
-
-// errRequestBodyBudgetExceeded 是未知长度请求体读到一半超出预算时返回的读错误。
-var errRequestBodyBudgetExceeded = errors.New("request body budget exceeded, please retry later")
 
 // budgetedBody 给未知长度的请求体边读边计数：前 minBody 字节不计，之后边读边预占。
 type budgetedBody struct {
@@ -169,7 +161,7 @@ type budgetedBody struct {
 
 func (b *budgetedBody) Read(p []byte) (int, error) {
 	if b.exceeded {
-		return 0, errRequestBodyBudgetExceeded
+		return 0, pkghttputil.ErrRequestBodyBudgetExceeded
 	}
 	n, err := b.ReadCloser.Read(p)
 	if n > 0 {
@@ -177,7 +169,7 @@ func (b *budgetedBody) Read(p []byte) (int, error) {
 		if need := b.read - b.budget.minBody - b.reserved; need > 0 {
 			if !b.budget.reserve(need) {
 				b.exceeded = true
-				return 0, errRequestBodyBudgetExceeded
+				return 0, pkghttputil.ErrRequestBodyBudgetExceeded
 			}
 			b.reserved += need
 		}

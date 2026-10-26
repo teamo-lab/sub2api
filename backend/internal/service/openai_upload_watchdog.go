@@ -119,8 +119,10 @@ func runOpenAIUploadWatchdog(progress *openAIUploadProgress, settings openAIUplo
 		case <-stop:
 			return
 		case now := <-ticker.C:
+			// 读完了也不退出：传输层可能用 GetBody 重放请求体（重定向、连接复用失败重试），
+			// 重放会重置进度，需要接着盯。看门狗一直活到上游调用返回、finish 关掉 stop。
 			if progress.finished() {
-				return
+				continue
 			}
 			// 从传输层第一次读请求体开始计时：等连接、建连、握手的时间不算上传。
 			// 传输层重放请求体时 startedAt 会变，重新计时。

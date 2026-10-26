@@ -206,6 +206,10 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 
 	body, err := pkghttputil.ReadRequestBodyWithPrealloc(c.Request)
 	if err != nil {
+		if requestBodyBudgetExceeded(c, err) {
+			googleError(c, http.StatusServiceUnavailable, pkghttputil.RequestBodyBudgetMessage)
+			return
+		}
 		if maxErr, ok := extractMaxBytesError(err); ok {
 			googleError(c, http.StatusRequestEntityTooLarge, buildBodyTooLargeMessage(maxErr.Limit))
 			return

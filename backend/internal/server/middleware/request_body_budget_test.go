@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -113,11 +114,11 @@ func TestRequestBodyLimitWithBudget_ChunkedBodyIsCountedAboveMinWhileStreaming(t
 	require.Equal(t, "500", rec.Body.String())
 	require.Equal(t, int64(0), budget.Used())
 
-	// 1500 - 100（不计的部分）> 1000：handler 读请求体时失败。
+	// 1500 - 100（不计的部分）> 1000：handler 读请求体时拿到预算错误。
 	rec = httptest.NewRecorder()
 	r.ServeHTTP(rec, newChunked(1500))
 	require.Equal(t, http.StatusBadRequest, rec.Code)
-	require.Contains(t, rec.Body.String(), errRequestBodyBudgetExceeded.Error())
+	require.Contains(t, rec.Body.String(), pkghttputil.ErrRequestBodyBudgetExceeded.Error())
 	require.Equal(t, int64(0), budget.Used())
 
 	// 预算基本占满时，小于 minBody 的 chunked 请求照常通过，超过的读失败。
