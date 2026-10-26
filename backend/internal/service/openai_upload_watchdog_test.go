@@ -159,6 +159,22 @@ func TestOpenAIUploadWatchdog_ReplayedBodyIsWatchedAgain(t *testing.T) {
 	require.ErrorIs(t, finish(doErr), ErrOpenAIUpstreamUploadStalled)
 }
 
+func TestOpenAIUploadWatchdog_ExitsWhenHopContextEndsWithoutFinish(t *testing.T) {
+	progress := &openAIUploadProgress{total: 1 << 20}
+	done := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		runOpenAIUploadWatchdog(progress, uploadWatchdogTestSettings(), make(chan struct{}), done, func(error) {})
+		close(exited)
+	}()
+	close(done)
+	select {
+	case <-exited:
+	case <-time.After(time.Second):
+		t.Fatal("watchdog must exit once the hop context is done, even if finish is never called")
+	}
+}
+
 func TestResolveOpenAIUploadWatchdogSettings(t *testing.T) {
 	_, ok := resolveOpenAIUploadWatchdogSettings(nil)
 	require.False(t, ok)
@@ -196,6 +212,8 @@ func TestOpenAIUploadWatchdog_StallBecomesBodyTooLargeFailoverWithoutEviction(t 
 	require.Equal(t, NextAccountRetry, fo.NextAccountAction)
 	require.Equal(t, http.StatusRequestEntityTooLarge, fo.ClientStatusCode)
 	require.False(t, fo.ShouldReportAccountScheduleFailure(), "a slow upload of a huge body is not an account fault")
+	require.Equal(t, "request_body_too_large", recoveryFailureErrorCode(fo),
+		"must not reuse the transport upstream_error code, or recovery rules retry the same slow account")
 	_, _, eligible := classifyOpenAIAPIKeyHealthFailure(fo)
 	require.False(t, eligible)
 	require.Empty(t, repo.tempUnschedCalls)

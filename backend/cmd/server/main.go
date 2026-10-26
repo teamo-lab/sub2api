@@ -143,7 +143,7 @@ func runMainServer() {
 	if cfg.RunMode == config.RunModeSimple {
 		log.Println("⚠️  WARNING: Running in SIMPLE mode - billing and quota checks are DISABLED")
 	}
-	// 要在初始化应用之前设：网关的在途请求体预算按这里定下的内存上限自动取值。
+	// 尽早设：初始化应用（连接池、缓存预热）时就按这个上限回收。
 	if limit, source := memlimit.Configure(cfg.Server.MemoryLimitRatio); memlimit.IsLimited(limit) {
 		log.Printf("Go memory limit: %d MiB (source=%s)", limit>>20, source)
 	} else {

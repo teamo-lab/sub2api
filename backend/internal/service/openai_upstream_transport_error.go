@@ -128,7 +128,7 @@ func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Co
 			zap.Error(err))
 		failoverErr := &UpstreamFailoverError{
 			StatusCode:   http.StatusRequestEntityTooLarge,
-			ResponseBody: openAITransportFailoverBody,
+			ResponseBody: openAIUploadStalledFailoverBody,
 		}
 		markOpenAIRequestBodyTooLarge(failoverErr)
 		return failoverErr
