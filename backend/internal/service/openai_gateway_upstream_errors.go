@@ -264,8 +264,9 @@ func (s *OpenAIGatewayService) shouldFailoverOpenAIUpstreamResponse(statusCode i
 	if hit, _, _ := detectOpenAICyberPolicy(upstreamBody); hit {
 		return false
 	}
+	// 各上游同一模型的窗口不一样大，换号可能成功；见 openai_context_window_failover.go。
 	if isOpenAIContextWindowError(upstreamMsg, upstreamBody) {
-		return false
+		return true
 	}
 	if isOpenAIHTTPUpstreamAccessStateError(statusCode, upstreamMsg, upstreamBody) {
 		return true
@@ -307,6 +308,10 @@ func newOpenAIUpstreamFailoverError(
 	if isModelNotFoundCooldownExempt(statusCode, responseBody) {
 		failoverErr.RetryableOnSameAccount = false
 		failoverErr.RequestScopedTransient = false
+		return failoverErr
+	}
+	if isOpenAIContextWindowError(upstreamMsg, responseBody) {
+		markOpenAIContextWindowExceeded(failoverErr, upstreamMsg, responseBody)
 		return failoverErr
 	}
 	if isOpenAIRequestBodyTooLargeError(statusCode, upstreamMsg, responseBody) {

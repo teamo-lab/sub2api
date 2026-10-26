@@ -81,6 +81,7 @@ func TestClassifyOpenAIAPIKeyHealthFailureExclusions(t *testing.T) {
 		{name: "dedicated same account retry", err: &UpstreamFailoverError{StatusCode: http.StatusTooManyRequests, RetryableOnSameAccount: true}},
 		{name: "credential disable path", err: &UpstreamFailoverError{StatusCode: http.StatusUnauthorized, Stage: GatewayFailureStageAccountAuth, Scope: GatewayFailureScopeAccount}},
 		{name: "client request", err: &UpstreamFailoverError{StatusCode: http.StatusBadRequest}},
+		{name: "context window too small for this account", err: &UpstreamFailoverError{StatusCode: http.StatusBadGateway, Scope: GatewayFailureScopeAccount, Reason: openAIContextWindowExceededReason}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

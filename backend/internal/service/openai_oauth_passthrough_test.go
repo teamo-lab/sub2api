@@ -1752,7 +1752,7 @@ func TestOpenAIGatewayService_APIKeyPassthrough_Transient5xxTriggersFailover(t *
 	}
 }
 
-func TestOpenAIGatewayService_APIKeyPassthrough_ContextWindow502DoesNotFailover(t *testing.T) {
+func TestOpenAIGatewayService_APIKeyPassthrough_ContextWindow502SwitchesAccount(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -1779,10 +1779,13 @@ func TestOpenAIGatewayService_APIKeyPassthrough_ContextWindow502DoesNotFailover(
 	require.Nil(t, result)
 	require.Error(t, err)
 	var failoverErr *UpstreamFailoverError
-	require.False(t, errors.As(err, &failoverErr), "context-window errors are deterministic request failures")
-	require.True(t, c.Writer.Written())
-	require.Equal(t, http.StatusBadGateway, rec.Code)
-	require.Contains(t, rec.Body.String(), "exceeds the context window")
+	require.ErrorAs(t, err, &failoverErr, "another account may have a larger context window")
+	require.True(t, failoverErr.IsOpenAIContextWindowExceeded())
+	require.False(t, failoverErr.RetryableOnSameAccount)
+	require.False(t, failoverErr.ShouldReportAccountScheduleFailure())
+	require.Equal(t, http.StatusBadRequest, failoverErr.ClientStatusCode)
+	require.Contains(t, failoverErr.ClientMessage, "exceeds the context window")
+	require.False(t, c.Writer.Written())
 	require.True(t, body.closed)
 }
 

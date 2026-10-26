@@ -494,7 +494,7 @@ func TestForwardAsChatCompletions_ClientDisconnectDrainsUpstreamUsage(t *testing
 	require.Equal(t, 4, result.Usage.CacheReadInputTokens)
 }
 
-func TestForwardAsChatCompletions_BufferedContextWindowResponseFailedReturnsErrorWithoutFailover(t *testing.T) {
+func TestForwardAsChatCompletions_BufferedContextWindowResponseFailedTriggersFailover(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
@@ -531,13 +531,15 @@ func TestForwardAsChatCompletions_BufferedContextWindowResponseFailedReturnsErro
 	require.Error(t, err)
 	require.Nil(t, result)
 	var failoverErr *UpstreamFailoverError
-	require.False(t, errors.As(err, &failoverErr))
-	require.True(t, c.Writer.Written())
-	require.Equal(t, http.StatusBadGateway, rec.Code)
-	require.Contains(t, rec.Body.String(), "input exceeds the context window")
+	require.ErrorAs(t, err, &failoverErr)
+	require.True(t, failoverErr.IsOpenAIContextWindowExceeded())
+	require.False(t, failoverErr.ShouldReportAccountScheduleFailure())
+	require.Equal(t, http.StatusBadRequest, failoverErr.ClientStatusCode)
+	require.Contains(t, failoverErr.ClientMessage, "input exceeds the context window")
+	require.False(t, c.Writer.Written())
 }
 
-func TestForwardAsChatCompletions_StreamContextWindowResponseFailedReturnsErrorWithoutFailover(t *testing.T) {
+func TestForwardAsChatCompletions_StreamContextWindowResponseFailedTriggersFailoverBeforeFlush(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
@@ -572,16 +574,15 @@ func TestForwardAsChatCompletions_StreamContextWindowResponseFailedReturnsErrorW
 		},
 	}
 
-	result, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "gpt-5.5")
+	_, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "gpt-5.5")
 	require.Error(t, err)
-	require.NotNil(t, result)
 	var failoverErr *UpstreamFailoverError
-	require.False(t, errors.As(err, &failoverErr))
-	require.True(t, c.Writer.Written())
-	require.Equal(t, http.StatusBadGateway, rec.Code)
-	require.Contains(t, rec.Header().Get("Content-Type"), "application/json")
-	require.Contains(t, rec.Body.String(), "input exceeds the context window")
-	require.NotContains(t, rec.Body.String(), "[DONE]")
+	require.ErrorAs(t, err, &failoverErr)
+	require.True(t, failoverErr.IsOpenAIContextWindowExceeded())
+	require.False(t, failoverErr.RetryableOnSameAccount)
+	require.Equal(t, http.StatusBadRequest, failoverErr.ClientStatusCode)
+	require.Contains(t, failoverErr.ClientMessage, "input exceeds the context window")
+	require.False(t, c.Writer.Written())
 }
 
 func TestForwardAsChatCompletions_StreamBareErrorAfterOutputDoesNotFailOver(t *testing.T) {

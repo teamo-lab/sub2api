@@ -1677,6 +1677,10 @@ func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, 
 		h.anthropicStreamingAwareError(c, status, "api_error", failoverErr.ClientMessage, streamStarted)
 		return
 	}
+	if failoverErr.IsOpenAIContextWindowExceeded() {
+		h.anthropicStreamingAwareError(c, failoverErr.ClientStatusCode, "invalid_request_error", failoverErr.ClientMessage, streamStarted)
+		return
+	}
 	status, errType, errMsg := h.mapUpstreamError(failoverErr.StatusCode)
 	h.anthropicStreamingAwareError(c, status, errType, errMsg, streamStarted)
 }
@@ -3485,6 +3489,12 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 	upstreamMsg := service.ExtractUpstreamErrorMessage(responseBody)
 	service.SetOpsUpstreamError(c, statusCode, upstreamMsg, "")
 
+	// 所有号的窗口都不够：保留上游文案和 context_length_exceeded，客户端据此压缩上下文。
+	if failoverErr.IsOpenAIContextWindowExceeded() {
+		h.handleStreamingAwareErrorWithCode(c, failoverErr.ClientStatusCode, "invalid_request_error", "context_length_exceeded", failoverErr.ClientMessage, streamStarted, false)
+		return
+	}
+
 	// 使用默认的错误映射
 	status, errType, errMsg := h.mapUpstreamError(statusCode)
 	h.handleStreamingAwareError(c, status, errType, errMsg, streamStarted)
@@ -3876,6 +3886,13 @@ func closeOpenAIWSFailoverExhausted(c *gin.Context, conn *coderws.Conn, failover
 	if failoverErr != nil && failoverErr.Reason == service.OpenAIContentAuditRejectedReason {
 		intendedStatus = http.StatusForbidden
 		errorType = "permission_error"
+		message = failoverErr.ClientMessage
+		closeStatus = coderws.StatusPolicyViolation
+	}
+	if failoverErr.IsOpenAIContextWindowExceeded() {
+		intendedStatus = failoverErr.ClientStatusCode
+		errorType = "invalid_request_error"
+		errorCode = "context_length_exceeded"
 		message = failoverErr.ClientMessage
 		closeStatus = coderws.StatusPolicyViolation
 	}

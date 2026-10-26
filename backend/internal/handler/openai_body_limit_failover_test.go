@@ -57,3 +57,42 @@ func bodyLimitFailoverTestError() *service.UpstreamFailoverError {
 		ClientMessage:     "Request payload is too large",
 	}
 }
+
+func TestOpenAIContextWindowFailoverExhausted_ReturnsResponsesSSEWithCode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(nil))
+
+	(&OpenAIGatewayHandler{}).handleFailoverExhausted(c, contextWindowFailoverTestError(), true)
+
+	body := rec.Body.String()
+	require.True(t, strings.HasPrefix(body, "event: response.failed\n"))
+	require.Contains(t, body, `"code":"context_length_exceeded"`)
+	require.Contains(t, body, "exceeds the context window")
+}
+
+func TestOpenAIContextWindowFailoverExhausted_ReturnsAnthropicInvalidRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(nil))
+
+	(&OpenAIGatewayHandler{}).handleAnthropicFailoverExhausted(c, contextWindowFailoverTestError(), false)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), `"invalid_request_error"`)
+	require.Contains(t, rec.Body.String(), "exceeds the context window")
+}
+
+func contextWindowFailoverTestError() *service.UpstreamFailoverError {
+	return &service.UpstreamFailoverError{
+		StatusCode:        http.StatusBadGateway,
+		ResponseBody:      []byte(`{"error":{"type":"upstream_error","message":"Your input exceeds the context window of this model.","code":"context_length_exceeded"}}`),
+		Scope:             service.GatewayFailureScopeAccount,
+		Reason:            service.GatewayFailureReason("openai_context_window_exceeded"),
+		NextAccountAction: service.NextAccountRetry,
+		ClientStatusCode:  http.StatusBadRequest,
+		ClientMessage:     "Your input exceeds the context window of this model.",
+	}
+}
