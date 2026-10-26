@@ -1028,19 +1028,6 @@ type UpstreamUploadWatchdogConfig struct {
 	WindowSeconds    int   `mapstructure:"window_seconds"`
 }
 
-// RequestBodyBudgetConfig 控制全局在途请求体预算。
-//
-// 每个在途请求的请求体在网关里会被复制好几份（原文落盘、改写、每一跳的上游请求体），内存大约是
-// 请求体的数倍，慢上游上挂住的大请求会把进程撑到 OOM。预算按 Content-Length 预占，请求结束释放；
-// 小于 MinBodyBytes 的请求不计入、也不会被拒绝。
-//
-// MaxInflightBytes：>0 为固定预算；0 为自动，取 Go 运行时内存上限的 1/10（没有内存上限时不启用）；
-// <0 关闭。
-type RequestBodyBudgetConfig struct {
-	MaxInflightBytes int64 `mapstructure:"max_inflight_bytes"`
-	MinBodyBytes     int64 `mapstructure:"min_body_bytes"`
-}
-
 // GatewayConfig API网关相关配置
 // RawCaptureConfig 控制请求原文落盘。上传在后台队列完成，队列满时丢弃，不阻塞请求；
 // 对象过期由桶的生命周期规则负责。
@@ -1099,8 +1086,6 @@ type GatewayConfig struct {
 	RawCapture RawCaptureConfig `mapstructure:"raw_capture"`
 	// UpstreamUploadWatchdog 盯住发往上游的大请求体：按最近的上传速度估算，传不完就提前中止这一跳并换号。
 	UpstreamUploadWatchdog UpstreamUploadWatchdogConfig `mapstructure:"upstream_upload_watchdog"`
-	// RequestBodyBudget 限制同时在处理的大请求体总字节数，超出时新的大请求直接回 503。
-	RequestBodyBudget RequestBodyBudgetConfig `mapstructure:"request_body_budget"`
 	// OpenAIFirstOutputTimeoutSeconds: native HTTP Responses 首个语义输出超时（秒），0表示禁用。
 	OpenAIFirstOutputTimeoutSeconds int `mapstructure:"openai_first_output_timeout_seconds"`
 	// OpenAIHighEffortFirstOutputTimeoutSeconds: high/xhigh/max 推理的首个语义输出超时（秒）。
@@ -2576,8 +2561,6 @@ func setDefaults() {
 	viper.SetDefault("gateway.upstream_upload_watchdog.min_body_bytes", int64(8*1024*1024))
 	viper.SetDefault("gateway.upstream_upload_watchdog.max_upload_seconds", 180)
 	viper.SetDefault("gateway.upstream_upload_watchdog.window_seconds", 30)
-	viper.SetDefault("gateway.request_body_budget.max_inflight_bytes", int64(0))
-	viper.SetDefault("gateway.request_body_budget.min_body_bytes", int64(1024*1024))
 	viper.SetDefault("gateway.raw_capture.group_ids", []int64{})
 	viper.SetDefault("gateway.raw_capture.endpoint", "")
 	viper.SetDefault("gateway.raw_capture.region", "")
@@ -3528,9 +3511,6 @@ func (c *Config) Validate() error {
 	}
 	if w := c.Gateway.UpstreamUploadWatchdog; w.Enabled && (w.MinBodyBytes <= 0 || w.MaxUploadSeconds <= 0 || w.WindowSeconds <= 0 || w.WindowSeconds > w.MaxUploadSeconds) {
 		return fmt.Errorf("gateway.upstream_upload_watchdog: min_body_bytes, max_upload_seconds and window_seconds must be positive, and window_seconds must not exceed max_upload_seconds")
-	}
-	if c.Gateway.RequestBodyBudget.MinBodyBytes < 0 {
-		return fmt.Errorf("gateway.request_body_budget.min_body_bytes must be non-negative")
 	}
 	if c.Gateway.TextMaxBodySize <= 0 || c.Gateway.TextMaxBodySize > c.Gateway.MaxBodySize {
 		return fmt.Errorf("gateway.text_max_body_size must be positive and no greater than gateway.max_body_size")

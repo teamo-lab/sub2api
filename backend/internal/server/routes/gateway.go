@@ -13,15 +13,12 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/memlimit"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
-	"go.uber.org/zap"
 )
 
 // RegisterGatewayRoutes 注册 API 网关路由（Claude/OpenAI/Gemini 兼容）
@@ -36,15 +33,8 @@ func RegisterGatewayRoutes(
 	compositeResolver *service.CompositeRouteResolver,
 	cfg *config.Config,
 ) {
-	// 两种请求体上限共用一份在途预算。
-	bodyBudget := middleware.NewRequestBodyBudget(cfg.Gateway.RequestBodyBudget, memlimit.Current())
-	if bodyBudget != nil {
-		logger.L().Info("gateway.request_body_budget_enabled",
-			zap.Int64("max_inflight_bytes", bodyBudget.Max()),
-			zap.Int64("min_body_bytes", cfg.Gateway.RequestBodyBudget.MinBodyBytes))
-	}
-	bodyLimit := middleware.RequestBodyLimitWithBudget(cfg.Gateway.MaxBodySize, bodyBudget)
-	textBodyLimit := middleware.RequestBodyLimitWithBudget(cfg.Gateway.TextMaxBodySize, bodyBudget)
+	bodyLimit := middleware.RequestBodyLimit(cfg.Gateway.MaxBodySize)
+	textBodyLimit := middleware.RequestBodyLimit(cfg.Gateway.TextMaxBodySize)
 	clientRequestID := middleware.ClientRequestIDWithOptions(cfg != nil && cfg.Gateway.ExposeOneAPIRequestID)
 	opsErrorLogger := handler.OpsErrorLoggerMiddleware(opsService)
 	relayObservation := middleware.TeamoRelayObservation(cfg)

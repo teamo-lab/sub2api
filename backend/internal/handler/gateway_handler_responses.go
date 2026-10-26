@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -48,10 +47,6 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 	// Read request body
 	body, err := readLenientJSONRequestBodyWithPrealloc(c.Request, h.cfg)
 	if err != nil {
-		if requestBodyBudgetExceeded(c, err) {
-			h.responsesErrorResponse(c, http.StatusServiceUnavailable, "server_error", pkghttputil.RequestBodyBudgetMessage)
-			return
-		}
 		if maxErr, ok := extractMaxBytesError(err); ok {
 			h.responsesErrorResponse(c, http.StatusRequestEntityTooLarge, "invalid_request_error", buildBodyTooLargeMessage(maxErr.Limit))
 			return

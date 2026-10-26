@@ -25,6 +25,11 @@ import (
 // ErrOpenAIUpstreamUploadStalled 表示看门狗因为请求体上传太慢中止了这一跳。
 var ErrOpenAIUpstreamUploadStalled = errors.New("upstream request body upload too slow")
 
+// openAIUploadStalledFailoverBody 是看门狗中止后换号用的错误体。code 用专门的 request_body_too_large，
+// 不用 transport 失败的 upstream_error：按 upstream_error 配置的错误恢复规则会在同一个号上重试，
+// 又把大请求体慢慢传一遍。
+var openAIUploadStalledFailoverBody = []byte(`{"error":{"type":"invalid_request_error","code":"request_body_too_large","message":"Request payload is too large"}}`)
+
 // openAIUploadStalledError 带上中止时的上传进度，供日志和 ops 记录。
 // 它不包装 context.Canceled：调用方会把 context.Canceled 当成客户端断开，不换号。
 type openAIUploadStalledError struct {
@@ -94,7 +99,7 @@ func watchOpenAIUpload(req *http.Request, settings openAIUploadWatchdogSettings,
 	}
 	stop := make(chan struct{})
 	var stopOnce sync.Once
-	go runOpenAIUploadWatchdog(progress, settings, stop, cancel)
+	go runOpenAIUploadWatchdog(progress, settings, stop, ctx.Done(), cancel)
 	return watched, func(err error) error {
 		stopOnce.Do(func() { close(stop) })
 		var stalled *openAIUploadStalledError
@@ -105,7 +110,9 @@ func watchOpenAIUpload(req *http.Request, settings openAIUploadWatchdogSettings,
 	}
 }
 
-func runOpenAIUploadWatchdog(progress *openAIUploadProgress, settings openAIUploadWatchdogSettings, stop <-chan struct{}, cancel context.CancelCauseFunc) {
+// runOpenAIUploadWatchdog 一直跑到 finish 关掉 stop，或者这一跳的 context 结束（请求结束、客户端断开；
+// 传输层 panic 没走到 finish 时也靠它退出）。
+func runOpenAIUploadWatchdog(progress *openAIUploadProgress, settings openAIUploadWatchdogSettings, stop, done <-chan struct{}, cancel context.CancelCauseFunc) {
 	ticker := time.NewTicker(settings.tick)
 	defer ticker.Stop()
 	type sample struct {
@@ -117,6 +124,8 @@ func runOpenAIUploadWatchdog(progress *openAIUploadProgress, settings openAIUplo
 	for {
 		select {
 		case <-stop:
+			return
+		case <-done:
 			return
 		case now := <-ticker.C:
 			// 读完了也不退出：传输层可能用 GetBody 重放请求体（重定向、连接复用失败重试），
