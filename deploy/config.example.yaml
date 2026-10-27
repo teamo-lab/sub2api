@@ -54,6 +54,10 @@ server:
   # Applies to all requests, especially important for h2c first request memory protection
   # 适用于所有请求，对 h2c 第一请求的内存保护尤为重要
   max_request_body_size: 268435456
+  # Soft Go memory limit when GOMEMLIMIT is unset: ratio x container memory limit (host memory if none).
+  # 0 disables. An explicit GOMEMLIMIT env always wins.
+  # 未设置 GOMEMLIMIT 时，按「容器内存上限（没有就取整机内存）× 比例」设 Go 软内存上限；0 不设。
+  memory_limit_ratio: 0.7
   # HTTP/2 Cleartext (h2c) configuration
   # HTTP/2 Cleartext (h2c) 配置
   h2c:
@@ -254,6 +258,23 @@ gateway:
   # Pure-text endpoint body limit (embeddings and alpha/search), default 32 MiB.
   # 纯文本端点请求体上限（embeddings、alpha/search），默认 32 MiB。
   text_max_body_size: 33554432
+  # Abort an upstream hop whose request body upload cannot finish in time (projected from the recent
+  # upload rate), then fail over without cooling the account; 413 once every account gave up.
+  # 上游请求体上传看门狗：按最近的上传速度估算，传不完就中止这一跳并换号（不冷却账号），都不行回 413。
+  upstream_upload_watchdog:
+    enabled: true
+    min_body_bytes: 8388608     # only bodies >= 8 MiB are watched
+    max_upload_seconds: 180     # projected total upload time allowed
+    window_seconds: 30          # rate window; judging starts after the first window
+  # Global budget for large request bodies in flight, checked right after API key auth; a large request
+  # over budget gets 503 + Retry-After. Bodies are copied several times in the gateway (~5-6x memory).
+  # 鉴权之后的全局在途请求体预算，超出时新的大请求直接回 503 + Retry-After。
+  # Chunked and compressed bodies are read (and decoded) right here, reserving each buffer before it grows;
+  # compressed bodies count compressed + decoded size, so a high compression ratio cannot bypass the budget.
+  # chunked 和压缩请求体在这里读入（并解压），每次扩容前按缓冲区容量预占；压缩体按「压缩体 + 明文」实际大小计入。
+  request_body_budget:
+    max_inflight_bytes: 0       # >0 fixed; 0 = auto (Go memory limit / 10, off without a limit); <0 off
+    min_body_bytes: 1048576     # bodies below 1 MiB (compressed + decoded) are never counted or rejected
   # Return X-Oneapi-Request-Id = client_request_id on every gateway response so a
   # fronting new-api stores it in logs.upstream_request_id (joins to usage_logs / ops_error_logs).
   # 在网关响应头回 X-Oneapi-Request-Id，供前置 new-api 串联请求。

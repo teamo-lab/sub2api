@@ -691,6 +691,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
 			)
 			if len(failedAccountIDs) == 0 {
+				if h.writeOpenAISelectionRequestBodyTooLarge(c, err, streamStarted, false) {
+					return
+				}
 				if legacyCompact && errors.Is(err, service.ErrNoAvailableCompactAccounts) {
 					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 					h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "compact_not_supported", "No available accounts support /responses/compact", streamStarted)
@@ -1344,6 +1347,9 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
 			)
 			if len(failedAccountIDs) == 0 {
+				if h.writeOpenAISelectionRequestBodyTooLarge(c, err, streamStarted, true) {
+					return
+				}
 				if err != nil {
 					cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, currentRoutingModel, reqModel)
 					if !cls.ModelNotFound {
@@ -1679,6 +1685,12 @@ func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, 
 	}
 	if failoverErr.IsOpenAIContextWindowExceeded() {
 		h.anthropicStreamingAwareError(c, failoverErr.ClientStatusCode, "invalid_request_error", failoverErr.ClientMessage, streamStarted)
+		return
+	}
+	// 每个号都接不住这么大的请求体（上游 413，或上传看门狗中止）：和 Responses 一样回 413。
+	if failoverErr.IsOpenAIRequestBodyTooLarge() {
+		service.SetOpsUpstreamError(c, http.StatusRequestEntityTooLarge, service.OpenAIRequestBodyTooLargeClientMessage, "")
+		h.anthropicStreamingAwareError(c, http.StatusRequestEntityTooLarge, "invalid_request_error", service.OpenAIRequestBodyTooLargeClientMessage, streamStarted)
 		return
 	}
 	status, errType, errMsg := h.mapUpstreamError(failoverErr.StatusCode)
@@ -4379,4 +4391,22 @@ func summarizeWSCloseErrorForLog(err error) (string, string) {
 		}
 	}
 	return closeStatus, closeReason
+}
+
+// writeOpenAISelectionRequestBodyTooLarge 在第一次选号就失败、且有号是因为请求体超过它的上限被跳过时
+// 回 413：缩小请求体就可能成功，比「没有可用账号」更能让客户端知道该怎么办。已经换过号的请求仍走
+// 原来的用尽处理（最后一跳是请求体过大时那里也回 413）。anthropic 为 true 时按 Anthropic 错误格式
+// 输出。没写响应时返回 false。
+func (h *OpenAIGatewayHandler) writeOpenAISelectionRequestBodyTooLarge(c *gin.Context, err error, streamStarted bool, anthropic bool) bool {
+	if !service.IsOpenAIRequestBodyTooLargeSelectionError(err) {
+		return false
+	}
+	service.SetRouterOutcome(c, service.RouterOutcomeTerminalError)
+	service.SetOpsUpstreamError(c, http.StatusRequestEntityTooLarge, service.OpenAIRequestBodyTooLargeClientMessage, "")
+	if anthropic {
+		h.anthropicStreamingAwareError(c, http.StatusRequestEntityTooLarge, "invalid_request_error", service.OpenAIRequestBodyTooLargeClientMessage, streamStarted)
+	} else {
+		h.handleStreamingAwareError(c, http.StatusRequestEntityTooLarge, "invalid_request_error", service.OpenAIRequestBodyTooLargeClientMessage, streamStarted)
+	}
+	return true
 }

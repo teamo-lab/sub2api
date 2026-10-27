@@ -46,6 +46,20 @@ func TestOpenAIBodyLimitFailoverExhausted_ReturnsRedactedResponsesSSE(t *testing
 	require.NotContains(t, body, "must-not-leak")
 }
 
+func TestOpenAIBodyLimitFailoverExhausted_AnthropicReturns413(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(nil))
+
+	(&OpenAIGatewayHandler{}).handleAnthropicFailoverExhausted(c, bodyLimitFailoverTestError(), false)
+
+	require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+	require.Contains(t, rec.Body.String(), `"invalid_request_error"`)
+	require.Contains(t, rec.Body.String(), "Request payload is too large")
+	require.NotContains(t, rec.Body.String(), "must-not-leak")
+}
+
 func bodyLimitFailoverTestError() *service.UpstreamFailoverError {
 	return &service.UpstreamFailoverError{
 		StatusCode:        http.StatusRequestEntityTooLarge,
