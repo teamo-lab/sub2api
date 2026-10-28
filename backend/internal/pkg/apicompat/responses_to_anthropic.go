@@ -194,6 +194,11 @@ type ResponsesEventToAnthropicState struct {
 	// OutputIndexToBlockIdx maps Responses output_index → Anthropic content block index.
 	OutputIndexToBlockIdx map[int]int
 
+	// pendingToolCalls 是 tool_use 块还开着时又到达的工具调用（上游先连发多个 added、
+	// 参数稍后才到）。Anthropic 的块只能顺序开关，这些调用的参数先缓冲，
+	// 等前一个块结束后再依次开块补发。
+	pendingToolCalls []*anthPendingToolCall
+
 	InputTokens              int
 	OutputTokens             int
 	CacheReadInputTokens     int
@@ -202,6 +207,15 @@ type ResponsesEventToAnthropicState struct {
 	ResponseID string
 	Model      string
 	Created    int64
+}
+
+type anthPendingToolCall struct {
+	outputIndex int
+	itemID      string
+	callID      string
+	name        string
+	args        string
+	done        bool
 }
 
 // NewResponsesEventToAnthropicState returns an initialised stream state.
@@ -263,7 +277,7 @@ func FinalizeResponsesAnthropicStream(state *ResponsesEventToAnthropicState) []A
 	}
 
 	var events []AnthropicStreamEvent
-	events = append(events, closeCurrentBlock(state)...)
+	events = append(events, closeBlockAndFlushPendingTools(state)...)
 
 	stopReason := "end_turn"
 	if state.HasToolCall {
@@ -344,36 +358,23 @@ func resToAnthHandleOutputItemAdded(evt *ResponsesStreamEvent, state *ResponsesE
 	// function_call 与 custom_tool_call（custom/freeform 工具，如新版 apply_patch）
 	// 同样映射为 Anthropic 的 tool_use 块。
 	case "function_call", "custom_tool_call":
-		var events []AnthropicStreamEvent
-		events = append(events, closeCurrentBlock(state)...)
-
-		idx := state.ContentBlockIndex
-		state.OutputIndexToBlockIdx[evt.OutputIndex] = idx
-		state.ContentBlockOpen = true
-		state.CurrentBlockType = "tool_use"
-		state.CurrentToolName = evt.Item.Name
-		state.CurrentToolArgs = ""
-		state.CurrentToolHadDelta = false
-		state.CurrentToolArgsSent = ""
-		state.CurrentToolCallID = evt.Item.CallID
-		state.CurrentToolItemID = evt.Item.ID
 		state.HasToolCall = true
-
-		events = append(events, AnthropicStreamEvent{
-			Type:  "content_block_start",
-			Index: &idx,
-			ContentBlock: &AnthropicContentBlock{
-				Type:  "tool_use",
-				ID:    fromResponsesCallID(evt.Item.CallID),
-				Name:  evt.Item.Name,
-				Input: json.RawMessage("{}"),
-			},
-		})
-		return events
+		// 前一个 tool_use 块还在等参数：先排队，不关闭它，否则它的参数到达时已无处可写。
+		if state.ContentBlockOpen && state.CurrentBlockType == "tool_use" {
+			state.pendingToolCalls = append(state.pendingToolCalls, &anthPendingToolCall{
+				outputIndex: evt.OutputIndex,
+				itemID:      evt.Item.ID,
+				callID:      evt.Item.CallID,
+				name:        evt.Item.Name,
+			})
+			return nil
+		}
+		events := closeBlockAndFlushPendingTools(state)
+		return append(events, startAnthToolBlock(state, evt.OutputIndex, evt.Item.ID, evt.Item.CallID, evt.Item.Name)...)
 
 	case "reasoning":
 		var events []AnthropicStreamEvent
-		events = append(events, closeCurrentBlock(state)...)
+		events = append(events, closeBlockAndFlushPendingTools(state)...)
 
 		idx := state.ContentBlockIndex
 		state.OutputIndexToBlockIdx[evt.OutputIndex] = idx
@@ -406,7 +407,7 @@ func resToAnthHandleTextDelta(evt *ResponsesStreamEvent, state *ResponsesEventTo
 	var events []AnthropicStreamEvent
 
 	if !state.ContentBlockOpen || state.CurrentBlockType != "text" {
-		events = append(events, closeCurrentBlock(state)...)
+		events = append(events, closeBlockAndFlushPendingTools(state)...)
 
 		idx := state.ContentBlockIndex
 		state.ContentBlockOpen = true
@@ -436,6 +437,12 @@ func resToAnthHandleTextDelta(evt *ResponsesStreamEvent, state *ResponsesEventTo
 
 func resToAnthHandleFuncArgsDelta(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
 	if evt.Delta == "" {
+		return nil
+	}
+	if p := anthPendingToolCallFor(state, evt.OutputIndex, evt.ItemID, evt.CallID); p != nil {
+		if !p.done {
+			p.args += evt.Delta
+		}
 		return nil
 	}
 	// 别的调用的增量（并行调用交错）不能写进当前块，也不能计入当前块已发的参数。
@@ -493,6 +500,13 @@ func resToAnthHandleFuncArgsDelta(evt *ResponsesStreamEvent, state *ResponsesEve
 // 和工具调用的 output_item.done：只补发当前 tool_use 块还没发出的参数，然后关闭该块。
 // 有的上游只在这些 done 事件里给完整参数，没有增量。
 func resToAnthHandleFuncArgsDone(evt *ResponsesStreamEvent, final, itemID, callID string, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
+	if p := anthPendingToolCallFor(state, evt.OutputIndex, itemID, callID); p != nil {
+		if !p.done {
+			p.args += missingToolArguments(p.args, final)
+			p.done = true
+		}
+		return nil
+	}
 	if !state.ContentBlockOpen {
 		return nil
 	}
@@ -532,7 +546,104 @@ func resToAnthHandleFuncArgsDone(evt *ResponsesStreamEvent, final, itemID, callI
 	} else if missing := missingToolArguments(state.CurrentToolArgsSent, final); missing != "" {
 		events = append(events, anthropicInputJSONDelta(blockIdx, missing))
 	}
-	return append(events, closeCurrentBlock(state)...)
+	events = append(events, closeCurrentBlock(state)...)
+	return append(events, startNextPendingToolBlocks(state)...)
+}
+
+func startAnthToolBlock(state *ResponsesEventToAnthropicState, outputIndex int, itemID, callID, name string) []AnthropicStreamEvent {
+	idx := state.ContentBlockIndex
+	state.OutputIndexToBlockIdx[outputIndex] = idx
+	state.ContentBlockOpen = true
+	state.CurrentBlockType = "tool_use"
+	state.CurrentToolName = name
+	state.CurrentToolArgs = ""
+	state.CurrentToolHadDelta = false
+	state.CurrentToolArgsSent = ""
+	state.CurrentToolCallID = callID
+	state.CurrentToolItemID = itemID
+	state.HasToolCall = true
+	return []AnthropicStreamEvent{{
+		Type:  "content_block_start",
+		Index: &idx,
+		ContentBlock: &AnthropicContentBlock{
+			Type:  "tool_use",
+			ID:    fromResponsesCallID(callID),
+			Name:  name,
+			Input: json.RawMessage("{}"),
+		},
+	}}
+}
+
+// anthPendingToolCallFor 找参数事件对应的排队调用：先按 item_id / call_id；
+// 都没带时，output_index 指向当前块就归当前块，否则按 output_index 找排队调用。
+func anthPendingToolCallFor(state *ResponsesEventToAnthropicState, outputIndex int, itemID, callID string) *anthPendingToolCall {
+	if len(state.pendingToolCalls) == 0 {
+		return nil
+	}
+	if (itemID != "" && itemID == state.CurrentToolItemID) || (callID != "" && callID == state.CurrentToolCallID) {
+		return nil
+	}
+	for _, p := range state.pendingToolCalls {
+		if (itemID != "" && itemID == p.itemID) || (callID != "" && callID == p.callID) {
+			return p
+		}
+	}
+	if itemID != "" || callID != "" {
+		if !anthToolEventForOtherCall(state, itemID, callID) {
+			return nil
+		}
+	} else if blockIdx, ok := state.OutputIndexToBlockIdx[outputIndex]; ok && blockIdx == state.ContentBlockIndex && state.CurrentBlockType == "tool_use" {
+		return nil
+	}
+	var match *anthPendingToolCall
+	for _, p := range state.pendingToolCalls {
+		if p.outputIndex == outputIndex {
+			if match != nil {
+				return nil
+			}
+			match = p
+		}
+	}
+	return match
+}
+
+// startNextPendingToolBlocks 在前一个 tool_use 块关闭后，依次为排队的调用开块并补发缓冲的参数；
+// 参数已完整（收到 done）的块随即关闭，遇到参数还没收完的调用就让它保持打开。
+func startNextPendingToolBlocks(state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
+	var events []AnthropicStreamEvent
+	for len(state.pendingToolCalls) > 0 && !state.ContentBlockOpen {
+		p := state.pendingToolCalls[0]
+		state.pendingToolCalls = state.pendingToolCalls[1:]
+		events = append(events, startAnthToolBlock(state, p.outputIndex, p.itemID, p.callID, p.name)...)
+		idx := state.ContentBlockIndex
+		if state.CurrentToolName == "Read" {
+			state.CurrentToolArgs = p.args
+			if p.args != "" && (p.done || json.Valid([]byte(p.args))) {
+				if sanitized := sanitizeAnthropicToolUseInput(state.CurrentToolName, p.args); len(sanitized) > 0 {
+					state.CurrentToolHadDelta = true
+					events = append(events, anthropicInputJSONDelta(idx, string(sanitized)))
+				}
+			}
+		} else if p.args != "" {
+			state.CurrentToolHadDelta = true
+			state.CurrentToolArgsSent = p.args
+			events = append(events, anthropicInputJSONDelta(idx, p.args))
+		}
+		if p.done {
+			events = append(events, closeCurrentBlock(state)...)
+		}
+	}
+	return events
+}
+
+// closeBlockAndFlushPendingTools 关闭当前块，并把排队的调用全部开块、补发已缓冲的参数、关闭；
+// 用于要开非工具块或结束消息时。
+func closeBlockAndFlushPendingTools(state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
+	events := closeCurrentBlock(state)
+	for _, p := range state.pendingToolCalls {
+		p.done = true
+	}
+	return append(events, startNextPendingToolBlocks(state)...)
 }
 
 // anthToolEventForOtherCall 判断参数事件的 item_id / call_id 是否指向当前 tool_use 块以外的调用
@@ -597,12 +708,17 @@ func resToAnthHandleOutputItemDone(evt *ResponsesStreamEvent, state *ResponsesEv
 		}
 	}
 
-	if isResponsesToolCallItem(evt.Item) && state.ContentBlockOpen && state.CurrentBlockType == "tool_use" {
+	if isResponsesToolCallItem(evt.Item) && (len(state.pendingToolCalls) > 0 || (state.ContentBlockOpen && state.CurrentBlockType == "tool_use")) {
 		return resToAnthHandleFuncArgsDone(evt, responsesToolItemArguments(evt.Item), evt.Item.ID, evt.Item.CallID, state)
 	}
 
 	if state.ContentBlockOpen {
-		return closeCurrentBlock(state)
+		wasTool := state.CurrentBlockType == "tool_use"
+		events := closeCurrentBlock(state)
+		if wasTool {
+			events = append(events, startNextPendingToolBlocks(state)...)
+		}
+		return events
 	}
 	return nil
 }
@@ -612,7 +728,7 @@ func resToAnthHandleOutputItemDone(evt *ResponsesStreamEvent, state *ResponsesEv
 // This allows Claude Code to count the searches performed.
 func resToAnthHandleWebSearchDone(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
 	var events []AnthropicStreamEvent
-	events = append(events, closeCurrentBlock(state)...)
+	events = append(events, closeBlockAndFlushPendingTools(state)...)
 
 	toolUseID := "srvtoolu_" + evt.Item.ID
 	query := ""
@@ -668,7 +784,7 @@ func resToAnthHandleCompleted(evt *ResponsesStreamEvent, state *ResponsesEventTo
 	}
 
 	var events []AnthropicStreamEvent
-	events = append(events, closeCurrentBlock(state)...)
+	events = append(events, closeBlockAndFlushPendingTools(state)...)
 
 	stopReason := "end_turn"
 	if evt.Usage != nil {

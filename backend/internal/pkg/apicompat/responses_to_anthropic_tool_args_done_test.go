@@ -13,10 +13,13 @@ func runAnthropicToolStream(t *testing.T, events []ResponsesStreamEvent) map[int
 	state := NewResponsesEventToAnthropicState()
 	inputs := map[int]string{}
 	stopped := map[int]bool{}
+	open := -1
 	for i := range events {
 		for _, out := range ResponsesEventToAnthropicEvents(&events[i], state) {
 			switch out.Type {
 			case "content_block_start":
+				require.Equal(t, -1, open, "block %d started while block %d is still open", *out.Index, open)
+				open = *out.Index
 				if out.ContentBlock.Type == "tool_use" {
 					inputs[*out.Index] = ""
 				}
@@ -26,6 +29,8 @@ func runAnthropicToolStream(t *testing.T, events []ResponsesStreamEvent) map[int
 					inputs[*out.Index] += out.Delta.PartialJSON
 				}
 			case "content_block_stop":
+				require.Equal(t, open, *out.Index, "stop for a block that is not open")
+				open = -1
 				stopped[*out.Index] = true
 			}
 		}
@@ -71,9 +76,9 @@ func TestResponsesEventToAnthropic_CustomToolInputOnlyInDone(t *testing.T) {
 	assert.Equal(t, map[int]string{0: `{"patch":"x"}`}, inputs)
 }
 
-// 两个并行调用交错且 output_index 重复：B 打开后才到达的 A 的 done（带 A 的 item_id / call_id）
-// 不能写进 B 的块，也不能把 B 的块提前关掉；B 仍拿到自己的参数。
-func TestResponsesEventToAnthropic_InterleavedDoneForOtherCallIgnored(t *testing.T) {
+// 并行调用先连发 added、参数稍后才到（output_index 还重复）：B 排队等 A 的块结束，
+// A 的 done 写进 A，B 的参数写进 B，互不串。
+func TestResponsesEventToAnthropic_InterleavedAddedThenDoneEvents(t *testing.T) {
 	inputs := runAnthropicToolStream(t, []ResponsesStreamEvent{
 		createdEvent(),
 		toolAdded(0, "fc_a", "call_a", "run_commands"),
@@ -84,23 +89,52 @@ func TestResponsesEventToAnthropic_InterleavedDoneForOtherCallIgnored(t *testing
 		toolItemDone(0, "fc_b", "call_b", "search_codebase", toolArgsSearch),
 		completedEvent(),
 	})
-	// A 的块在 B 打开时已关闭，事后到达的参数补不进去；关键是不串到 B。
-	assert.Equal(t, map[int]string{0: "", 1: toolArgsSearch}, inputs)
+	assert.Equal(t, map[int]string{0: toolArgsRunCommands, 1: toolArgsSearch}, inputs)
 }
 
-// 交错的并行调用里，A 的增量带着没登记过的 output_index 在 B 打开后才到：
-// 不能落进 B 的块，否则 B 已发参数的前缀被污染，B 自己的 done 也补不进来。
-func TestResponsesEventToAnthropic_InterleavedDeltaForOtherCallIgnored(t *testing.T) {
+// B 的参数先于 A 的到达：B 的参数先缓冲，A 的块结束后再给 B 开块补发。
+func TestResponsesEventToAnthropic_InterleavedLaterCallFinishesFirst(t *testing.T) {
 	inputs := runAnthropicToolStream(t, []ResponsesStreamEvent{
 		createdEvent(),
 		toolAdded(0, "fc_a", "call_a", "run_commands"),
 		toolAdded(1, "fc_b", "call_b", "search_codebase"),
-		toolArgsDelta(7, "fc_a", `{"commands":["git status`),
 		toolArgsDone(1, "fc_b", toolArgsSearch),
 		toolItemDone(1, "fc_b", "call_b", "search_codebase", toolArgsSearch),
+		toolArgsDelta(7, "fc_a", `{"commands":["git status`),
+		toolArgsDone(0, "fc_a", toolArgsRunCommands),
+		toolItemDone(0, "fc_a", "call_a", "run_commands", toolArgsRunCommands),
 		completedEvent(),
 	})
-	assert.Equal(t, map[int]string{0: "", 1: toolArgsSearch}, inputs)
+	assert.Equal(t, map[int]string{0: toolArgsRunCommands, 1: toolArgsSearch}, inputs)
+}
+
+// 两个调用的参数增量交替到达：各自归位，done 不重复补发。
+func TestResponsesEventToAnthropic_InterleavedDeltas(t *testing.T) {
+	inputs := runAnthropicToolStream(t, []ResponsesStreamEvent{
+		createdEvent(),
+		toolAdded(0, "fc_a", "call_a", "run_commands"),
+		toolAdded(1, "fc_b", "call_b", "search_codebase"),
+		toolArgsDelta(0, "fc_a", `{"commands":["git status --short",`),
+		toolArgsDelta(1, "fc_b", `{"queries":["ResponsesEventToChatChunks"],`),
+		toolArgsDelta(0, "fc_a", `"git log --oneline -5"]}`),
+		toolArgsDelta(1, "fc_b", `"path":"backend"}`),
+		toolArgsDone(1, "fc_b", toolArgsSearch),
+		toolArgsDone(0, "fc_a", toolArgsRunCommands),
+		completedEvent(),
+	})
+	assert.Equal(t, map[int]string{0: toolArgsRunCommands, 1: toolArgsSearch}, inputs)
+}
+
+// 排队的调用一直没等到参数事件：结束时照样开块关块，调用本身不丢。
+func TestResponsesEventToAnthropic_PendingToolFlushedAtCompletion(t *testing.T) {
+	inputs := runAnthropicToolStream(t, []ResponsesStreamEvent{
+		createdEvent(),
+		toolAdded(0, "fc_a", "call_a", "run_commands"),
+		toolAdded(1, "fc_b", "call_b", "search_codebase"),
+		toolArgsDone(0, "fc_a", toolArgsRunCommands),
+		completedEvent(),
+	})
+	assert.Equal(t, map[int]string{0: toolArgsRunCommands, 1: ""}, inputs)
 }
 
 // 官方顺序（增量完整 + done）仍然只发一次。
