@@ -182,6 +182,10 @@ type ResponsesEventToAnthropicState struct {
 	CurrentToolName     string
 	CurrentToolArgs     string
 	CurrentToolHadDelta bool
+	// CurrentToolArgsSent 是当前 tool_use 块已经发出的参数，done 事件只补发缺的部分。
+	CurrentToolArgsSent string
+	CurrentToolCallID   string
+	CurrentToolItemID   string
 	// PendingThinkingSignature is filled from reasoning.encrypted_content and
 	// emitted as signature_delta before the thinking block is closed.
 	PendingThinkingSignature string
@@ -228,7 +232,9 @@ func ResponsesEventToAnthropicEvents(
 		"response.custom_tool_call_input.delta":
 		return resToAnthHandleFuncArgsDelta(evt, state)
 	case "response.function_call_arguments.done":
-		return resToAnthHandleFuncArgsDone(evt, state)
+		return resToAnthHandleFuncArgsDone(evt, evt.Arguments, evt.ItemID, evt.CallID, state)
+	case "response.custom_tool_call_input.done":
+		return resToAnthHandleFuncArgsDone(evt, evt.Input, evt.ItemID, evt.CallID, state)
 	case "response.output_item.done":
 		return resToAnthHandleOutputItemDone(evt, state)
 	case "response.reasoning_summary_text.delta",
@@ -348,6 +354,9 @@ func resToAnthHandleOutputItemAdded(evt *ResponsesStreamEvent, state *ResponsesE
 		state.CurrentToolName = evt.Item.Name
 		state.CurrentToolArgs = ""
 		state.CurrentToolHadDelta = false
+		state.CurrentToolArgsSent = ""
+		state.CurrentToolCallID = evt.Item.CallID
+		state.CurrentToolItemID = evt.Item.ID
 		state.HasToolCall = true
 
 		events = append(events, AnthropicStreamEvent{
@@ -430,13 +439,19 @@ func resToAnthHandleFuncArgsDelta(evt *ResponsesStreamEvent, state *ResponsesEve
 		return nil
 	}
 
+	blockIdx, ok := state.OutputIndexToBlockIdx[evt.OutputIndex]
+	toolOpen := state.ContentBlockOpen && state.CurrentBlockType == "tool_use"
+	// output_index 缺失或与 added 对不上时，参数只可能属于当前打开的 tool_use 块。
+	if !ok && toolOpen {
+		blockIdx, ok = state.ContentBlockIndex, true
+	}
+
 	if state.CurrentBlockType == "tool_use" && state.CurrentToolName == "Read" {
 		state.CurrentToolArgs += evt.Delta
 		if state.CurrentToolHadDelta || !json.Valid([]byte(state.CurrentToolArgs)) {
 			return nil
 		}
 
-		blockIdx, ok := state.OutputIndexToBlockIdx[evt.OutputIndex]
 		if !ok {
 			return nil
 		}
@@ -452,13 +467,12 @@ func resToAnthHandleFuncArgsDelta(evt *ResponsesStreamEvent, state *ResponsesEve
 		}}
 	}
 
-	if state.CurrentBlockType == "tool_use" {
-		state.CurrentToolHadDelta = true
-	}
-
-	blockIdx, ok := state.OutputIndexToBlockIdx[evt.OutputIndex]
 	if !ok {
 		return nil
+	}
+	if state.CurrentBlockType == "tool_use" && blockIdx == state.ContentBlockIndex {
+		state.CurrentToolHadDelta = true
+		state.CurrentToolArgsSent += evt.Delta
 	}
 
 	return []AnthropicStreamEvent{{
@@ -471,7 +485,10 @@ func resToAnthHandleFuncArgsDelta(evt *ResponsesStreamEvent, state *ResponsesEve
 	}}
 }
 
-func resToAnthHandleFuncArgsDone(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
+// resToAnthHandleFuncArgsDone 处理 function_call_arguments.done、custom_tool_call_input.done
+// 和工具调用的 output_item.done：只补发当前 tool_use 块还没发出的参数，然后关闭该块。
+// 有的上游只在这些 done 事件里给完整参数，没有增量。
+func resToAnthHandleFuncArgsDone(evt *ResponsesStreamEvent, final, itemID, callID string, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
 	if !state.ContentBlockOpen {
 		return nil
 	}
@@ -479,42 +496,45 @@ func resToAnthHandleFuncArgsDone(evt *ResponsesStreamEvent, state *ResponsesEven
 		return resToAnthHandleBlockDone(state)
 	}
 
-	raw := evt.Arguments
-	if raw == "" {
-		raw = state.CurrentToolArgs
-	}
-	if raw == "" || state.CurrentToolHadDelta {
-		return closeCurrentBlock(state)
-	}
-	if state.CurrentToolName == "Read" {
-		sanitized := sanitizeAnthropicToolUseInput(state.CurrentToolName, raw)
-		if len(sanitized) == 0 {
-			return closeCurrentBlock(state)
-		}
-		raw = string(sanitized)
-	}
-
-	// 从事件的 OutputIndex 解析正确的 block index，与 resToAnthHandleFuncArgsDelta 对齐
+	// 从事件的 OutputIndex 解析 block index，与 resToAnthHandleFuncArgsDelta 对齐；
+	// item_id / call_id 对上当前块，或 output_index 没登记过，都按当前块处理。
 	blockIdx, ok := state.OutputIndexToBlockIdx[evt.OutputIndex]
-	if !ok {
+	matchesCurrent := (itemID != "" && itemID == state.CurrentToolItemID) ||
+		(callID != "" && callID == state.CurrentToolCallID)
+	if !ok || matchesCurrent {
 		blockIdx = state.ContentBlockIndex
 	}
-
-	// 如果 block 已关闭（ContentBlockIndex 已越过它），说明 arguments 已通过 delta 流式发完，不再补发
-	if !state.ContentBlockOpen || blockIdx != state.ContentBlockIndex {
+	// block 已关闭（ContentBlockIndex 已越过它），无法再往里补参数
+	if blockIdx != state.ContentBlockIndex {
 		return nil
 	}
 
-	events := []AnthropicStreamEvent{{
+	var events []AnthropicStreamEvent
+	if state.CurrentToolName == "Read" {
+		raw := final
+		if raw == "" {
+			raw = state.CurrentToolArgs
+		}
+		if raw != "" && !state.CurrentToolHadDelta {
+			if sanitized := sanitizeAnthropicToolUseInput(state.CurrentToolName, raw); len(sanitized) > 0 {
+				events = append(events, anthropicInputJSONDelta(blockIdx, string(sanitized)))
+			}
+		}
+	} else if missing := missingToolArguments(state.CurrentToolArgsSent, final); missing != "" {
+		events = append(events, anthropicInputJSONDelta(blockIdx, missing))
+	}
+	return append(events, closeCurrentBlock(state)...)
+}
+
+func anthropicInputJSONDelta(blockIdx int, partialJSON string) AnthropicStreamEvent {
+	return AnthropicStreamEvent{
 		Type:  "content_block_delta",
 		Index: &blockIdx,
 		Delta: &AnthropicDelta{
 			Type:        "input_json_delta",
-			PartialJSON: raw,
+			PartialJSON: partialJSON,
 		},
-	}}
-	events = append(events, closeCurrentBlock(state)...)
-	return events
+	}
 }
 
 func resToAnthHandleReasoningDelta(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
@@ -559,6 +579,10 @@ func resToAnthHandleOutputItemDone(evt *ResponsesStreamEvent, state *ResponsesEv
 		if sig := strings.TrimSpace(evt.Item.EncryptedContent); sig != "" {
 			state.PendingThinkingSignature = sig
 		}
+	}
+
+	if isResponsesToolCallItem(evt.Item) && state.ContentBlockOpen && state.CurrentBlockType == "tool_use" {
+		return resToAnthHandleFuncArgsDone(evt, responsesToolItemArguments(evt.Item), evt.Item.ID, evt.Item.CallID, state)
 	}
 
 	if state.ContentBlockOpen {
@@ -703,6 +727,9 @@ func closeCurrentBlock(state *ResponsesEventToAnthropicState) []AnthropicStreamE
 	state.CurrentToolName = ""
 	state.CurrentToolArgs = ""
 	state.CurrentToolHadDelta = false
+	state.CurrentToolArgsSent = ""
+	state.CurrentToolCallID = ""
+	state.CurrentToolItemID = ""
 	events = append(events, AnthropicStreamEvent{
 		Type:  "content_block_stop",
 		Index: &idx,
