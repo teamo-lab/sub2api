@@ -496,6 +496,13 @@ func resToAnthHandleFuncArgsDone(evt *ResponsesStreamEvent, final, itemID, callI
 		return resToAnthHandleBlockDone(state)
 	}
 
+	// 事件的 item_id / call_id 指向别的调用（并行调用交错、output_index 缺失或重复）：
+	// 那个调用的块已经关闭，不能把它的参数写进当前块，也不能借它关闭当前块。
+	if (itemID != "" && state.CurrentToolItemID != "" && itemID != state.CurrentToolItemID) ||
+		(callID != "" && state.CurrentToolCallID != "" && callID != state.CurrentToolCallID) {
+		return nil
+	}
+
 	// 从事件的 OutputIndex 解析 block index，与 resToAnthHandleFuncArgsDelta 对齐；
 	// item_id / call_id 对上当前块，或 output_index 没登记过，都按当前块处理。
 	blockIdx, ok := state.OutputIndexToBlockIdx[evt.OutputIndex]

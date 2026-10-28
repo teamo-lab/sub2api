@@ -71,6 +71,23 @@ func TestResponsesEventToAnthropic_CustomToolInputOnlyInDone(t *testing.T) {
 	assert.Equal(t, map[int]string{0: `{"patch":"x"}`}, inputs)
 }
 
+// 两个并行调用交错且 output_index 重复：B 打开后才到达的 A 的 done（带 A 的 item_id / call_id）
+// 不能写进 B 的块，也不能把 B 的块提前关掉；B 仍拿到自己的参数。
+func TestResponsesEventToAnthropic_InterleavedDoneForOtherCallIgnored(t *testing.T) {
+	inputs := runAnthropicToolStream(t, []ResponsesStreamEvent{
+		createdEvent(),
+		toolAdded(0, "fc_a", "call_a", "run_commands"),
+		toolAdded(0, "fc_b", "call_b", "search_codebase"),
+		toolArgsDone(0, "fc_a", toolArgsRunCommands),
+		toolItemDone(0, "fc_a", "call_a", "run_commands", toolArgsRunCommands),
+		{Type: "response.function_call_arguments.done", OutputIndex: 0, CallID: "call_b", Arguments: toolArgsSearch},
+		toolItemDone(0, "fc_b", "call_b", "search_codebase", toolArgsSearch),
+		completedEvent(),
+	})
+	// A 的块在 B 打开时已关闭，事后到达的参数补不进去；关键是不串到 B。
+	assert.Equal(t, map[int]string{0: "", 1: toolArgsSearch}, inputs)
+}
+
 // 官方顺序（增量完整 + done）仍然只发一次。
 func TestResponsesEventToAnthropic_ToolArgsDeltaThenDoneNoDuplicate(t *testing.T) {
 	inputs := runAnthropicToolStream(t, []ResponsesStreamEvent{
