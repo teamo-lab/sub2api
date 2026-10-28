@@ -88,6 +88,21 @@ func TestResponsesEventToAnthropic_InterleavedDoneForOtherCallIgnored(t *testing
 	assert.Equal(t, map[int]string{0: "", 1: toolArgsSearch}, inputs)
 }
 
+// 交错的并行调用里，A 的增量带着没登记过的 output_index 在 B 打开后才到：
+// 不能落进 B 的块，否则 B 已发参数的前缀被污染，B 自己的 done 也补不进来。
+func TestResponsesEventToAnthropic_InterleavedDeltaForOtherCallIgnored(t *testing.T) {
+	inputs := runAnthropicToolStream(t, []ResponsesStreamEvent{
+		createdEvent(),
+		toolAdded(0, "fc_a", "call_a", "run_commands"),
+		toolAdded(1, "fc_b", "call_b", "search_codebase"),
+		toolArgsDelta(7, "fc_a", `{"commands":["git status`),
+		toolArgsDone(1, "fc_b", toolArgsSearch),
+		toolItemDone(1, "fc_b", "call_b", "search_codebase", toolArgsSearch),
+		completedEvent(),
+	})
+	assert.Equal(t, map[int]string{0: "", 1: toolArgsSearch}, inputs)
+}
+
 // 官方顺序（增量完整 + done）仍然只发一次。
 func TestResponsesEventToAnthropic_ToolArgsDeltaThenDoneNoDuplicate(t *testing.T) {
 	inputs := runAnthropicToolStream(t, []ResponsesStreamEvent{

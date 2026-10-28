@@ -438,6 +438,10 @@ func resToAnthHandleFuncArgsDelta(evt *ResponsesStreamEvent, state *ResponsesEve
 	if evt.Delta == "" {
 		return nil
 	}
+	// 别的调用的增量（并行调用交错）不能写进当前块，也不能计入当前块已发的参数。
+	if anthToolEventForOtherCall(state, evt.ItemID, evt.CallID) {
+		return nil
+	}
 
 	blockIdx, ok := state.OutputIndexToBlockIdx[evt.OutputIndex]
 	toolOpen := state.ContentBlockOpen && state.CurrentBlockType == "tool_use"
@@ -496,10 +500,8 @@ func resToAnthHandleFuncArgsDone(evt *ResponsesStreamEvent, final, itemID, callI
 		return resToAnthHandleBlockDone(state)
 	}
 
-	// 事件的 item_id / call_id 指向别的调用（并行调用交错、output_index 缺失或重复）：
-	// 那个调用的块已经关闭，不能把它的参数写进当前块，也不能借它关闭当前块。
-	if (itemID != "" && state.CurrentToolItemID != "" && itemID != state.CurrentToolItemID) ||
-		(callID != "" && state.CurrentToolCallID != "" && callID != state.CurrentToolCallID) {
+	// 别的调用的 done：它的块已经关闭，不能把它的参数写进当前块，也不能借它关闭当前块。
+	if anthToolEventForOtherCall(state, itemID, callID) {
 		return nil
 	}
 
@@ -531,6 +533,13 @@ func resToAnthHandleFuncArgsDone(evt *ResponsesStreamEvent, final, itemID, callI
 		events = append(events, anthropicInputJSONDelta(blockIdx, missing))
 	}
 	return append(events, closeCurrentBlock(state)...)
+}
+
+// anthToolEventForOtherCall 判断参数事件的 item_id / call_id 是否指向当前 tool_use 块以外的调用
+// （并行调用交错、output_index 缺失或重复时会出现）。
+func anthToolEventForOtherCall(state *ResponsesEventToAnthropicState, itemID, callID string) bool {
+	return (itemID != "" && state.CurrentToolItemID != "" && itemID != state.CurrentToolItemID) ||
+		(callID != "" && state.CurrentToolCallID != "" && callID != state.CurrentToolCallID)
 }
 
 func anthropicInputJSONDelta(blockIdx int, partialJSON string) AnthropicStreamEvent {
