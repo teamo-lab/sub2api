@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// testdata/codebot_tool_args_done 是 2026-10-28 对 codebot（ai.codebot.one）/v1/responses
+// testdata/codebot_tool_args_done 是 2026-10-28 对中转上游 codebot 的 /v1/responses
 // 回放三条 Cline 请求抓到的原始 SSE：事件类型、顺序、output_index、item/call id 原样保留，
 // 文本和参数内容换成占位值。codebot 不发 function_call_arguments.delta，
 // 参数只在 function_call_arguments.done 和 output_item.done 里。
