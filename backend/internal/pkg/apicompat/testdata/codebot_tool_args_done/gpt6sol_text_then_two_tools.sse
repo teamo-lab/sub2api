@@ -1,0 +1,150 @@
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_09ab371db221b7ea016ae1b955f53c8198bf8bb9836d90af8e","object":"response","created_at":1793177942,"status":"in_progress","model":"gpt-6-sol","service_tier":"auto","usage":null,"output":[]}}
+
+event: response.in_progress
+data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_09ab371db221b7ea016ae1b955f53c8198bf8bb9836d90af8e","object":"response","created_at":1793177942,"status":"in_progress","model":"gpt-6-sol","service_tier":"auto","usage":null,"output":[]}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"rs_09ab371db221b7ea016ae1b956cac881988c1aff55a7a54048","type":"reasoning","summary":[],"encrypted_content":"redacted"}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":3,"output_index":0,"item":{"id":"rs_09ab371db221b7ea016ae1b956cac881988c1aff55a7a54048","type":"reasoning","summary":[],"encrypted_content":"redacted"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":4,"output_index":1,"item":{"id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","type":"message","status":"in_progress","role":"assistant","content":[]}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","sequence_number":5,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"part":{"type":"output_text","text":""}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":6,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":7,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":8,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":9,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":10,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":11,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":12,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":13,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":14,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":15,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":16,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":17,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":18,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":19,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":20,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":21,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":22,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":23,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":24,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":25,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":26,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":27,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":28,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":29,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":30,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":31,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":32,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":33,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":34,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":35,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":36,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":37,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":38,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"delta":"·"}
+
+event: response.output_text.done
+data: {"type":"response.output_text.done","sequence_number":39,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"text":"·"}
+
+event: response.content_part.done
+data: {"type":"response.content_part.done","sequence_number":40,"output_index":1,"item_id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","content_index":0,"part":{"type":"output_text","text":""}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":41,"output_index":1,"item":{"id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Checking the repository.","annotations":[]}]}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":42,"output_index":2,"item":{"id":"fc_09ab371db221b7ea016ae1b9576c488198ae65a0515a82ead6","type":"function_call","status":"in_progress","call_id":"call_f5122d661b254d22b8a6e5ee9091730f","name":"run_commands","arguments":""}}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","sequence_number":43,"output_index":2,"item_id":"fc_09ab371db221b7ea016ae1b9576c488198ae65a0515a82ead6","arguments":"{\"commands\":[\"git status --short\",\"git log --oneline -5\"]}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":44,"output_index":2,"item":{"id":"fc_09ab371db221b7ea016ae1b9576c488198ae65a0515a82ead6","type":"function_call","status":"completed","call_id":"call_f5122d661b254d22b8a6e5ee9091730f","name":"run_commands","arguments":"{\"commands\":[\"git status --short\",\"git log --oneline -5\"]}"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":45,"output_index":3,"item":{"id":"fc_09ab371db221b7ea016ae1b95890e08198881e7b834463f6e7","type":"function_call","status":"in_progress","call_id":"call_c16154ca34324a9689f5dddbe0ff93fb","name":"search_codebase","arguments":""}}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","sequence_number":46,"output_index":3,"item_id":"fc_09ab371db221b7ea016ae1b95890e08198881e7b834463f6e7","arguments":"{\"queries\":[\"tool call arguments\",\"responses converter\",\"done event\"]}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":47,"output_index":3,"item":{"id":"fc_09ab371db221b7ea016ae1b95890e08198881e7b834463f6e7","type":"function_call","status":"completed","call_id":"call_c16154ca34324a9689f5dddbe0ff93fb","name":"search_codebase","arguments":"{\"queries\":[\"tool call arguments\",\"responses converter\",\"done event\"]}"}}
+
+event: response.metadata
+data: {"type":"response.metadata","sequence_number":48}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":49,"response":{"id":"resp_09ab371db221b7ea016ae1b955f53c8198bf8bb9836d90af8e","object":"response","created_at":1793177942,"status":"completed","model":"gpt-6-sol","service_tier":"default","usage":{"input_tokens":6885,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens":183,"output_tokens_details":{"reasoning_tokens":17},"total_tokens":7068},"output":[{"id":"rs_09ab371db221b7ea016ae1b956cac881988c1aff55a7a54048","type":"reasoning","summary":[],"encrypted_content":"redacted"},{"id":"msg_09ab371db221b7ea016ae1b956e74c8198a1d7d27305a8a8cb","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Checking the repository.","annotations":[]}]},{"id":"fc_09ab371db221b7ea016ae1b9576c488198ae65a0515a82ead6","type":"function_call","status":"completed","call_id":"call_f5122d661b254d22b8a6e5ee9091730f","name":"run_commands","arguments":"{\"commands\":[\"git status --short\",\"git log --oneline -5\"]}"},{"id":"fc_09ab371db221b7ea016ae1b95890e08198881e7b834463f6e7","type":"function_call","status":"completed","call_id":"call_c16154ca34324a9689f5dddbe0ff93fb","name":"search_codebase","arguments":"{\"queries\":[\"tool call arguments\",\"responses converter\",\"done event\"]}"}]}}
+
