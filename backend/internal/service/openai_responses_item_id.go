@@ -62,7 +62,29 @@ func shouldStripOpenAIResponsesNonPairCallID(itemType string) bool {
 	}
 }
 
+// openAIResponsesInputItemIDsNeedSanitization 用和下面相同的判断，先不复制地看一遍有没有要删的 id / call_id。
+// 绝大多数请求不用改，不必为此把每一项都复制一份。
+func openAIResponsesInputItemIDsNeedSanitization(body []byte) bool {
+	found := false
+	forEachOpenAIInputItem(body, func(item gjson.Result) bool {
+		if !item.IsObject() {
+			return true
+		}
+		trimmedItemType := strings.TrimSpace(item.Get("type").String())
+		if item.Get("call_id").Exists() && shouldStripOpenAIResponsesNonPairCallID(trimmedItemType) {
+			found = true
+		} else if id := item.Get("id"); id.Type == gjson.String && shouldStripOpenAIResponsesInputItemID(trimmedItemType, id.String()) {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
 func sanitizeOpenAIResponsesInputItemIDs(body []byte) ([]byte, bool, error) {
+	if !openAIResponsesInputItemIDsNeedSanitization(body) {
+		return body, false, nil
+	}
 	input := gjson.GetBytes(body, "input")
 	if !input.IsArray() {
 		return body, false, nil

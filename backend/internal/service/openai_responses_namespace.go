@@ -183,12 +183,8 @@ func visitOpenAIResponsesToolDeclarations(body []byte, visit func(gjson.Result))
 		}
 		tools.ForEach(func(_, tool gjson.Result) bool { visit(tool); return true })
 	}
-	visitTools(gjson.GetBytes(body, "tools"))
-	input := gjson.GetBytes(body, "input")
-	if !input.IsArray() {
-		return
-	}
-	input.ForEach(func(_, item gjson.Result) bool {
+	visitTools(gjsonBodyGet(body, "tools"))
+	forEachOpenAIInputItem(body, func(item gjson.Result) bool {
 		switch item.Get("type").String() {
 		case "additional_tools", "tool_search_output":
 			visitTools(item.Get("tools"))
