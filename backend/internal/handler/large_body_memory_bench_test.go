@@ -23,7 +23,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// 大请求体内存基准：模拟 10-29 打满 HK 在途预算的 Blender Agent 负载（单个请求体 10–15MB，
+// 大请求体内存基准：模拟打满在途请求体预算的 Agent 负载（单个请求体 10–15MB，
 // 几百条 input、带 base64 截图），量化一个请求从读请求体到发给上游、再到流式响应结束，
 // 进程里分配和驻留了多少字节。
 //
@@ -41,15 +41,15 @@ func buildLargeResponsesBody(tb testing.TB, target int, stream bool) []byte {
 	img := make([]byte, 600<<10)
 	rng.Read(img)
 	imageURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString(img)
-	text := strings.Repeat("Blender scene graph: move cube_042 to (1.25, -0.5, 3.0), apply bevel modifier. ", 24)
+	text := strings.Repeat("Modeler scene graph: move cube_042 to (1.25, -0.5, 3.0), apply bevel modifier. ", 24)
 
 	input := make([]any, 0, 512)
 	tools := make([]any, 0, 24)
 	for i := 0; i < 24; i++ {
 		tools = append(tools, map[string]any{
 			"type":        "function",
-			"name":        fmt.Sprintf("blender_op_%02d", i),
-			"description": "Execute a Blender operator with the given arguments.",
+			"name":        fmt.Sprintf("modeler_op_%02d", i),
+			"description": "Execute a Modeler operator with the given arguments.",
 			"parameters": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -72,7 +72,7 @@ func buildLargeResponsesBody(tb testing.TB, target int, stream bool) []byte {
 			}
 			item = map[string]any{"type": "message", "role": "user", "content": content}
 		case 1:
-			item = map[string]any{"type": "function_call", "call_id": fmt.Sprintf("call_%04d", i), "name": "blender_op_03", "arguments": `{"object":"cube_042","args":{"x":1.25}}`}
+			item = map[string]any{"type": "function_call", "call_id": fmt.Sprintf("call_%04d", i), "name": "modeler_op_03", "arguments": `{"object":"cube_042","args":{"x":1.25}}`}
 		case 2:
 			item = map[string]any{"type": "function_call_output", "call_id": fmt.Sprintf("call_%04d", i-1), "output": text}
 		default:
@@ -84,7 +84,7 @@ func buildLargeResponsesBody(tb testing.TB, target int, stream bool) []byte {
 	body, err := json.Marshal(map[string]any{
 		"model":        "gpt-6-astra",
 		"stream":       stream,
-		"instructions": "You are a Blender 3D modelling agent.",
+		"instructions": "You are a Modeler 3D modelling agent.",
 		"input":        input,
 		"tools":        tools,
 		"store":        false,
@@ -316,8 +316,8 @@ func TestLargeResponsesBodyResidency(t *testing.T) {
 func mb(n int) float64 { return float64(n) / (1 << 20) }
 
 // TestLargeResponsesBodyConcurrentPeak 让 concurrency 个 12MB 请求同时在途（上游读完请求体后各挂 hold），
-// 每 2ms 采样一次 HeapInuse 和 Sys，报告峰值相对「在途请求体总字节」的倍数，对应生产上
-// 「在途请求体 1.1GB 时 RSS 6.7GB」的放大。用默认 GOGC、不设 GOMEMLIMIT。
+// 每 2ms 采样一次 HeapInuse 和 Sys，报告峰值相对「在途请求体总字节」的倍数，对应线上
+// 「RSS 约为在途请求体字节 6 倍」的放大。用默认 GOGC、不设 GOMEMLIMIT。
 func TestLargeResponsesBodyConcurrentPeak(t *testing.T) {
 	if os.Getenv("LARGE_BODY_RESIDENCY") == "" {
 		t.Skip("set LARGE_BODY_RESIDENCY=1 to measure")

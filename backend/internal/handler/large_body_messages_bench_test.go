@@ -36,12 +36,12 @@ func buildLargeMessagesBody(tb testing.TB, target int) []byte {
 	img := make([]byte, 600<<10)
 	rng.Read(img)
 	imageData := base64.StdEncoding.EncodeToString(img)
-	text := strings.Repeat("Blender scene graph: move cube_042 to (1.25, -0.5, 3.0), apply bevel modifier. ", 24)
+	text := strings.Repeat("Modeler scene graph: move cube_042 to (1.25, -0.5, 3.0), apply bevel modifier. ", 24)
 	tools := make([]any, 0, 24)
 	for i := 0; i < 24; i++ {
 		tools = append(tools, map[string]any{
-			"name":         fmt.Sprintf("blender_op_%02d", i),
-			"description":  "Execute a Blender operator with the given arguments.",
+			"name":         fmt.Sprintf("modeler_op_%02d", i),
+			"description":  "Execute a Modeler operator with the given arguments.",
 			"input_schema": map[string]any{"type": "object", "properties": map[string]any{"object": map[string]any{"type": "string"}}},
 		})
 	}
@@ -62,14 +62,14 @@ func buildLargeMessagesBody(tb testing.TB, target int) []byte {
 		} else {
 			messages = append(messages, map[string]any{"role": "assistant", "content": []any{
 				map[string]any{"type": "text", "text": text},
-				map[string]any{"type": "tool_use", "id": id, "name": "blender_op_03", "input": map[string]any{"object": "cube_042"}},
+				map[string]any{"type": "tool_use", "id": id, "name": "modeler_op_03", "input": map[string]any{"object": "cube_042"}},
 			}})
 		}
 		size += 2*len(text) + 200
 	}
 	body, err := json.Marshal(map[string]any{
 		"model": "claude-sonnet-4-5", "max_tokens": 4096, "stream": true,
-		"system": "You are a Blender 3D modelling agent.", "messages": messages, "tools": tools,
+		"system": "You are a Modeler 3D modelling agent.", "messages": messages, "tools": tools,
 	})
 	if err != nil {
 		tb.Fatal(err)
