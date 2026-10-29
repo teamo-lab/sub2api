@@ -116,26 +116,25 @@ func responsesStatusToChatFinishReason(status string, details *ResponsesIncomple
 // ResponsesEventToChatState tracks state for converting a sequence of Responses
 // SSE events into Chat Completions SSE chunks.
 type ResponsesEventToChatState struct {
-	ID                     string
-	Model                  string
-	Created                int64
-	ServiceTier            string // upstream tier observed on response events; echoed on chunks
-	SentRole               bool
-	SawToolCall            bool
-	SawText                bool
-	Finalized              bool        // true after finish chunk has been emitted
-	NextToolCallIndex      int         // next sequential tool_call index to assign
-	OutputIndexToToolIndex map[int]int // Responses output_index → Chat tool_calls index
-	IncludeUsage           bool
-	Usage                  *ChatUsage
+	ID           string
+	Model        string
+	Created      int64
+	ServiceTier  string // upstream tier observed on response events; echoed on chunks
+	SentRole     bool
+	SawToolCall  bool
+	SawText      bool
+	Finalized    bool // true after finish chunk has been emitted
+	IncludeUsage bool
+	Usage        *ChatUsage
+
+	toolCalls responsesToolCallTracker // Responses 工具调用 → Chat tool_calls index 与已发参数
 }
 
 // NewResponsesEventToChatState returns an initialised stream state.
 func NewResponsesEventToChatState() *ResponsesEventToChatState {
 	return &ResponsesEventToChatState{
-		ID:                     generateChatCmplID(),
-		Created:                time.Now().Unix(),
-		OutputIndexToToolIndex: make(map[int]int),
+		ID:      generateChatCmplID(),
+		Created: time.Now().Unix(),
 	}
 }
 
@@ -154,6 +153,13 @@ func ResponsesEventToChatChunks(evt *ResponsesStreamEvent, state *ResponsesEvent
 		// 均按 OutputIndex 累加到对应工具调用。
 		"response.custom_tool_call_input.delta":
 		return resToChatHandleFuncArgsDelta(evt, state)
+	// 完整参数只在 done 事件里出现的上游（没有增量，或增量没对上调用）靠这三个事件补齐。
+	case "response.function_call_arguments.done":
+		return resToChatHandleToolArgsDone(evt, evt.Arguments, state)
+	case "response.custom_tool_call_input.done":
+		return resToChatHandleToolArgsDone(evt, evt.Input, state)
+	case "response.output_item.done":
+		return resToChatHandleOutputItemDone(evt, state)
 	case "response.reasoning_summary_text.delta",
 		// 原始推理文本增量（真实 Codex 客户端消费的 reasoning_text.delta），
 		// 与 reasoning summary 一样映射为 reasoning_content。
@@ -247,22 +253,31 @@ func resToChatHandleTextDelta(evt *ResponsesStreamEvent, state *ResponsesEventTo
 func resToChatHandleOutputItemAdded(evt *ResponsesStreamEvent, state *ResponsesEventToChatState) []ChatCompletionsChunk {
 	// function_call 与 custom_tool_call（custom/freeform 工具）均按工具调用注册，
 	// 以便后续 *_input.delta / *_arguments.delta 能映射到正确的工具索引。
-	if evt.Item == nil || (evt.Item.Type != "function_call" && evt.Item.Type != "custom_tool_call") {
+	if !isResponsesToolCallItem(evt.Item) {
 		return nil
 	}
+	_, chunks := resToChatStartToolCall(evt.OutputIndex, evt.Item, state)
+	return chunks
+}
 
+// resToChatStartToolCall 登记一个新工具调用并发出带 id/name 的首个 chunk；
+// 有的上游在 added 里就带了参数，一并发出。
+func resToChatStartToolCall(outputIndex int, item *ResponsesOutput, state *ResponsesEventToChatState) (*responsesToolCallRef, []ChatCompletionsChunk) {
 	state.SawToolCall = true
-	idx := state.NextToolCallIndex
-	state.OutputIndexToToolIndex[evt.OutputIndex] = idx
-	state.NextToolCallIndex++
+	ref := state.toolCalls.register(outputIndex, item)
+	ref.idSent = item.CallID != ""
+	args := responsesToolItemArguments(item)
+	_, _ = ref.args.WriteString(args)
 
-	return []ChatCompletionsChunk{makeChatDeltaChunk(state, ChatDelta{
+	idx := ref.index
+	return ref, []ChatCompletionsChunk{makeChatDeltaChunk(state, ChatDelta{
 		ToolCalls: []ChatToolCall{{
 			Index: &idx,
-			ID:    evt.Item.CallID,
+			ID:    item.CallID,
 			Type:  "function",
 			Function: ChatFunctionCall{
-				Name: evt.Item.Name,
+				Name:      item.Name,
+				Arguments: args,
 			},
 		}},
 	})}
@@ -273,19 +288,64 @@ func resToChatHandleFuncArgsDelta(evt *ResponsesStreamEvent, state *ResponsesEve
 		return nil
 	}
 
-	idx, ok := state.OutputIndexToToolIndex[evt.OutputIndex]
-	if !ok {
+	ref := state.toolCalls.resolve(evt.OutputIndex, evt.ItemID, evt.CallID)
+	if ref == nil || ref.done {
 		return nil
 	}
+	_, _ = ref.args.WriteString(evt.Delta)
+	return []ChatCompletionsChunk{resToChatToolArgsChunk(ref, evt.CallID, evt.Delta, state)}
+}
 
-	return []ChatCompletionsChunk{makeChatDeltaChunk(state, ChatDelta{
-		ToolCalls: []ChatToolCall{{
-			Index: &idx,
-			Function: ChatFunctionCall{
-				Arguments: evt.Delta,
-			},
-		}},
-	})}
+// resToChatHandleToolArgsDone 处理 function_call_arguments.done / custom_tool_call_input.done：
+// 只补发增量里还没发出的部分，已经完整发过就什么都不发。
+func resToChatHandleToolArgsDone(evt *ResponsesStreamEvent, final string, state *ResponsesEventToChatState) []ChatCompletionsChunk {
+	ref := state.toolCalls.resolve(evt.OutputIndex, evt.ItemID, evt.CallID)
+	if ref == nil {
+		return nil
+	}
+	return resToChatFinishToolCall(ref, evt.CallID, final, state)
+}
+
+func resToChatHandleOutputItemDone(evt *ResponsesStreamEvent, state *ResponsesEventToChatState) []ChatCompletionsChunk {
+	if !isResponsesToolCallItem(evt.Item) {
+		return nil
+	}
+	ref := state.toolCalls.resolve(evt.OutputIndex, evt.Item.ID, evt.Item.CallID)
+	if ref == nil {
+		// 没见过 added 的调用：按新调用整段发出。
+		ref, chunks := resToChatStartToolCall(evt.OutputIndex, evt.Item, state)
+		ref.done = true
+		return chunks
+	}
+	return resToChatFinishToolCall(ref, evt.Item.CallID, responsesToolItemArguments(evt.Item), state)
+}
+
+func resToChatFinishToolCall(ref *responsesToolCallRef, callID, final string, state *ResponsesEventToChatState) []ChatCompletionsChunk {
+	if ref.done {
+		return nil
+	}
+	ref.done = true
+	missing := ref.missingArguments(final)
+	if missing == "" {
+		return nil
+	}
+	_, _ = ref.args.WriteString(missing)
+	return []ChatCompletionsChunk{resToChatToolArgsChunk(ref, callID, missing, state)}
+}
+
+func resToChatToolArgsChunk(ref *responsesToolCallRef, callID, args string, state *ResponsesEventToChatState) ChatCompletionsChunk {
+	idx := ref.index
+	tc := ChatToolCall{
+		Index:    &idx,
+		Function: ChatFunctionCall{Arguments: args},
+	}
+	// added 里没有 call_id 时，用后续事件带来的补上。
+	if !ref.idSent && callID != "" {
+		tc.ID = callID
+		tc.Type = "function"
+		ref.idSent = true
+	}
+	return makeChatDeltaChunk(state, ChatDelta{ToolCalls: []ChatToolCall{tc}})
 }
 
 func resToChatHandleReasoningDelta(evt *ResponsesStreamEvent, state *ResponsesEventToChatState) []ChatCompletionsChunk {
@@ -455,24 +515,21 @@ func generateChatCmplID() string {
 type bufferedFuncCall struct {
 	CallID string
 	Name   string
-	Args   strings.Builder
 }
 
 // BufferedResponseAccumulator collects content from Responses SSE delta events
 // so that non-streaming handlers can reconstruct output when the terminal event
 // (response.completed / response.done) carries an empty output array.
 type BufferedResponseAccumulator struct {
-	text                 strings.Builder
-	reasoning            strings.Builder
-	funcCalls            []bufferedFuncCall
-	outputIndexToFuncIdx map[int]int
+	text      strings.Builder
+	reasoning strings.Builder
+	funcCalls []bufferedFuncCall
+	toolCalls responsesToolCallTracker // 与 funcCalls 一一对应，保存参数
 }
 
 // NewBufferedResponseAccumulator returns an initialised accumulator.
 func NewBufferedResponseAccumulator() *BufferedResponseAccumulator {
-	return &BufferedResponseAccumulator{
-		outputIndexToFuncIdx: make(map[int]int),
-	}
+	return &BufferedResponseAccumulator{}
 }
 
 // ProcessEvent inspects a single Responses SSE event and accumulates any
@@ -485,24 +542,50 @@ func (a *BufferedResponseAccumulator) ProcessEvent(event *ResponsesStreamEvent) 
 			_, _ = a.text.WriteString(event.Delta)
 		}
 	case "response.output_item.added":
-		if event.Item != nil && (event.Item.Type == "function_call" || event.Item.Type == "custom_tool_call") {
-			idx := len(a.funcCalls)
-			a.outputIndexToFuncIdx[event.OutputIndex] = idx
-			a.funcCalls = append(a.funcCalls, bufferedFuncCall{
-				CallID: event.Item.CallID,
-				Name:   event.Item.Name,
-			})
+		if isResponsesToolCallItem(event.Item) {
+			a.addFuncCall(event.OutputIndex, event.Item)
 		}
 	case "response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
 		if event.Delta != "" {
-			if idx, ok := a.outputIndexToFuncIdx[event.OutputIndex]; ok {
-				_, _ = a.funcCalls[idx].Args.WriteString(event.Delta)
+			if ref := a.toolCalls.resolve(event.OutputIndex, event.ItemID, event.CallID); ref != nil && !ref.done {
+				_, _ = ref.args.WriteString(event.Delta)
 			}
+		}
+	case "response.function_call_arguments.done":
+		a.finishFuncCall(a.toolCalls.resolve(event.OutputIndex, event.ItemID, event.CallID), event.CallID, event.Arguments)
+	case "response.custom_tool_call_input.done":
+		a.finishFuncCall(a.toolCalls.resolve(event.OutputIndex, event.ItemID, event.CallID), event.CallID, event.Input)
+	case "response.output_item.done":
+		if isResponsesToolCallItem(event.Item) {
+			ref := a.toolCalls.resolve(event.OutputIndex, event.Item.ID, event.Item.CallID)
+			if ref == nil {
+				ref = a.addFuncCall(event.OutputIndex, event.Item)
+			}
+			a.finishFuncCall(ref, event.Item.CallID, responsesToolItemArguments(event.Item))
 		}
 	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
 		if event.Delta != "" {
 			_, _ = a.reasoning.WriteString(event.Delta)
 		}
+	}
+}
+
+func (a *BufferedResponseAccumulator) addFuncCall(outputIndex int, item *ResponsesOutput) *responsesToolCallRef {
+	a.funcCalls = append(a.funcCalls, bufferedFuncCall{CallID: item.CallID, Name: item.Name})
+	ref := a.toolCalls.register(outputIndex, item)
+	_, _ = ref.args.WriteString(responsesToolItemArguments(item))
+	return ref
+}
+
+// finishFuncCall 用 done 事件里的完整参数补齐增量没给全的部分。
+func (a *BufferedResponseAccumulator) finishFuncCall(ref *responsesToolCallRef, callID, final string) {
+	if ref == nil || ref.done {
+		return
+	}
+	ref.done = true
+	_, _ = ref.args.WriteString(ref.missingArguments(final))
+	if call := &a.funcCalls[ref.index]; call.CallID == "" {
+		call.CallID = callID
 	}
 }
 
@@ -543,7 +626,7 @@ func (a *BufferedResponseAccumulator) BuildOutput() []ResponsesOutput {
 			Type:      "function_call",
 			CallID:    a.funcCalls[i].CallID,
 			Name:      a.funcCalls[i].Name,
-			Arguments: a.funcCalls[i].Args.String(),
+			Arguments: a.toolCalls.calls[i].args.String(),
 		})
 	}
 

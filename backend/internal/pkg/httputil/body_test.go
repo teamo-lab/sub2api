@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"compress/zlib"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -139,5 +140,67 @@ func TestReadRequestBodyWithPrealloc_RespectsIdentityEncoding(t *testing.T) {
 	}
 	if string(got) != samplePayload {
 		t.Fatalf("body mismatch: got %q", got)
+	}
+}
+
+// trickleReader 每次最多返回 chunk 字节，模拟网络上分段到达、不实现 WriterTo 的请求体。
+type trickleReader struct {
+	data  []byte
+	chunk int
+}
+
+func (r *trickleReader) Read(p []byte) (int, error) {
+	if len(r.data) == 0 {
+		return 0, io.EOF
+	}
+	n := min(len(p), r.chunk, len(r.data))
+	copy(p, r.data[:n])
+	r.data = r.data[n:]
+	return n, nil
+}
+
+func TestReadAllWithLengthHint(t *testing.T) {
+	payload := bytes.Repeat([]byte("0123456789abcdef"), (12<<20)/16+7)
+	tests := []struct {
+		name    string
+		length  int64
+		wantCap int
+	}{
+		{name: "exact length ends with exact capacity", length: int64(len(payload)), wantCap: len(payload)},
+		{name: "unknown length", length: -1},
+		{name: "declared shorter than actual", length: int64(len(payload) / 3)},
+		{name: "declared longer than actual", length: int64(len(payload) * 2)},
+		{name: "small exact", length: 100},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := payload
+			if tt.name == "small exact" {
+				data = payload[:100]
+			}
+			got, err := readAllWithLengthHint(&trickleReader{data: data, chunk: 32 << 10}, tt.length)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !bytes.Equal(got, data) {
+				t.Fatalf("body mismatch: got %d bytes, want %d", len(got), len(data))
+			}
+			if tt.name == "small exact" && cap(got) != requestBodyReadInitCap {
+				t.Fatalf("small body cap = %d, want %d", cap(got), requestBodyReadInitCap)
+			}
+			if tt.wantCap > 0 && cap(got) != tt.wantCap {
+				t.Fatalf("cap = %d, want %d", cap(got), tt.wantCap)
+			}
+		})
+	}
+}
+
+func TestReadAllWithLengthHint_PropagatesMaxBytesError(t *testing.T) {
+	payload := bytes.Repeat([]byte("x"), 4<<20)
+	body := http.MaxBytesReader(nil, io.NopCloser(&trickleReader{data: payload, chunk: 64 << 10}), 1<<20)
+	if _, err := readAllWithLengthHint(body, int64(len(payload))); err == nil {
+		t.Fatal("expected MaxBytesError")
+	} else if _, ok := err.(*http.MaxBytesError); !ok {
+		t.Fatalf("expected *http.MaxBytesError, got %T %v", err, err)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	"github.com/tidwall/gjson"
 )
 
 // normalizeOpenAIResponsesLegacyIngress accepts the Chat Completions-shaped
@@ -13,6 +14,9 @@ import (
 // always authoritative because this path has no separate full-replay attempt.
 func normalizeOpenAIResponsesLegacyIngress(body []byte) ([]byte, bool, error) {
 	if len(body) == 0 {
+		return body, false, nil
+	}
+	if !openAIResponsesLegacyIngressMayApply(body) {
 		return body, false, nil
 	}
 
@@ -71,6 +75,25 @@ func normalizeOpenAIResponsesLegacyIngress(body []byte) ([]byte, bool, error) {
 		return body, false, fmt.Errorf("serialize legacy Responses ingress: %w", err)
 	}
 	return normalized, true, nil
+}
+
+// openAIResponsesLegacyIngressMayApply 是上面改写的必要条件：顶层有 messages、prompt 或 commands。
+// 原生 Responses 请求一个都没有，不用为了确认这一点把整个请求体解成 map（大请求体每次要分配好几倍）。
+// 顶层不是对象时交给完整解码，保留原来的报错。
+func openAIResponsesLegacyIngressMayApply(body []byte) bool {
+	root := gjson.Parse(openAIWSPayloadStringView(body))
+	if !root.IsObject() {
+		return true
+	}
+	found := false
+	root.ForEach(func(key, _ gjson.Result) bool {
+		switch key.String() {
+		case "messages", "prompt", "commands":
+			found = true
+		}
+		return !found
+	})
+	return found
 }
 
 type convertedLegacyResponsesMessages struct {

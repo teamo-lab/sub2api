@@ -31,26 +31,12 @@ func ReadRequestBodyWithPrealloc(req *http.Request) ([]byte, error) {
 		return nil, nil
 	}
 
-	capHint := requestBodyReadInitCap
-	if req.ContentLength > 0 {
-		switch {
-		case req.ContentLength < int64(requestBodyReadInitCap):
-			capHint = requestBodyReadInitCap
-		case req.ContentLength > int64(requestBodyReadMaxInitCap):
-			capHint = requestBodyReadMaxInitCap
-		default:
-			capHint = int(req.ContentLength)
-		}
-	}
-
-	buf := bytes.NewBuffer(make([]byte, 0, capHint))
 	endRead := requestprofile.Start(req.Context(), "body_read")
-	_, readErr := io.Copy(buf, req.Body)
+	raw, readErr := readAllWithLengthHint(req.Body, req.ContentLength)
 	endRead()
 	if err := readErr; err != nil {
 		return nil, err
 	}
-	raw := buf.Bytes()
 	requestprofile.BodySize(req.Context(), int64(len(raw)))
 
 	enc := strings.ToLower(strings.TrimSpace(req.Header.Get("Content-Encoding")))
@@ -71,6 +57,59 @@ func ReadRequestBodyWithPrealloc(req *http.Request) ([]byte, error) {
 	req.ContentLength = int64(len(decoded))
 
 	return decoded, nil
+}
+
+// requestBodyGrowFactorWithLength 是已知 Content-Length 时每次扩容的最大倍数。
+const requestBodyGrowFactorWithLength = 4
+
+// readAllWithLengthHint 把 r 读完。length 是声明的长度（未知时 <= 0）：初始容量按它但不超过 1MiB，
+// 之后每次扩容最多放大 4 倍、且不超过声明长度，读完时容量正好等于实际长度。
+//
+// bytes.Buffer 按 2 倍加 MinRead 扩容：12MB 的请求体要先后分配 1+2+4+8+16MB，读完的 16MB 缓冲区还要
+// 带着 4MB 空闲容量驻留到请求结束。这里同样大小只分配 1+4+12MB。容量只在已经读到的数据基础上放大，
+// 谎报的 Content-Length 不能让网关一次预分配超过已收到字节的 4 倍。
+// 长度未知、或实际比声明的长时，退回按 2 倍扩容。
+func readAllWithLengthHint(r io.Reader, length int64) ([]byte, error) {
+	initial := requestBodyReadInitCap
+	if length > 0 {
+		initial = int(min(max(length, int64(requestBodyReadInitCap)), int64(requestBodyReadMaxInitCap)))
+	}
+	buf := make([]byte, 0, initial)
+	for {
+		if len(buf) == cap(buf) {
+			if length > 0 && int64(len(buf)) >= length {
+				// 已经读满声明的长度：用一个字节探测 EOF，不为此再扩容。
+				var probe [1]byte
+				n, err := r.Read(probe[:])
+				if n > 0 {
+					buf = append(buf, probe[0])
+					length = 0
+				}
+				if err == io.EOF {
+					return buf, nil
+				}
+				if err != nil {
+					return nil, err
+				}
+				continue
+			}
+			newCap := 2 * cap(buf)
+			if length > int64(len(buf)) {
+				newCap = int(min(length, int64(requestBodyGrowFactorWithLength)*int64(cap(buf))))
+			}
+			grown := make([]byte, len(buf), newCap)
+			copy(grown, buf)
+			buf = grown
+		}
+		n, err := r.Read(buf[len(buf):cap(buf)])
+		buf = buf[:len(buf)+n]
+		if err == io.EOF {
+			return buf, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
 }
 
 // ReadLenientJSONRequestBodyWithPrealloc reads a request body and normalizes

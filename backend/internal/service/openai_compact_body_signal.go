@@ -28,6 +28,10 @@ func NormalizeCompactionTriggerInputOrder(body []byte) ([]byte, bool, error) {
 	if len(body) == 0 {
 		return body, false, nil
 	}
+	// 绝大多数请求没有 compaction_trigger，不用为此把整个请求体解成 map。
+	if !HasCompactionTriggerInInput(body) {
+		return body, false, nil
+	}
 	var payload map[string]any
 	if err := decodeOpenAIJSONUseNumber(body, &payload); err != nil {
 		return body, false, err
@@ -163,15 +167,8 @@ func applyOpenAICodexBetaFeatures(c *gin.Context, account *Account, h http.Heade
 // request path and stream flag to distinguish the native remote compaction v2
 // wire from the legacy /responses/compact bridge.
 func HasCompactionTriggerInInput(body []byte) bool {
-	if len(body) == 0 {
-		return false
-	}
-	input := gjson.GetBytes(body, "input")
-	if !input.IsArray() {
-		return false
-	}
 	found := false
-	input.ForEach(func(_, item gjson.Result) bool {
+	forEachOpenAIInputItem(body, func(item gjson.Result) bool {
 		if item.Get("type").String() == "compaction_trigger" {
 			found = true
 			return false

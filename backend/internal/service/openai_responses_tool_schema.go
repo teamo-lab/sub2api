@@ -147,10 +147,12 @@ func stripOpenAISchemaRefAnnotationSiblings(body []byte) ([]byte, bool, error) {
 }
 
 func openAIResponsesBodyMayContainRegexLookaround(body []byte) bool {
-	// An opening parenthesis may be literal or encoded as JSON's canonical
-	// Unicode escape. Other lookaround characters may themselves be escaped, so
-	// the full decoded pattern is checked only after scoped parsing.
-	return bytes.Contains(body, []byte("(")) || bytes.Contains(body, []byte(`\u0028`))
+	// Every lookaround starts with "(?". The parenthesis may be literal or
+	// encoded as JSON's canonical Unicode escape, and so may the question mark.
+	// Other lookaround characters may themselves be escaped, so the full decoded
+	// pattern is checked only after scoped parsing.
+	return bytes.Contains(body, []byte("(?")) || bytes.Contains(body, []byte(`(\u003f`)) ||
+		bytes.Contains(body, []byte(`(\u003F`)) || bytes.Contains(body, []byte(`\u0028`))
 }
 
 func hasRegexLookaround(pattern string) bool {
@@ -265,7 +267,10 @@ func (p *openAIResponsesToolSchemaParser) parseValue(
 		case "additional_tools":
 			context = openAIResponsesToolSchemaToolCarrier
 		default:
-			context = openAIResponsesToolSchemaSkip
+			// 跳过的项不会产生任何编辑，探测时已经按同样的规则把整项解析完了：直接跳到它的结尾，
+			// 不再逐字节扫第二遍（message / function_call_output 项是请求体的主体）。
+			p.pos = probe.pos
+			return nil
 		}
 	}
 	switch p.body[p.pos] {
@@ -602,6 +607,12 @@ func (p *openAIResponsesToolSchemaParser) parseString() (int, int, error) {
 	}
 	start := p.pos
 	p.pos++
+	// 快路径：大多数字符串（尤其是几百 KB 的 base64）没有转义，用 IndexByte 直接找到结尾的引号。
+	// 快路径不逐字节检查控制字符：sanitizeOpenAIResponsesToolSchemas 最后的 json.Valid 会拒绝它们。
+	if end := bytes.IndexByte(p.body[p.pos:], '"'); end >= 0 && bytes.IndexByte(p.body[p.pos:p.pos+end], '\\') < 0 {
+		p.pos += end + 1
+		return start, p.pos, nil
+	}
 	for p.pos < len(p.body) {
 		switch p.body[p.pos] {
 		case '"':

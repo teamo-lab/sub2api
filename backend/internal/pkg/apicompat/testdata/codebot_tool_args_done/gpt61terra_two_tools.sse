@@ -1,0 +1,36 @@
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_062ee0df4083646b016ae1b95952c4819a9585f2e346511270","object":"response","created_at":1793177945,"status":"in_progress","model":"gpt-6.1-terra","service_tier":"auto","usage":null,"output":[]}}
+
+event: response.in_progress
+data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_062ee0df4083646b016ae1b95952c4819a9585f2e346511270","object":"response","created_at":1793177945,"status":"in_progress","model":"gpt-6.1-terra","service_tier":"auto","usage":null,"output":[]}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"rs_062ee0df4083646b016ae1b95a0d14819a879421a5d1aa4e1d","type":"reasoning","summary":[],"encrypted_content":"redacted"}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":3,"output_index":0,"item":{"id":"rs_062ee0df4083646b016ae1b95a0d14819a879421a5d1aa4e1d","type":"reasoning","summary":[],"encrypted_content":"redacted"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":4,"output_index":1,"item":{"id":"fc_062ee0df4083646b016ae1b95a3304819a918e4fd846fc9e2b","type":"function_call","status":"in_progress","call_id":"call_c87cda02ff114706943aadbf8af60aa9","name":"run_commands","arguments":""}}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","sequence_number":5,"output_index":1,"item_id":"fc_062ee0df4083646b016ae1b95a3304819a918e4fd846fc9e2b","arguments":"{\"commands\":[\"git status --short\",\"git log --oneline -5\"]}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":6,"output_index":1,"item":{"id":"fc_062ee0df4083646b016ae1b95a3304819a918e4fd846fc9e2b","type":"function_call","status":"completed","call_id":"call_c87cda02ff114706943aadbf8af60aa9","name":"run_commands","arguments":"{\"commands\":[\"git status --short\",\"git log --oneline -5\"]}"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":7,"output_index":2,"item":{"id":"fc_062ee0df4083646b016ae1b95b916c819a94d94e525316a43f","type":"function_call","status":"in_progress","call_id":"call_e22e86a6ab364452b38d04d7a86ccdeb","name":"search_codebase","arguments":""}}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","sequence_number":8,"output_index":2,"item_id":"fc_062ee0df4083646b016ae1b95b916c819a94d94e525316a43f","arguments":"{\"queries\":[\"tool call arguments\",\"responses converter\",\"done event\"]}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":9,"output_index":2,"item":{"id":"fc_062ee0df4083646b016ae1b95b916c819a94d94e525316a43f","type":"function_call","status":"completed","call_id":"call_e22e86a6ab364452b38d04d7a86ccdeb","name":"search_codebase","arguments":"{\"queries\":[\"tool call arguments\",\"responses converter\",\"done event\"]}"}}
+
+event: response.metadata
+data: {"type":"response.metadata","sequence_number":10}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":11,"response":{"id":"resp_062ee0df4083646b016ae1b95952c4819a9585f2e346511270","object":"response","created_at":1793177945,"status":"completed","model":"gpt-6.1-terra","service_tier":"default","usage":{"input_tokens":6896,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens":151,"output_tokens_details":{"reasoning_tokens":12},"total_tokens":7047},"output":[{"id":"rs_062ee0df4083646b016ae1b95a0d14819a879421a5d1aa4e1d","type":"reasoning","summary":[],"encrypted_content":"redacted"},{"id":"fc_062ee0df4083646b016ae1b95a3304819a918e4fd846fc9e2b","type":"function_call","status":"completed","call_id":"call_c87cda02ff114706943aadbf8af60aa9","name":"run_commands","arguments":"{\"commands\":[\"git status --short\",\"git log --oneline -5\"]}"},{"id":"fc_062ee0df4083646b016ae1b95b916c819a94d94e525316a43f","type":"function_call","status":"completed","call_id":"call_e22e86a6ab364452b38d04d7a86ccdeb","name":"search_codebase","arguments":"{\"queries\":[\"tool call arguments\",\"responses converter\",\"done event\"]}"}]}}
+

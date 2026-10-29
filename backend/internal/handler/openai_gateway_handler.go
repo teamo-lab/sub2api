@@ -16,6 +16,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
@@ -651,6 +652,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	// token 计费部分仍受利润门保护，独立图片/视频端点才在门外。
 	pricingCtx, pricingAt := h.gatewayService.WithOpenAIRequestPricingContext(c.Request.Context(), apiKey.GroupID)
 	c.Request = c.Request.WithContext(pricingCtx)
+	requestPayloadHash := usageRequestPayloadHasher(body)
 
 	for {
 		// Streaming Forward intentionally detaches the upstream request so usage can
@@ -815,7 +817,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		if service.GetOpsCyberPolicy(c) != nil {
 			cyberBlockBodyHTTP = sessionHashBody
 		}
-		h.recordCyberPolicyIfMarked(c, apiKey, account, subscription, reqModel, err != nil, cyberBlockBodyHTTP, clientRequestedUsageFields(c, channelMapping, reqModel, ""), service.HashUsageRequestPayload(body))
+		h.recordCyberPolicyIfMarked(c, apiKey, account, subscription, reqModel, err != nil, cyberBlockBodyHTTP, clientRequestedUsageFields(c, channelMapping, reqModel, ""), requestPayloadHash())
 		forwardDurationMs := time.Since(forwardStart).Milliseconds()
 		upstreamLatencyMs, _ := getContextInt64(c, service.OpsUpstreamLatencyMsKey)
 		responseLatencyMs := forwardDurationMs
@@ -835,7 +837,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			stampOpenAIRequestedReasoningEffort(res, c)
 			userAgent := c.GetHeader("User-Agent")
 			clientIP := ip.GetClientIP(c)
-			requestPayloadHash := service.HashUsageRequestPayload(body)
+			payloadHash := requestPayloadHash()
 			inboundEndpoint := GetInboundEndpoint(c)
 			upstreamEndpoint := resolveOpenAIUpstreamEndpoint(c, account, res)
 			quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
@@ -852,7 +854,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					UpstreamEndpoint:   upstreamEndpoint,
 					UserAgent:          userAgent,
 					IPAddress:          clientIP,
-					RequestPayloadHash: requestPayloadHash,
+					RequestPayloadHash: payloadHash,
 					APIKeyService:      h.apiKeyService,
 					QuotaPlatform:      quotaPlatform,
 					SessionID:          sessionID,
@@ -1313,6 +1315,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	// 分组利润控制：Messages 文本入口同样请求级装门并固定 pricingAt。
 	msgPricingCtx, pricingAt := h.gatewayService.WithOpenAIRequestPricingContext(c.Request.Context(), apiKey.GroupID)
 	c.Request = c.Request.WithContext(msgPricingCtx)
+	requestPayloadHash := usageRequestPayloadHasher(body)
 
 	for {
 		if failoverClientGone(c) {
@@ -1423,7 +1426,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		if service.GetOpsCyberPolicy(c) != nil {
 			cyberBlockBodyMsg = body
 		}
-		h.recordCyberPolicyIfMarked(c, apiKey, account, subscription, reqModel, err != nil, cyberBlockBodyMsg, clientRequestedUsageFields(c, channelMappingMsg, reqModel, ""), service.HashUsageRequestPayload(body))
+		h.recordCyberPolicyIfMarked(c, apiKey, account, subscription, reqModel, err != nil, cyberBlockBodyMsg, clientRequestedUsageFields(c, channelMappingMsg, reqModel, ""), requestPayloadHash())
 		forwardDurationMs := time.Since(forwardStart).Milliseconds()
 		upstreamLatencyMs, _ := getContextInt64(c, service.OpsUpstreamLatencyMsKey)
 		responseLatencyMs := forwardDurationMs
@@ -1444,7 +1447,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			stampOpenAIRequestedReasoningEffort(res, c)
 			userAgent := c.GetHeader("User-Agent")
 			clientIP := ip.GetClientIP(c)
-			requestPayloadHash := service.HashUsageRequestPayload(body)
+			payloadHash := requestPayloadHash()
 			inboundEndpoint := GetInboundEndpoint(c)
 			upstreamEndpoint := resolveOpenAIUpstreamEndpoint(c, account, res)
 			quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
@@ -1461,7 +1464,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 					UpstreamEndpoint:   upstreamEndpoint,
 					UserAgent:          userAgent,
 					IPAddress:          clientIP,
-					RequestPayloadHash: requestPayloadHash,
+					RequestPayloadHash: payloadHash,
 					APIKeyService:      h.apiKeyService,
 					QuotaPlatform:      quotaPlatform,
 					SessionID:          sessionID,
@@ -1739,6 +1742,20 @@ func (h *OpenAIGatewayHandler) validateFunctionCallOutputRequest(c *gin.Context,
 	return false
 }
 
+// usageRequestPayloadHasher 返回只在第一次调用时计算请求体哈希的函数：failover 的每一跳和用量记录都要用，
+// 10MB 的请求体每算一次 sha256 要几毫秒。只在请求的 handler goroutine 里调用。
+func usageRequestPayloadHasher(body []byte) func() string {
+	var hash string
+	computed := false
+	return func() string {
+		if !computed {
+			hash = service.HashUsageRequestPayload(body)
+			computed = true
+		}
+		return hash
+	}
+}
+
 func normalizeCodexDelegationBootstrap(body []byte) ([]byte, bool) {
 	// 已有任务通过 send_message_to_thread 唤醒时会携带 previous_response_id；
 	// 完整历史回放还会带有已配对的调用项。delegation 仍是客户端注入的用户输入，
@@ -1751,6 +1768,9 @@ func normalizeCodexAutomationBootstrap(body []byte) ([]byte, bool) {
 }
 
 func normalizeCodexCallOutputBootstrap(body []byte, isCandidate func(map[string]any) bool, allowHistoricalContext bool) ([]byte, bool) {
+	if !hasCodexAppFunctionCallOutput(body) {
+		return body, false
+	}
 	if !hasUniqueJSONMembers(body) {
 		return body, false
 	}
@@ -1831,6 +1851,32 @@ func normalizeCodexCallOutputBootstrap(body []byte, isCandidate func(map[string]
 		return body, false
 	}
 	return normalized, true
+}
+
+// hasCodexAppFunctionCallOutput 是两种 bootstrap 改写的必要条件：input 里有 namespace 为 codex_app /
+// codex_tui 的 function_call_output。每个 Responses 请求都要过这两道改写，没有这种项时不必为了确认
+// 而把整个请求体按 token 扫一遍再解成 map（10MB 的请求体要分配上百 MB）。
+// 有重复键时下面的完整检查本来就不改写，这里按哪个值判断都不影响结果。
+func hasCodexAppFunctionCallOutput(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	// 零拷贝视图：gjson.GetBytes 会把 input 整段复制一份。body 在这里只读。
+	input := gjson.Get(unsafe.String(unsafe.SliceData(body), len(body)), "input")
+	if !input.IsArray() {
+		return false
+	}
+	found := false
+	input.ForEach(func(_, item gjson.Result) bool {
+		if item.Get("type").String() == "function_call_output" {
+			switch item.Get("namespace").String() {
+			case "codex_app", "codex_tui":
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
 }
 
 func hasUniqueJSONMembers(body []byte) bool {
