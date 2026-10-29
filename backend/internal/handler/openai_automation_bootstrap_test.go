@@ -166,3 +166,19 @@ func TestNormalizeCodexAutomationBootstrapPreservesOrderAndIsIdempotent(t *testi
 	require.False(t, changedAgain)
 	require.Equal(t, got, again)
 }
+
+func TestNormalizeCodexAutomationBootstrapEscapedNamespaceStillNormalized(t *testing.T) {
+	output := codexAutomationBootstrap("wiki-maintenance", "never", automationBootstrapPrompt)
+	body := []byte(`{"model":"gpt-5","input":[{"type":"function_call_output","namespace":"codex_app","name":"automation_update","output":` +
+		mustJSON(t, output) + `}]}`)
+	got, changed := normalizeCodexAutomationBootstrap(body)
+	require.True(t, changed)
+	require.Equal(t, "message", gjson.GetBytes(got, "input.0.type").String())
+}
+
+func TestHasCodexAppFunctionCallOutput(t *testing.T) {
+	require.False(t, hasCodexAppFunctionCallOutput([]byte(`{"input":[{"type":"function_call_output","call_id":"c1","output":"ok"}]}`)))
+	require.False(t, hasCodexAppFunctionCallOutput([]byte(`{"input":"codex_app"}`)))
+	require.False(t, hasCodexAppFunctionCallOutput(nil))
+	require.True(t, hasCodexAppFunctionCallOutput([]byte(`{"input":[{"type":"function_call_output","namespace":"codex_tui"}]}`)))
+}

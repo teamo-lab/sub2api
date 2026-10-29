@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/requestprofile"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
@@ -452,18 +453,20 @@ func normalizeOpenAIParallelToolCallsWithoutTools(body []byte, responsesLite boo
 
 // openAIRequestBodyHasTools 同时识别顶层 tools 和 input[].additional_tools。
 func openAIRequestBodyHasTools(body []byte) bool {
-	if tools := gjson.GetBytes(body, "tools"); tools.IsArray() && len(tools.Array()) > 0 {
+	if tools := gjsonBodyGet(body, "tools"); tools.IsArray() && len(tools.Array()) > 0 {
 		return true
 	}
-	for _, item := range gjson.GetBytes(body, "input").Array() {
+	found := false
+	forEachOpenAIInputItem(body, func(item gjson.Result) bool {
 		if strings.TrimSpace(item.Get("type").String()) != "additional_tools" {
-			continue
-		}
-		if tools := item.Get("tools"); tools.IsArray() && len(tools.Array()) > 0 {
 			return true
 		}
-	}
-	return false
+		if tools := item.Get("tools"); tools.IsArray() && len(tools.Array()) > 0 {
+			found = true
+		}
+		return !found
+	})
+	return found
 }
 
 // normalizeOpenAIResponsesReasoningContentReplay removes non-portable
@@ -475,13 +478,8 @@ func openAIRequestBodyHasTools(body []byte) bool {
 // ids, and opaque extensions). Callers scope this normalization to OpenAI
 // destinations; compatible providers may still consume their own content.
 func normalizeOpenAIResponsesReasoningContentReplay(body []byte) ([]byte, bool, error) {
-	input := gjson.GetBytes(body, "input")
-	if !input.IsArray() {
-		return body, false, nil
-	}
-
 	needsNormalization := false
-	input.ForEach(func(_, item gjson.Result) bool {
+	forEachOpenAIInputItem(body, func(item gjson.Result) bool {
 		if strings.TrimSpace(item.Get("type").String()) != "reasoning" {
 			return true
 		}
@@ -531,8 +529,7 @@ func normalizeOpenAIAPIKeyStoreFalseReasoningReplay(body []byte, knownStoreFalse
 	if !knownStoreFalse && gjson.GetBytes(body, "store").Type != gjson.False {
 		return body, false, nil
 	}
-	input := gjson.GetBytes(body, "input")
-	if !input.IsArray() {
+	if !openAIStoreFalseReasoningReplayMayChange(body) {
 		return body, false, nil
 	}
 
@@ -592,6 +589,29 @@ func normalizeOpenAIAPIKeyStoreFalseReasoningReplay(body []byte, knownStoreFalse
 		return body, false, fmt.Errorf("serialize API-key store=false reasoning replay: %w", err)
 	}
 	return normalized, true, nil
+}
+
+// openAIStoreFalseReasoningReplayMayChange 是 normalizeOpenAIAPIKeyStoreFalseReasoningReplay 改写的必要条件：
+// input 里有 reasoning 项、id 以 rs_ 开头的 item_reference，或带 call_id 的 message / image_generation_call。
+// 没有时不用把整个请求体解成 map 再确认一遍。
+func openAIStoreFalseReasoningReplayMayChange(body []byte) bool {
+	found := false
+	forEachOpenAIInputItem(body, func(item gjson.Result) bool {
+		if !item.IsObject() {
+			return true
+		}
+		fields := readOpenAIInputItemFields(item)
+		switch {
+		case fields.typ == "reasoning":
+			found = true
+		case fields.typ == "item_reference" && strings.HasPrefix(fields.id, "rs_"):
+			found = true
+		case fields.hasCallID && shouldStripOpenAIResponsesNonPairCallID(fields.typ):
+			found = true
+		}
+		return !found
+	})
+	return found
 }
 
 func normalizeOpenAICodexCompactReasoningEffortForAccount(c *gin.Context, account *Account, body []byte) ([]byte, bool, error) {
@@ -1941,10 +1961,10 @@ func openAIJSONValueMayContainImageInput(value gjson.Result) bool {
 }
 
 func openAIRequestBodyMayContainEmptyBase64InputImage(body []byte) bool {
-	if len(body) == 0 || !openAIRequestBodyMayContainInputImageToken(body) {
+	if len(body) == 0 || !openAIRequestBodyMayContainInputImageToken(body) || !openAIRequestBodyMayContainEmptyBase64Payload(body) {
 		return false
 	}
-	input := gjson.GetBytes(body, "input")
+	input := gjsonBodyGet(body, "input")
 	if !input.Exists() {
 		return false
 	}
@@ -1957,6 +1977,46 @@ func openAIRequestBodyMayContainInputImageToken(body []byte) bool {
 	}
 	// JSON 字符串任意字符都可能被 unicode escape，遇到 \u 时交给 gjson 解码后的结构扫描兜底。
 	return bytes.Contains(body, []byte("\\u"))
+}
+
+var openAIBase64DataURIMarker = []byte("base64,")
+
+// openAIRequestBodyMayContainEmptyBase64Payload 是 isEmptyBase64DataURI 为真的字节级必要条件：解码后的某个字符串
+// 里 "base64," 之后只剩空白。原文里要么出现字面的 "base64,"、紧跟着引号、反斜杠、ASCII 空白或非 ASCII 字节
+// （可能是 Unicode 空白）；要么 "base64," 里有字符被写成了 \uXXXX。正常的截图后面紧跟 base64 数据，
+// 这里用 bytes.Index 扫一遍就能排除，不用再按 JSON 结构把几 MB 的 base64 逐层扫好几遍。
+func openAIRequestBodyMayContainEmptyBase64Payload(body []byte) bool {
+	for rest := body; ; {
+		i := bytes.Index(rest, openAIBase64DataURIMarker)
+		if i < 0 {
+			break
+		}
+		rest = rest[i+len(openAIBase64DataURIMarker):]
+		if len(rest) == 0 {
+			return true
+		}
+		if c := rest[0]; c == '"' || c == '\\' || c <= ' ' || c >= 0x80 {
+			return true
+		}
+	}
+	for rest := body; ; {
+		i := bytes.Index(rest, []byte(`\u`))
+		if i < 0 {
+			return false
+		}
+		rest = rest[i+2:]
+		if len(rest) < 4 {
+			return true
+		}
+		code, err := strconv.ParseUint(string(rest[:4]), 16, 16)
+		if err != nil {
+			return true
+		}
+		switch code {
+		case 'b', 'a', 's', 'e', '6', '4', ',':
+			return true
+		}
+	}
 }
 
 func openAIJSONValueMayContainEmptyBase64InputImage(value gjson.Result) bool {
@@ -1975,10 +2035,30 @@ func openAIJSONValueMayContainEmptyBase64InputImage(value gjson.Result) bool {
 		return found
 	}
 	if value.IsObject() {
-		if strings.TrimSpace(value.Get("type").String()) == "input_image" && isEmptyBase64DataURI(value.Get("image_url").String()) {
+		// 一次遍历取出三个字段（和 Get 一样取第一次出现的键）：分别 Get 时，每次都要把同一项里几百 KB
+		// 的 base64 再扫一遍。
+		var typ, imageURL, content gjson.Result
+		value.ForEach(func(key, field gjson.Result) bool {
+			switch key.String() {
+			case "type":
+				if !typ.Exists() {
+					typ = field
+				}
+			case "image_url":
+				if !imageURL.Exists() {
+					imageURL = field
+				}
+			case "content":
+				if !content.Exists() {
+					content = field
+				}
+			}
+			return true
+		})
+		if strings.TrimSpace(typ.String()) == "input_image" && isEmptyBase64DataURI(imageURL.String()) {
 			return true
 		}
-		return openAIJSONValueMayContainEmptyBase64InputImage(value.Get("content"))
+		return openAIJSONValueMayContainEmptyBase64InputImage(content)
 	}
 	return false
 }
