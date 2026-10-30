@@ -387,37 +387,64 @@ func repairOpenAIResponsesToolCallNamespaces(body []byte) ([]byte, error) {
 	if len(owner) == 0 {
 		return body, nil
 	}
-	out := body
+	// 和 stripOpenAIResponsesInputNamespaces 一样一遍重建 input：逐项对整个 body
+	// 做 sjson.SetBytes("input.N.namespace") 每次都要从头扫描并复制整个请求体，
+	// 长 Codex 会话里是平方级开销（2.5MB 请求约 0.3s CPU、1.2GB 分配）。
+	var rebuilt bytes.Buffer
+	rebuilt.Grow(len(input.Raw) + 64)
+	_ = rebuilt.WriteByte('[')
 	changed := false
+	first := true
 	var repairErr error
-	index := -1
 	input.ForEach(func(_, item gjson.Result) bool {
-		index++
-		if !item.IsObject() || !isOpenAIResponsesToolCallItemType(item.Get("type").String()) {
-			return true
+		if !first {
+			_ = rebuilt.WriteByte(',')
 		}
-		namespaceValue := item.Get("namespace")
-		if namespaceValue.Exists() && namespaceValue.Type != gjson.Null &&
-			(namespaceValue.Type != gjson.String || strings.TrimSpace(namespaceValue.String()) != "") {
-			return true
+		first = false
+		itemBody := []byte(item.Raw)
+		if namespace, ok := openAIResponsesToolCallNamespaceRepair(item, owner, topLevel, ambiguous); ok {
+			itemBody, repairErr = sjson.SetBytes(itemBody, "namespace", namespace)
+			if repairErr != nil {
+				return false
+			}
+			changed = true
 		}
-		name := strings.TrimSpace(item.Get("name").String())
-		namespace, ok := owner[name]
-		if !ok || topLevel[name] || ambiguous[name] {
-			return true
-		}
-		out, repairErr = sjson.SetBytes(out, fmt.Sprintf("input.%d.namespace", index), namespace)
-		if repairErr != nil {
-			return false
-		}
-		changed = true
+		_, _ = rebuilt.Write(itemBody)
 		return true
 	})
+	_ = rebuilt.WriteByte(']')
 	if repairErr != nil {
 		return body, fmt.Errorf("repair OpenAI input namespace: %w", repairErr)
 	}
 	if !changed {
 		return body, nil
 	}
-	return out, nil
+	repaired, err := sjson.SetRawBytes(body, "input", rebuilt.Bytes())
+	if err != nil {
+		return body, fmt.Errorf("replace OpenAI input after namespace repair: %w", err)
+	}
+	return repaired, nil
+}
+
+// openAIResponsesToolCallNamespaceRepair 返回该 input 项应补回的 namespace：只补
+// namespace 缺失 / null / 空白、且名字唯一属于某个 namespace 又没有同名顶层工具的调用项。
+func openAIResponsesToolCallNamespaceRepair(
+	item gjson.Result,
+	owner map[string]string,
+	topLevel, ambiguous map[string]bool,
+) (string, bool) {
+	if !item.IsObject() || !isOpenAIResponsesToolCallItemType(item.Get("type").String()) {
+		return "", false
+	}
+	namespaceValue := item.Get("namespace")
+	if namespaceValue.Exists() && namespaceValue.Type != gjson.Null &&
+		(namespaceValue.Type != gjson.String || strings.TrimSpace(namespaceValue.String()) != "") {
+		return "", false
+	}
+	name := strings.TrimSpace(item.Get("name").String())
+	namespace, ok := owner[name]
+	if !ok || topLevel[name] || ambiguous[name] {
+		return "", false
+	}
+	return namespace, true
 }
