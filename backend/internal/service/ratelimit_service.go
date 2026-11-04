@@ -1029,6 +1029,15 @@ func (s *RateLimitService) handleOpenAI403(ctx context.Context, account *Account
 		)
 		return false
 	}
+	// Cloudflare 纯文本拦截（"error code: 1010"）同理：按请求/边缘节点拦，同一个号其它请求正常。
+	if isCloudflareEdgeBlock(http.StatusForbidden, responseBody) {
+		slog.Warn(
+			"openai_403_cloudflare_edge_block_skips_account_penalty",
+			"account_id", account.ID,
+			"upstream_message", upstreamMsg,
+		)
+		return false
+	}
 
 	msg := buildForbiddenErrorMessage(
 		"Access forbidden (403):",

@@ -118,6 +118,14 @@ func assertModelErrorBoundedFailover(t *testing.T, statusCode int, body string, 
 	h.Responses(c)
 
 	require.Equal(t, []int64{9910, 9911}, upstream.calls())
+	if statusCode == http.StatusNotFound {
+		// 同组没有号接这个模型：回 404 model_not_found，而不是 502 上游故障。
+		require.Equal(t, http.StatusNotFound, rec.Code)
+		require.Equal(t, "invalid_request_error", gjson.GetBytes(rec.Body.Bytes(), "error.type").String())
+		require.Equal(t, "model_not_found", gjson.GetBytes(rec.Body.Bytes(), "error.code").String())
+		require.Equal(t, "model not found", gjson.GetBytes(rec.Body.Bytes(), "error.message").String())
+		return
+	}
 	require.Equal(t, http.StatusBadGateway, rec.Code)
 	require.Equal(t, "upstream_error", gjson.GetBytes(rec.Body.Bytes(), "error.type").String())
 	require.Equal(t, "Upstream request failed", gjson.GetBytes(rec.Body.Bytes(), "error.message").String())
