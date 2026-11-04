@@ -131,6 +131,11 @@ func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Cont
 	if account != nil && account.Platform == PlatformOpenAI && isOpenAIContextWindowError("", responseBody) {
 		return false
 	}
+	// 只是这个号接不住这次请求：换号即可，不冷却、不进临时不可调度；见 openai_account_capability_failover.go。
+	if account != nil && account.Platform == PlatformOpenAI &&
+		(isOpenAIToolChoiceViolation("", responseBody) || isCloudflareEdgeBlock(statusCode, responseBody)) {
+		return false
+	}
 
 	if isOpenAIImageRateLimitError(statusCode, responseBody) {
 		if s != nil && s.rateLimitService != nil {
