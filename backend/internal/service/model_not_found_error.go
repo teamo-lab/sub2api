@@ -28,6 +28,13 @@ func isModelNotFoundCooldownExempt(statusCode int, body []byte) bool {
 					return strings.EqualFold(code, "model_not_found")
 				}
 			}
+			// 上游是 sub2api 时没有 code，只在 type 上标 model_not_found：
+			// {"error":{"type":"model_not_found","message":"Model \"gpt-6.1-terra\" is not supported by any configured account in this group"}}
+			for _, path := range []string{"error.type", "response.error.type"} {
+				if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(body, path).String()), "model_not_found") {
+					return true
+				}
+			}
 		}
 		message = ""
 		for _, path := range []string{"error.message", "response.error.message", "message", "detail"} {
@@ -44,7 +51,8 @@ func isModelNotFoundCooldownExempt(statusCode int, body []byte) bool {
 	return (strings.Contains(message, "model") && strings.Contains(message, "not found")) ||
 		strings.Contains(message, "unknown model") ||
 		(strings.Contains(message, "model") && strings.Contains(message, "does not exist")) ||
-		(strings.Contains(message, "model") && strings.Contains(message, "not available"))
+		(strings.Contains(message, "model") && strings.Contains(message, "not available")) ||
+		(strings.Contains(message, "model") && strings.Contains(message, "is not supported"))
 }
 
 func isUpstreamModelNotFoundError(statusCode int, body []byte) bool {

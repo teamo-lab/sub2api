@@ -792,6 +792,10 @@ func shouldFailoverOpenAIPassthroughResponse(account *Account, statusCode int, r
 	if isOpenAIContextWindowError("", responseBody) {
 		return true
 	}
+	// 这个号的上游接不住，换号可能成功；见 openai_account_capability_failover.go。
+	if isOpenAIToolChoiceViolation("", responseBody) || isCloudflareEdgeBlock(statusCode, responseBody) {
+		return true
+	}
 	if isOpenAIHTTPUpstreamAccessStateError(statusCode, "", responseBody) {
 		return true
 	}
@@ -1745,6 +1749,10 @@ func openAIStreamFailedEventShouldFailover(payload []byte, message string) bool 
 	if isOpenAIContextWindowError(message, payload) {
 		return true
 	}
+	// 必须先于下面的 "violat" 等不可重试标记：换号通常就能成功；见 openai_account_capability_failover.go。
+	if isOpenAIToolChoiceViolation(message, payload) {
+		return true
+	}
 	if isOpenAIUpstreamAccessStateError(message, payload) {
 		return true
 	}
@@ -1801,6 +1809,10 @@ func openAIStreamErrorEventShouldFailover(payload []byte, message string) bool {
 	}
 	// 换一个窗口更大的号可能成功；见 openai_context_window_failover.go。
 	if isOpenAIContextWindowError(message, payload) {
+		return true
+	}
+	// 必须先于下面的 "violat" 等不可重试标记：换号通常就能成功；见 openai_account_capability_failover.go。
+	if isOpenAIToolChoiceViolation(message, payload) {
 		return true
 	}
 	if isOpenAIUpstreamAccessStateError(message, payload) {

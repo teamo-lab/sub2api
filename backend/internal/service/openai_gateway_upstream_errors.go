@@ -268,6 +268,10 @@ func (s *OpenAIGatewayService) shouldFailoverOpenAIUpstreamResponse(statusCode i
 	if isOpenAIContextWindowError(upstreamMsg, upstreamBody) {
 		return true
 	}
+	// 这个号的上游接不住，换号可能成功；见 openai_account_capability_failover.go。
+	if isOpenAIToolChoiceViolation(upstreamMsg, upstreamBody) || isCloudflareEdgeBlock(statusCode, upstreamBody) {
+		return true
+	}
 	if isOpenAIHTTPUpstreamAccessStateError(statusCode, upstreamMsg, upstreamBody) {
 		return true
 	}
@@ -308,10 +312,21 @@ func newOpenAIUpstreamFailoverError(
 	if isModelNotFoundCooldownExempt(statusCode, responseBody) {
 		failoverErr.RetryableOnSameAccount = false
 		failoverErr.RequestScopedTransient = false
+		if statusCode == http.StatusNotFound {
+			markOpenAIModelUnsupported(failoverErr, upstreamMsg, responseBody)
+		}
 		return failoverErr
 	}
 	if isOpenAIContextWindowError(upstreamMsg, responseBody) {
 		markOpenAIContextWindowExceeded(failoverErr, upstreamMsg, responseBody)
+		return failoverErr
+	}
+	if isOpenAIToolChoiceViolation(upstreamMsg, responseBody) {
+		markOpenAIToolChoiceViolation(failoverErr, upstreamMsg, responseBody)
+		return failoverErr
+	}
+	if isCloudflareEdgeBlock(statusCode, responseBody) {
+		markOpenAIEdgeBlocked(failoverErr)
 		return failoverErr
 	}
 	if isOpenAIRequestBodyTooLargeError(statusCode, upstreamMsg, responseBody) {

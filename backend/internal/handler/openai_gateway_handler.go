@@ -1690,6 +1690,14 @@ func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, 
 		h.anthropicStreamingAwareError(c, failoverErr.ClientStatusCode, "invalid_request_error", failoverErr.ClientMessage, streamStarted)
 		return
 	}
+	if failoverErr.IsOpenAIModelUnsupported() {
+		h.anthropicStreamingAwareError(c, failoverErr.ClientStatusCode, "not_found_error", failoverErr.ClientMessage, streamStarted)
+		return
+	}
+	if failoverErr.IsOpenAIToolChoiceViolation() {
+		h.anthropicStreamingAwareError(c, failoverErr.ClientStatusCode, "api_error", failoverErr.ClientMessage, streamStarted)
+		return
+	}
 	// 每个号都接不住这么大的请求体（上游 413，或上传看门狗中止）：和 Responses 一样回 413。
 	if failoverErr.IsOpenAIRequestBodyTooLarge() {
 		service.SetOpsUpstreamError(c, http.StatusRequestEntityTooLarge, service.OpenAIRequestBodyTooLargeClientMessage, "")
@@ -3552,6 +3560,16 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 		h.handleStreamingAwareErrorWithCode(c, failoverErr.ClientStatusCode, "invalid_request_error", "context_length_exceeded", failoverErr.ClientMessage, streamStarted, false)
 		return
 	}
+	// 同组没有号接这个模型：回 404 model_not_found，而不是被映射成 502 上游故障。
+	if failoverErr.IsOpenAIModelUnsupported() {
+		h.handleStreamingAwareErrorWithCode(c, failoverErr.ClientStatusCode, "invalid_request_error", "model_not_found", failoverErr.ClientMessage, streamStarted, false)
+		return
+	}
+	// 每个号都违反了 tool_choice：仍回 502，但带上游原文，方便客户端看出原因。
+	if failoverErr.IsOpenAIToolChoiceViolation() {
+		h.handleStreamingAwareError(c, failoverErr.ClientStatusCode, "upstream_error", failoverErr.ClientMessage, streamStarted)
+		return
+	}
 
 	// 使用默认的错误映射
 	status, errType, errMsg := h.mapUpstreamError(statusCode)
@@ -3953,6 +3971,16 @@ func closeOpenAIWSFailoverExhausted(c *gin.Context, conn *coderws.Conn, failover
 		errorCode = "context_length_exceeded"
 		message = failoverErr.ClientMessage
 		closeStatus = coderws.StatusPolicyViolation
+	}
+	if failoverErr.IsOpenAIModelUnsupported() {
+		intendedStatus = failoverErr.ClientStatusCode
+		errorType = "invalid_request_error"
+		errorCode = "model_not_found"
+		message = failoverErr.ClientMessage
+		closeStatus = coderws.StatusPolicyViolation
+	}
+	if failoverErr.IsOpenAIToolChoiceViolation() {
+		message = failoverErr.ClientMessage
 	}
 	service.MarkOpsStreamFailure(c, errorType, errorCode, message, intendedStatus)
 	closeOpenAIClientWS(conn, closeStatus, message)

@@ -728,8 +728,10 @@ func (e *UpstreamFailoverError) ShouldReportAccountScheduleFailure() bool {
 	if e == nil {
 		return false
 	}
-	// 超窗口、请求体过大（含上传看门狗中止）都是这次请求和这个号不匹配，不是账号故障。
-	if e.Reason == OpenAIContentAuditRejectedReason || e.IsOpenAIContextWindowExceeded() || e.IsOpenAIRequestBodyTooLarge() {
+	// 超窗口、请求体过大（含上传看门狗中止）、模型不支持、tool_choice 违规、边缘拦截
+	// 都是这次请求和这个号不匹配，不是账号故障。
+	if e.Reason == OpenAIContentAuditRejectedReason || e.IsOpenAIContextWindowExceeded() || e.IsOpenAIRequestBodyTooLarge() ||
+		e.IsOpenAIAccountCapabilityMiss() {
 		return false
 	}
 	return !e.IsCredentialFailure() || e.Scope == GatewayFailureScopeAccount
