@@ -110,6 +110,7 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 		geminiReq,
 		clientStream,
 		useUpstreamStream,
+		GeminiRequestSessionID(c),
 	)
 
 	var resp *http.Response
@@ -317,6 +318,7 @@ func (s *GeminiMessagesCompatService) buildGeminiChatCompletionsUpstreamRequestF
 	geminiReq []byte,
 	clientStream bool,
 	useUpstreamStream bool,
+	requestSessionID string,
 ) (func(context.Context) (*http.Request, string, error), string) {
 	switch account.Type {
 	case AccountTypeAPIKey:
@@ -348,6 +350,7 @@ func (s *GeminiMessagesCompatService) buildGeminiChatCompletionsUpstreamRequestF
 			}
 			upstreamReq.Header.Set("Content-Type", "application/json")
 			upstreamReq.Header.Set("x-goog-api-key", apiKey)
+			setGeminiRequestSessionHeader(upstreamReq, requestSessionID)
 			return upstreamReq, "x-request-id", nil
 		}, "x-request-id"
 

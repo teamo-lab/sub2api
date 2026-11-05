@@ -652,6 +652,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 			}
 			upstreamReq.Header.Set("Content-Type", "application/json")
 			upstreamReq.Header.Set("x-goog-api-key", apiKey)
+			setGeminiRequestSessionHeader(upstreamReq, GeminiRequestSessionID(c))
 			return upstreamReq, "x-request-id", nil
 		}
 		requestIDHeader = "x-request-id"
@@ -1216,6 +1217,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 			}
 			upstreamReq.Header.Set("Content-Type", "application/json")
 			upstreamReq.Header.Set("x-goog-api-key", apiKey)
+			setGeminiRequestSessionHeader(upstreamReq, GeminiRequestSessionID(c))
 			return upstreamReq, "x-request-id", nil
 		}
 		requestIDHeader = "x-request-id"

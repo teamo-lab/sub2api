@@ -270,8 +270,13 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	}
 
 	// 3) select account (sticky session based on request body)
-	// 优先使用 Gemini CLI 的会话标识（privileged-user-id + tmp 目录哈希）
-	sessionHash := extractGeminiCLISessionHash(c, body)
+	// 最优先：调用方显式声明的 X-Request-Session-Id（TeamoRouter 按 uid+模型+分片生成）。
+	// 其次是 Gemini CLI 的会话标识（privileged-user-id + tmp 目录哈希）。
+	explicitSessionHash := service.GeminiRequestSessionHash(service.GeminiRequestSessionID(c))
+	sessionHash := explicitSessionHash
+	if sessionHash == "" {
+		sessionHash = extractGeminiCLISessionHash(c, body)
+	}
 	if sessionHash == "" {
 		// Fallback: 使用通用的会话哈希生成逻辑（适用于其他客户端）
 		parsedReq, _ := service.ParseGatewayRequest(service.NewRequestBodyRef(body), domain.PlatformGemini)
@@ -309,7 +314,8 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	var geminiPrefixHash string
 	var geminiSessionUUID string
 	var matchedDigestChain string
-	useDigestFallback := sessionBoundAccountID == 0
+	// 有显式会话头时以它为准，不再用内容摘要链去匹配别的会话绑定的号。
+	useDigestFallback := sessionBoundAccountID == 0 && explicitSessionHash == ""
 
 	if useDigestFallback {
 		// 解析 Gemini 请求体
