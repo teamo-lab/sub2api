@@ -157,10 +157,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 	}
 	sessionHash := h.gatewayService.GenerateSessionHash(parsedReq)
 	groupPlatform := effectiveAPIKeyPlatform(c, apiKey)
-	selectionSessionHash := sessionHash
-	if groupPlatform == service.PlatformGemini && selectionSessionHash != "" {
-		selectionSessionHash = "gemini:" + selectionSessionHash
-	}
+	selectionSessionHash := chatCompletionsSelectionSessionHash(groupPlatform, sessionHash, service.GeminiRequestSessionID(c))
 	// 3. Account selection + failover loop
 	fs := NewFailoverState(h.maxAccountSwitches, false)
 	if groupPlatform == service.PlatformGemini {
