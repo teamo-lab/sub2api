@@ -22,12 +22,12 @@ import (
 
 // 上游请求体压缩（按账号开关）。
 //
-// 发往上游的请求体是腾讯云出网流量的大头，真实请求体压缩比 3–9 倍。账号 extra 里
+// 发往上游的请求体是出网流量的大头，真实请求体压缩比 3–9 倍。账号 extra 里
 // request_body_compression = zstd | gzip 时，不小于 min_bytes 的 JSON 请求体压缩后再发，
 // 带 Content-Encoding、按压缩后长度发 Content-Length，其它都不变。没开的账号一个字节都不变。
 //
 // 只对 API Key 账号生效：OAuth/官方上游不认压缩请求体，开关也只该打在已验证过的中转上
-// （Zero 的 new-api、fluxion）。
+// （例如 new-api 系中转）。
 //
 // 兜底：压缩发出去拿到 400/415 且像是「请求体解析失败」时，这一跳原样不压缩再发一次；
 // 不压缩那次没再被同样拒绝，就在进程内记住这个号 fallback_ttl 内不再压缩，并打 warn 日志。
@@ -285,7 +285,7 @@ func buildCompressedUpstreamRequest(req *http.Request, encoding string, settings
 // upstreamBodyParseRejectionMarkers 是上游把（压缩过的）请求体当坏 JSON 拒掉时错误体里的特征文本。
 var upstreamBodyParseRejectionMarkers = []string{
 	"invalid json",             // new-api: "invalid JSON request body"
-	"could not parse the json", // Volcano / Anthropic 风格
+	"could not parse the json", // 常见网关的 JSON 解析报错
 	"failed to parse the request body",
 	"cannot parse json",
 	"malformed json",

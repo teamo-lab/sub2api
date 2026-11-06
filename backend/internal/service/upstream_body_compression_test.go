@@ -247,7 +247,7 @@ func TestUpstreamBodyCompression_OverRealHTTP(t *testing.T) {
 func TestUpstreamBodyCompression_FallbackOnParseRejection(t *testing.T) {
 	cases := map[string]*http.Response{
 		"new-api invalid json":    jsonResponse(http.StatusBadRequest, `{"error":{"message":"invalid JSON request body","type":"new_api_error"}}`),
-		"volcano could not parse": jsonResponse(http.StatusBadRequest, `{"error":{"code":"InvalidParameter","message":"could not parse the JSON body of your request"}}`),
+		"gateway could not parse": jsonResponse(http.StatusBadRequest, `{"error":{"code":"InvalidParameter","message":"could not parse the JSON body of your request"}}`),
 		"empty 400":               jsonResponse(http.StatusBadRequest, ``),
 		"html 400":                jsonResponse(http.StatusBadRequest, `<html><body>400 Bad Request</body></html>`),
 		"415":                     jsonResponse(http.StatusUnsupportedMediaType, `{"error":{"message":"whatever"}}`),
