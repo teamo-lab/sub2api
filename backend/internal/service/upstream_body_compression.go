@@ -142,10 +142,7 @@ var (
 )
 
 func zstdEncoderPool(level int) *sync.Pool {
-	if p, ok := zstdEncoderPools.Load(level); ok {
-		return p.(*sync.Pool)
-	}
-	p, _ := zstdEncoderPools.LoadOrStore(level, &sync.Pool{New: func() any {
+	return levelPool(&zstdEncoderPools, level, func() any {
 		enc, err := zstd.NewWriter(nil,
 			zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(level)),
 			zstd.WithEncoderConcurrency(1),
@@ -154,22 +151,31 @@ func zstdEncoderPool(level int) *sync.Pool {
 			return err
 		}
 		return enc
-	}})
-	return p.(*sync.Pool)
+	})
 }
 
 func gzipWriterPool(level int) *sync.Pool {
-	if p, ok := gzipWriterPools.Load(level); ok {
-		return p.(*sync.Pool)
-	}
-	p, _ := gzipWriterPools.LoadOrStore(level, &sync.Pool{New: func() any {
+	return levelPool(&gzipWriterPools, level, func() any {
 		w, err := gzip.NewWriterLevel(nil, level)
 		if err != nil {
 			return err
 		}
 		return w
-	}})
-	return p.(*sync.Pool)
+	})
+}
+
+// levelPool 返回 pools 里按级别缓存的 sync.Pool，没有就建一个。
+func levelPool(pools *sync.Map, level int, newFn func() any) *sync.Pool {
+	if p, ok := pools.Load(level); ok {
+		if pool, ok := p.(*sync.Pool); ok {
+			return pool
+		}
+	}
+	p, _ := pools.LoadOrStore(level, &sync.Pool{New: newFn})
+	if pool, ok := p.(*sync.Pool); ok {
+		return pool
+	}
+	return &sync.Pool{New: newFn}
 }
 
 // compressUpstreamBody 把 src 按 encoding 压缩进 dst，返回读到的原始字节数。
