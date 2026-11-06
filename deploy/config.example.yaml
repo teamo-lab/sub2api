@@ -266,6 +266,16 @@ gateway:
     min_body_bytes: 8388608     # only bodies >= 8 MiB are watched
     max_upload_seconds: 180     # projected total upload time allowed
     window_seconds: 30          # rate window; judging starts after the first window
+  # Upstream request-body compression. Off unless an API-key account sets extra.request_body_compression
+  # to zstd or gzip; these knobs only tune it. A compressed send rejected as an unparseable body (400/415)
+  # is re-sent uncompressed once, and the account stops compressing for fallback_ttl_seconds.
+  # 上游请求体压缩：只有 API Key 账号 extra.request_body_compression = zstd | gzip 才开；这里只调参数。
+  # 压缩发送被当坏请求体拒绝（400/415）时不压缩重发一次，并在 fallback_ttl_seconds 内对该号停用压缩。
+  upstream_body_compression:
+    min_bytes: 16384            # compress only bodies >= 16 KiB
+    zstd_level: 3
+    gzip_level: 6
+    fallback_ttl_seconds: 3600
   # Global budget for large request bodies in flight, checked right after API key auth; a large request
   # over budget gets 503 + Retry-After. Bodies are copied several times in the gateway (~5-6x memory).
   # 鉴权之后的全局在途请求体预算，超出时新的大请求直接回 503 + Retry-After。
