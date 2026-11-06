@@ -1841,6 +1841,11 @@ func openAIStreamErrorEventShouldFailover(payload []byte, message string) bool {
 	switch strings.ToLower(strings.TrimSpace(recoveryErrorCodeFromJSON(payload))) {
 	case "server_error", "upstream_error":
 		return openAIStreamFailedEventShouldFailover(payload, message)
+	case OpenAIUpstreamStreamReadErrorCode, OpenAIUpstreamHTTP2StreamErrorCode, OpenAIUpstreamStreamTruncatedCode:
+		// 上游中转站自己也跑 Sub2API：它到它上游的流断了，就用我们同一套传输码
+		// 推一个扁平 error 帧（{"type":"error","code":"upstream_stream_read_error"}）。
+		// 和请求内容无关，换个号就能成；输出后的重放边界仍由调用方控制。
+		return true
 	}
 	combined := strings.ToLower(strings.TrimSpace(message + " " +
 		gjson.GetBytes(payload, "error.message").String() + " " +
