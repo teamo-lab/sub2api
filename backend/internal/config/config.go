@@ -1028,6 +1028,26 @@ type UpstreamUploadWatchdogConfig struct {
 	WindowSeconds    int   `mapstructure:"window_seconds"`
 }
 
+// UpstreamBodyCompressionConfig 是上游请求体压缩的全局参数。开关在账号 extra.request_body_compression
+// （zstd | gzip），这里只管阈值、级别和兜底记忆时长；没开的账号不受影响。
+type UpstreamBodyCompressionConfig struct {
+	// MinBytes：请求体不小于这个字节数才压缩。
+	MinBytes int64 `mapstructure:"min_bytes"`
+	// ZstdLevel：zstd 级别（1–22，按 klauspost 映射到 fastest/default/better/best）。
+	ZstdLevel int `mapstructure:"zstd_level"`
+	// GzipLevel：gzip 级别（1–9）。
+	GzipLevel int `mapstructure:"gzip_level"`
+	// FallbackTTLSeconds：压缩请求体被上游当坏请求体拒绝、不压缩重发成功后，这个号多少秒内不再压缩。
+	FallbackTTLSeconds int `mapstructure:"fallback_ttl_seconds"`
+}
+
+const (
+	DefaultUpstreamBodyCompressionMinBytes           int64 = 16 * 1024
+	DefaultUpstreamBodyCompressionZstdLevel                = 3
+	DefaultUpstreamBodyCompressionGzipLevel                = 6
+	DefaultUpstreamBodyCompressionFallbackTTLSeconds       = 3600
+)
+
 // RequestBodyBudgetConfig 控制 API Key 鉴权之后的全局在途请求体预算（见
 // middleware.RequestBodyBudgetMiddleware）：限制同时在处理的大请求体总字节数，超出时新的大请求直接回
 // 503 + Retry-After。小于 MinBodyBytes 的请求不计入、也不会被拒绝；带 Content-Encoding 的按「压缩体 + 解出来的明文」
@@ -1098,6 +1118,8 @@ type GatewayConfig struct {
 	RawCapture RawCaptureConfig `mapstructure:"raw_capture"`
 	// UpstreamUploadWatchdog 盯住发往上游的大请求体：按最近的上传速度估算，传不完就提前中止这一跳并换号。
 	UpstreamUploadWatchdog UpstreamUploadWatchdogConfig `mapstructure:"upstream_upload_watchdog"`
+	// UpstreamBodyCompression 是按账号开启的上游请求体压缩的全局参数。
+	UpstreamBodyCompression UpstreamBodyCompressionConfig `mapstructure:"upstream_body_compression"`
 	// RequestBodyBudget 限制鉴权之后同时在处理的大请求体总字节数，给进程内存一个总量上界。
 	RequestBodyBudget RequestBodyBudgetConfig `mapstructure:"request_body_budget"`
 	// OpenAIFirstOutputTimeoutSeconds: native HTTP Responses 首个语义输出超时（秒），0表示禁用。
@@ -2575,6 +2597,10 @@ func setDefaults() {
 	viper.SetDefault("gateway.upstream_upload_watchdog.min_body_bytes", int64(8*1024*1024))
 	viper.SetDefault("gateway.upstream_upload_watchdog.max_upload_seconds", 180)
 	viper.SetDefault("gateway.upstream_upload_watchdog.window_seconds", 30)
+	viper.SetDefault("gateway.upstream_body_compression.min_bytes", DefaultUpstreamBodyCompressionMinBytes)
+	viper.SetDefault("gateway.upstream_body_compression.zstd_level", DefaultUpstreamBodyCompressionZstdLevel)
+	viper.SetDefault("gateway.upstream_body_compression.gzip_level", DefaultUpstreamBodyCompressionGzipLevel)
+	viper.SetDefault("gateway.upstream_body_compression.fallback_ttl_seconds", DefaultUpstreamBodyCompressionFallbackTTLSeconds)
 	viper.SetDefault("gateway.request_body_budget.max_inflight_bytes", int64(0))
 	viper.SetDefault("gateway.request_body_budget.min_body_bytes", int64(1024*1024))
 	viper.SetDefault("gateway.raw_capture.group_ids", []int64{})
@@ -3527,6 +3553,9 @@ func (c *Config) Validate() error {
 	}
 	if w := c.Gateway.UpstreamUploadWatchdog; w.Enabled && (w.MinBodyBytes <= 0 || w.MaxUploadSeconds <= 0 || w.WindowSeconds <= 0 || w.WindowSeconds > w.MaxUploadSeconds) {
 		return fmt.Errorf("gateway.upstream_upload_watchdog: min_body_bytes, max_upload_seconds and window_seconds must be positive, and window_seconds must not exceed max_upload_seconds")
+	}
+	if bc := c.Gateway.UpstreamBodyCompression; bc.MinBytes < 0 || bc.ZstdLevel < 0 || bc.ZstdLevel > 22 || bc.GzipLevel < 0 || bc.GzipLevel > 9 || bc.FallbackTTLSeconds < 0 {
+		return fmt.Errorf("gateway.upstream_body_compression: min_bytes and fallback_ttl_seconds must be non-negative, zstd_level in [0, 22], gzip_level in [0, 9]")
 	}
 	if c.Gateway.RequestBodyBudget.MinBodyBytes < 0 {
 		return fmt.Errorf("gateway.request_body_budget.min_body_bytes must be non-negative")
