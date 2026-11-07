@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/require"
@@ -418,4 +419,73 @@ func TestUpstreamBodyCompression_WiredIntoOpenAIAndAnthropicSendPaths(t *testing
 	require.NoError(t, err)
 	require.Same(t, req, plain.lastReq)
 	require.Equal(t, body, plain.lastBody)
+}
+
+// Anthropic 的请求构造用原始小写 key（content-type / content-length），Header.Get 查不到。
+func TestUpstreamBodyCompression_RawLowercaseHeaders(t *testing.T) {
+	body := compressionTestBody(64 << 10)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://upstream.example/v1/messages", bytes.NewReader(body))
+	require.NoError(t, err)
+	req.Header["content-type"] = []string{"application/json"}
+	req.Header["content-length"] = []string{strconv.Itoa(len(body))}
+	req.Header["anthropic-version"] = []string{"2023-06-01"}
+	cap := &capturedSend{}
+	_, err = sendUpstreamWithBodyCompressionUsing(req, compressionTestAccount(31, "zstd"), compressionTestSettings(), newUpstreamBodyCompressionBlocklist(), cap.send)
+	require.NoError(t, err)
+	sent := cap.reqs[0]
+	require.Equal(t, "zstd", sent.Header.Get("Content-Encoding"))
+	require.Equal(t, int64(len(cap.bodies[0])), sent.ContentLength)
+	require.Equal(t, []string{strconv.Itoa(len(cap.bodies[0]))}, sent.Header["content-length"])
+	require.Equal(t, []string{"application/json"}, sent.Header["content-type"])
+	require.Equal(t, []string{"2023-06-01"}, sent.Header["anthropic-version"])
+	require.Equal(t, body, decodeBody(t, "zstd", cap.bodies[0]))
+
+	// 原始小写的 content-encoding 也要认出来：已经编码过的不再压。
+	encoded, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://upstream.example/v1/messages", bytes.NewReader(body))
+	require.NoError(t, err)
+	encoded.Header["content-type"] = []string{"application/json"}
+	encoded.Header["content-encoding"] = []string{"gzip"}
+	cap = &capturedSend{}
+	_, err = sendUpstreamWithBodyCompressionUsing(encoded, compressionTestAccount(31, "zstd"), compressionTestSettings(), newUpstreamBodyCompressionBlocklist(), cap.send)
+	require.NoError(t, err)
+	require.Same(t, encoded, cap.reqs[0])
+}
+
+// 用真实的 Anthropic 请求构造（普通 API Key 和 passthrough）走 doAnthropicUpstreamWithTLS，上游收到的必须是压缩体。
+func TestUpstreamBodyCompression_RealAnthropicBuilders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := []byte(`{"model":"claude-opus-5-5","max_tokens":16,"stream":true,"system":"` + strings.Repeat("context line for compression ", 4000) + `","messages":[{"role":"user","content":"hi"}]}`)
+	cfg := &config.Config{Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false}}}
+	newCtx := func() *gin.Context {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+		c.Request.Header.Set("anthropic-version", "2023-06-01")
+		return c
+	}
+	for _, passthrough := range []bool{false, true} {
+		account := &Account{ID: 54, Name: "fluxion", Platform: PlatformAnthropic, Type: AccountTypeAPIKey, Concurrency: 1,
+			Credentials: map[string]any{"api_key": "sk-test", "base_url": "https://upstream.example"},
+			Extra:       map[string]any{AccountExtraRequestBodyCompression: "zstd"}}
+		if passthrough {
+			account.Extra["anthropic_passthrough"] = true
+		}
+		upstream := &httpUpstreamRecorder{resp: jsonResponse(http.StatusOK, `{"ok":true}`)}
+		svc := &GatewayService{cfg: cfg, httpUpstream: upstream}
+		var req *http.Request
+		var wire []byte
+		var err error
+		if passthrough {
+			req, wire, err = svc.buildUpstreamRequestAnthropicAPIKeyPassthrough(context.Background(), newCtx(), account, body, "sk-test")
+		} else {
+			req, wire, err = svc.buildUpstreamRequest(context.Background(), newCtx(), account, body, "sk-test", "apikey", "claude-opus-5-5", true, false)
+		}
+		require.NoError(t, err, "passthrough=%v", passthrough)
+		resp, err := svc.doAnthropicUpstreamWithTLS(req, "", account, nil)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		require.Equal(t, "zstd", upstream.lastReq.Header.Get("Content-Encoding"), "passthrough=%v", passthrough)
+		require.Less(t, len(upstream.lastBody), len(wire)/3)
+		require.Equal(t, wire, decodeBody(t, "zstd", upstream.lastBody), "passthrough=%v", passthrough)
+		require.Equal(t, int64(len(upstream.lastBody)), upstream.lastReq.ContentLength)
+	}
 }

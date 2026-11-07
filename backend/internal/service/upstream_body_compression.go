@@ -238,10 +238,12 @@ func upstreamBodyCompressionEncoding(req *http.Request, account *Account, settin
 	if req.Body == nil || req.Body == http.NoBody || req.GetBody == nil || req.ContentLength < settings.minBytes {
 		return ""
 	}
-	if strings.TrimSpace(req.Header.Get("Content-Encoding")) != "" {
+	// Anthropic 的请求构造用原始小写 key（content-type）保留线上大小写，Header.Get 查不到，
+	// 所以这里不区分大小写地查。
+	if strings.TrimSpace(headerValueFold(req.Header, "Content-Encoding")) != "" {
 		return ""
 	}
-	if !strings.Contains(strings.ToLower(req.Header.Get("Content-Type")), "json") {
+	if !strings.Contains(strings.ToLower(headerValueFold(req.Header, "Content-Type")), "json") {
 		return ""
 	}
 	if blocklist != nil && blocklist.blocked(account.ID) {
@@ -280,8 +282,11 @@ func buildCompressedUpstreamRequest(req *http.Request, encoding string, settings
 	out.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(compressed)), nil }
 	out.ContentLength = int64(len(compressed))
 	out.Header.Set("Content-Encoding", encoding)
-	if out.Header.Get("Content-Length") != "" {
-		out.Header.Set("Content-Length", strconv.Itoa(len(compressed)))
+	// 不管是规范 key 还是原始小写 key，带了 Content-Length 头的都改成压缩后长度。
+	for k := range out.Header {
+		if strings.EqualFold(k, "Content-Length") {
+			out.Header[k] = []string{strconv.Itoa(len(compressed))}
+		}
 	}
 	stats.Encoding = encoding
 	stats.SentBytes = out.ContentLength
@@ -327,6 +332,19 @@ func isUpstreamBodyParseRejection(status int, body []byte, complete bool) bool {
 		}
 	}
 	return false
+}
+
+// headerValueFold 不区分 key 的大小写取头的第一个值：先查规范 key，再扫原始 key。
+func headerValueFold(h http.Header, name string) string {
+	if v := h.Get(name); v != "" {
+		return v
+	}
+	for k, vals := range h {
+		if len(vals) > 0 && strings.EqualFold(k, name) {
+			return vals[0]
+		}
+	}
+	return ""
 }
 
 type upstreamSendFunc func(*http.Request) (*http.Response, error)
