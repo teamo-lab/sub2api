@@ -258,11 +258,13 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 	var usage *ClaudeUsage
 	var firstTokenMs *int
 	if clientStream {
+		sniffer := newGeminiUsageSniffer(resp.Body, account.Type == AccountTypeOAuth)
+		resp.Body = sniffer
 		streamRes, err := s.handleChatCompletionsStreamingResponseFromGemini(c, resp, startTime, originalModel, account.Type == AccountTypeOAuth, includeUsage)
 		if err != nil {
 			return nil, err
 		}
-		usage = streamRes.usage
+		usage = applyGeminiMissingUsageEstimate(account, streamRes.usage, sniffer, geminiReq, "chat_stream")
 		firstTokenMs = streamRes.firstTokenMs
 	} else if useUpstreamStream {
 		collected, usageObj, err := collectGeminiSSE(resp.Body, account.Type == AccountTypeOAuth)

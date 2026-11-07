@@ -1593,11 +1593,13 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 	var firstTokenMs *int
 
 	if stream {
+		sniffer := newGeminiUsageSniffer(resp.Body, isOAuth)
+		resp.Body = sniffer
 		streamRes, err := s.handleNativeStreamingResponse(c, resp, startTime, isOAuth)
 		if err != nil {
 			return nil, err
 		}
-		usage = streamRes.usage
+		usage = applyGeminiMissingUsageEstimate(account, streamRes.usage, sniffer, body, "native_stream")
 		firstTokenMs = streamRes.firstTokenMs
 	} else {
 		if useUpstreamStream {
