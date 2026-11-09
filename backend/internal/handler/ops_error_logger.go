@@ -464,6 +464,16 @@ func setOpsEndpointContext(c *gin.Context, upstreamModel string, requestType int
 	c.Set(opsRequestTypeKey, requestType)
 }
 
+// setOpsSelectedServiceAccount records a selected account and, for Teamo
+// Router contract v2 callers, its configured cost multiplier.
+func setOpsSelectedServiceAccount(c *gin.Context, account *service.Account) {
+	if account == nil {
+		return
+	}
+	setOpsSelectedAccount(c, account.ID, account.Platform)
+	service.RecordRouterUpstreamAccountCostRate(c, account)
+}
+
 func setOpsSelectedAccount(c *gin.Context, accountID int64, platform ...string) {
 	if c == nil || accountID <= 0 {
 		return
