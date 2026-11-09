@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -99,4 +100,55 @@ func TestRouterUpstreamAttemptsStartUnknown(t *testing.T) {
 
 	BeginRouterUpstreamAttempts(c)
 	require.JSONEq(t, `[{"account_id":0,"result":"pending"}]`, recorder.Header().Get(RouterAttemptsHeader))
+}
+
+func TestRouterUpstreamAccountCostRatesFollowSelectedAccounts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-4-argon:generateContent", nil)
+	c.Request.Header.Set(RouterContractHeader, RouterContractV2)
+
+	cheap, mid, zero := 0.45, 0.8, 0.0
+	RecordRouterUpstreamAccountCostRate(c, &Account{ID: 1118, RateMultiplier: &cheap})
+	RecordRouterUpstreamAccountCostRate(c, &Account{ID: 1119, RateMultiplier: &mid})
+	RecordRouterUpstreamAccountCostRate(c, &Account{ID: 7, RateMultiplier: &zero})
+	RecordRouterUpstreamAccountCostRate(c, &Account{ID: 1120})
+
+	var rates map[string]float64
+	require.NoError(t, json.Unmarshal([]byte(recorder.Header().Get(RouterAccountRatesHeader)), &rates))
+	require.Equal(t, map[string]float64{"1118": 0.45, "1119": 0.8, "7": 0}, rates)
+}
+
+func TestRouterUpstreamAccountCostRatesRejectInvalidOrPublicCallers(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	negative, nan := -1.0, math.NaN()
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Request.Header.Set(RouterContractHeader, RouterContractV2)
+	RecordRouterUpstreamAccountCostRate(c, &Account{ID: 1, RateMultiplier: &negative})
+	RecordRouterUpstreamAccountCostRate(c, &Account{ID: 2, RateMultiplier: &nan})
+	RecordRouterUpstreamAccountCostRate(c, nil)
+	require.Empty(t, recorder.Header().Get(RouterAccountRatesHeader))
+
+	cheap := 0.45
+	public := httptest.NewRecorder()
+	pc, _ := gin.CreateTestContext(public)
+	pc.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	RecordRouterUpstreamAccountCostRate(pc, &Account{ID: 1118, RateMultiplier: &cheap})
+	require.Empty(t, public.Header().Get(RouterAccountRatesHeader))
+}
+
+func TestRouterUpstreamAccountCostRatesNotWrittenAfterResponse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Request.Header.Set(RouterContractHeader, RouterContractV2)
+	c.String(http.StatusOK, "committed")
+	cheap := 0.45
+	RecordRouterUpstreamAccountCostRate(c, &Account{ID: 1118, RateMultiplier: &cheap})
+	require.Empty(t, recorder.Header().Get(RouterAccountRatesHeader))
 }
