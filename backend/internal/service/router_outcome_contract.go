@@ -2,6 +2,8 @@ package service
 
 import (
 	"encoding/json"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -218,4 +220,47 @@ func maxInt64(left, right int64) int64 {
 		return left
 	}
 	return right
+}
+
+// RouterAccountRatesHeader carries the cost multiplier (RMB per official USD,
+// the same Account.RateMultiplier written to usage_logs.account_rate_multiplier)
+// of every account this request selected, keyed by Sub2API's positive account
+// id. It is a separate header so Routers that pin the attempts schema keep
+// working; Router prices provider cost by the last attempted account.
+const (
+	RouterAccountRatesHeader = "x-teamo-upstream-account-rates"
+	routerAccountRatesKey    = "router_upstream_account_rates"
+)
+
+// RecordRouterUpstreamAccountCostRate publishes the selected account's
+// configured cost multiplier. Accounts without an explicit, finite,
+// non-negative multiplier are omitted so Router keeps its group-rate fallback
+// instead of trusting BillingRateMultiplier's implicit 1.0 default.
+func RecordRouterUpstreamAccountCostRate(c *gin.Context, account *Account) {
+	if account == nil || account.ID <= 0 || account.RateMultiplier == nil || !RouterContractV2Requested(c) {
+		return
+	}
+	rate := *account.RateMultiplier
+	if math.IsNaN(rate) || math.IsInf(rate, 0) || rate < 0 {
+		return
+	}
+	rates, _ := c.Get(routerAccountRatesKey)
+	state, _ := rates.(map[string]float64)
+	if state == nil {
+		state = make(map[string]float64)
+		c.Set(routerAccountRatesKey, state)
+	}
+	key := strconv.FormatInt(account.ID, 10)
+	if current, ok := state[key]; ok && current == rate {
+		return
+	}
+	if _, ok := state[key]; !ok && len(state) >= maxRouterAttempts {
+		return
+	}
+	state[key] = rate
+	payload, err := json.Marshal(state)
+	if err != nil {
+		return
+	}
+	setRouterPrivateHeader(c, RouterAccountRatesHeader, string(payload))
 }
