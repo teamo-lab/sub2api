@@ -376,13 +376,15 @@ func TestUpstreamBodyCompression_BlocklistExpires(t *testing.T) {
 func TestUpstreamBodyCompression_ResolveSettings(t *testing.T) {
 	s := resolveUpstreamBodyCompressionSettings(nil)
 	require.Equal(t, int64(16<<10), s.minBytes)
+	require.Equal(t, int64(60<<20), s.maxBytes)
 	require.Equal(t, 3, s.zstdLevel)
 	require.Equal(t, time.Hour, s.fallbackTTL)
 
 	cfg := &config.Config{}
-	cfg.Gateway.UpstreamBodyCompression = config.UpstreamBodyCompressionConfig{MinBytes: 1024, ZstdLevel: 9, GzipLevel: 1, FallbackTTLSeconds: 60}
+	cfg.Gateway.UpstreamBodyCompression = config.UpstreamBodyCompressionConfig{MinBytes: 1024, MaxBytes: 4096, ZstdLevel: 9, GzipLevel: 1, FallbackTTLSeconds: 60}
 	s = resolveUpstreamBodyCompressionSettings(cfg)
 	require.Equal(t, int64(1024), s.minBytes)
+	require.Equal(t, int64(4096), s.maxBytes)
 	require.Equal(t, 9, s.zstdLevel)
 	require.Equal(t, 1, s.gzipLevel)
 	require.Equal(t, time.Minute, s.fallbackTTL)
@@ -488,4 +490,46 @@ func TestUpstreamBodyCompression_RealAnthropicBuilders(t *testing.T) {
 		require.Equal(t, wire, decodeBody(t, "zstd", upstream.lastBody), "passthrough=%v", passthrough)
 		require.Equal(t, int64(len(upstream.lastBody)), upstream.lastReq.ContentLength)
 	}
+}
+
+// 超过 max_bytes 的请求体原样发（codebot 对解压后超过 64 MiB 的请求体回 400 "Failed to parse request body"）；
+// 恰好等于上限时仍然压缩。
+func TestUpstreamBodyCompression_AboveMaxBytesIsUnchanged(t *testing.T) {
+	body := compressionTestBody(64 << 10)
+	settings := compressionTestSettings()
+	settings.maxBytes = int64(len(body)) - 1
+	req := compressionTestRequest(t, body)
+	wantHeader := req.Header.Clone()
+	cap := &capturedSend{}
+	_, err := sendUpstreamWithBodyCompressionUsing(req, compressionTestAccount(41, "zstd"), settings, newUpstreamBodyCompressionBlocklist(), cap.send)
+	require.NoError(t, err)
+	require.Len(t, cap.reqs, 1)
+	require.Same(t, req, cap.reqs[0])
+	require.Equal(t, body, cap.bodies[0])
+	require.Equal(t, wantHeader, cap.reqs[0].Header)
+
+	settings.maxBytes = int64(len(body))
+	cap = &capturedSend{}
+	_, err = sendUpstreamWithBodyCompressionUsing(compressionTestRequest(t, body), compressionTestAccount(41, "zstd"), settings, newUpstreamBodyCompressionBlocklist(), cap.send)
+	require.NoError(t, err)
+	require.Equal(t, "zstd", cap.reqs[0].Header.Get("Content-Encoding"))
+	require.Equal(t, body, decodeBody(t, "zstd", cap.bodies[0]))
+}
+
+// 默认上限 60 MiB：一个 61 MiB 的请求体不读、不压，直接原样交出去。
+func TestUpstreamBodyCompression_DefaultMaxBytesSkipsHugeBodies(t *testing.T) {
+	settings := compressionTestSettings()
+	require.Equal(t, config.DefaultUpstreamBodyCompressionMaxBytes, settings.maxBytes)
+	huge := bytes.Repeat([]byte("a"), int(settings.maxBytes)+1<<20)
+	req := compressionTestRequest(t, huge)
+	getBodyCalls := 0
+	orig := req.GetBody
+	req.GetBody = func() (io.ReadCloser, error) { getBodyCalls++; return orig() }
+	cap := &capturedSend{}
+	_, err := sendUpstreamWithBodyCompressionUsing(req, compressionTestAccount(42, "zstd"), settings, newUpstreamBodyCompressionBlocklist(), cap.send)
+	require.NoError(t, err)
+	require.Same(t, req, cap.reqs[0])
+	require.Empty(t, cap.reqs[0].Header.Get("Content-Encoding"))
+	require.Equal(t, 0, getBodyCalls, "a body above the cap must not be read for compression")
+	require.Len(t, cap.bodies[0], len(huge))
 }

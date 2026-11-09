@@ -1033,6 +1033,9 @@ type UpstreamUploadWatchdogConfig struct {
 type UpstreamBodyCompressionConfig struct {
 	// MinBytes：请求体不小于这个字节数才压缩。
 	MinBytes int64 `mapstructure:"min_bytes"`
+	// MaxBytes：请求体超过这个字节数就不压缩、原样发。部分上游（实测 codebot）对解压后的请求体有 64 MiB
+	// 上限，超过就回「Failed to parse request body」，而同样大小的原文能正常处理。<=0 用默认值。
+	MaxBytes int64 `mapstructure:"max_bytes"`
 	// ZstdLevel：zstd 级别（1–22，按 klauspost 映射到 fastest/default/better/best）。
 	ZstdLevel int `mapstructure:"zstd_level"`
 	// GzipLevel：gzip 级别（1–9）。
@@ -1043,6 +1046,7 @@ type UpstreamBodyCompressionConfig struct {
 
 const (
 	DefaultUpstreamBodyCompressionMinBytes           int64 = 16 * 1024
+	DefaultUpstreamBodyCompressionMaxBytes           int64 = 60 * 1024 * 1024
 	DefaultUpstreamBodyCompressionZstdLevel                = 3
 	DefaultUpstreamBodyCompressionGzipLevel                = 6
 	DefaultUpstreamBodyCompressionFallbackTTLSeconds       = 3600
@@ -2598,6 +2602,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.upstream_upload_watchdog.max_upload_seconds", 180)
 	viper.SetDefault("gateway.upstream_upload_watchdog.window_seconds", 30)
 	viper.SetDefault("gateway.upstream_body_compression.min_bytes", DefaultUpstreamBodyCompressionMinBytes)
+	viper.SetDefault("gateway.upstream_body_compression.max_bytes", DefaultUpstreamBodyCompressionMaxBytes)
 	viper.SetDefault("gateway.upstream_body_compression.zstd_level", DefaultUpstreamBodyCompressionZstdLevel)
 	viper.SetDefault("gateway.upstream_body_compression.gzip_level", DefaultUpstreamBodyCompressionGzipLevel)
 	viper.SetDefault("gateway.upstream_body_compression.fallback_ttl_seconds", DefaultUpstreamBodyCompressionFallbackTTLSeconds)

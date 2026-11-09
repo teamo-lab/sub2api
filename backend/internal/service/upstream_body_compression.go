@@ -64,6 +64,7 @@ func (a *Account) RequestBodyCompression() string {
 
 type upstreamBodyCompressionSettings struct {
 	minBytes    int64
+	maxBytes    int64
 	zstdLevel   int
 	gzipLevel   int
 	fallbackTTL time.Duration
@@ -72,6 +73,7 @@ type upstreamBodyCompressionSettings struct {
 func resolveUpstreamBodyCompressionSettings(cfg *config.Config) upstreamBodyCompressionSettings {
 	s := upstreamBodyCompressionSettings{
 		minBytes:    config.DefaultUpstreamBodyCompressionMinBytes,
+		maxBytes:    config.DefaultUpstreamBodyCompressionMaxBytes,
 		zstdLevel:   config.DefaultUpstreamBodyCompressionZstdLevel,
 		gzipLevel:   config.DefaultUpstreamBodyCompressionGzipLevel,
 		fallbackTTL: time.Duration(config.DefaultUpstreamBodyCompressionFallbackTTLSeconds) * time.Second,
@@ -82,6 +84,9 @@ func resolveUpstreamBodyCompressionSettings(cfg *config.Config) upstreamBodyComp
 	c := cfg.Gateway.UpstreamBodyCompression
 	if c.MinBytes > 0 {
 		s.minBytes = c.MinBytes
+	}
+	if c.MaxBytes > 0 {
+		s.maxBytes = c.MaxBytes
 	}
 	if c.ZstdLevel > 0 {
 		s.zstdLevel = c.ZstdLevel
@@ -236,6 +241,11 @@ func upstreamBodyCompressionEncoding(req *http.Request, account *Account, settin
 	}
 	// 只压缩能重放、长度已知的请求体：兜底重发要从 GetBody 再拿一份原文。
 	if req.Body == nil || req.Body == http.NoBody || req.GetBody == nil || req.ContentLength < settings.minBytes {
+		return ""
+	}
+	// 超大请求体原样发：有的上游对解压后的大小有上限（codebot 64 MiB），超过会当成坏请求体拒绝，
+	// 而同样大小的原文能正常处理。这类请求很少，原样发和不开压缩时完全一样。
+	if settings.maxBytes > 0 && req.ContentLength > settings.maxBytes {
 		return ""
 	}
 	// Anthropic 的请求构造用原始小写 key（content-type）保留线上大小写，Header.Get 查不到，
