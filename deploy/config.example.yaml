@@ -273,6 +273,7 @@ gateway:
   # 压缩发送被当坏请求体拒绝（400/415）时不压缩重发一次，并在 fallback_ttl_seconds 内对该号停用压缩。
   upstream_body_compression:
     min_bytes: 16384            # compress only bodies >= 16 KiB
+    max_bytes: 62914560         # send bodies > 60 MiB as-is (some upstreams cap the decompressed body at 64 MiB)
     zstd_level: 3
     gzip_level: 6
     fallback_ttl_seconds: 3600
