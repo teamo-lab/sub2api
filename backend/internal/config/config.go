@@ -1115,6 +1115,11 @@ type GatewayConfig struct {
 	// 中和 $ref 同级的注释字段（description/title 等）会被删掉，避免上游严格模式报
 	// "$ref cannot have keywords"。为空表示不启用。
 	OpenAIStripSchemaRefSiblingsGroupIDs []int64 `mapstructure:"openai_strip_schema_ref_siblings_group_ids"`
+	// OpenAIFixSchemaRefURIGroupIDs 分组白名单：这些分组的 OpenAI 请求里，json_schema 与工具参数中
+	// 不是合法 URI 引用的 $ref（比如 Springfox 生成的 "#/components/schemas/Page«User»"，上游报
+	// `is not a "uri-reference"`）会被修好：指向的定义在同一份 schema 里就百分号编码（指向不变），
+	// 找不到就去掉这个 $ref（只放松这一个字段）。为空表示不启用。
+	OpenAIFixSchemaRefURIGroupIDs []int64 `mapstructure:"openai_fix_schema_ref_uri_group_ids"`
 	// ExposeOneAPIRequestID 在网关响应头（含错误响应）里回 X-Oneapi-Request-Id = client_request_id，
 	// 前置的 new-api 会把它记进 logs.upstream_request_id，从而串上本机的 usage_logs / ops_error_logs。默认关闭。
 	ExposeOneAPIRequestID bool `mapstructure:"expose_oneapi_request_id"`
@@ -2595,6 +2600,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.teamo_relay_enabled", false)
 	viper.SetDefault("gateway.teamo_relay_group_ids", []int64{})
 	viper.SetDefault("gateway.openai_strip_schema_ref_siblings_group_ids", []int64{})
+	viper.SetDefault("gateway.openai_fix_schema_ref_uri_group_ids", []int64{})
 	viper.SetDefault("gateway.expose_oneapi_request_id", false)
 	viper.SetDefault("gateway.raw_capture.enabled", false)
 	viper.SetDefault("gateway.upstream_upload_watchdog.enabled", true)
@@ -3594,6 +3600,11 @@ func (c *Config) Validate() error {
 	for _, groupID := range c.Gateway.OpenAIStripSchemaRefSiblingsGroupIDs {
 		if groupID <= 0 {
 			return fmt.Errorf("gateway.openai_strip_schema_ref_siblings_group_ids must contain positive group IDs")
+		}
+	}
+	for _, groupID := range c.Gateway.OpenAIFixSchemaRefURIGroupIDs {
+		if groupID <= 0 {
+			return fmt.Errorf("gateway.openai_fix_schema_ref_uri_group_ids must contain positive group IDs")
 		}
 	}
 	if rc := c.Gateway.RawCapture; rc.Enabled {

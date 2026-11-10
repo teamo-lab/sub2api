@@ -83,7 +83,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 		return nil, err
 	}
 
-	body = s.stripOpenAISchemaRefSiblingsForGroup(c, body)
+	body = s.applyOpenAISchemaRefCompatForGroup(c, body)
 	restrictionResult := s.detectCodexClientRestriction(c, account, body)
 	logCodexCLIOnlyDetection(ctx, c, account, getAPIKeyIDFromContext(c), restrictionResult, body)
 	if restrictionResult.Enabled && !restrictionResult.Matched {

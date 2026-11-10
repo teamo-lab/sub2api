@@ -137,13 +137,7 @@ func (p *openAIResponsesToolSchemaParser) addRefSiblingEdits(members []openAIRes
 // response_format.json_schema.schema). Untouched bytes, including property
 // order, are preserved.
 func stripOpenAISchemaRefAnnotationSiblings(body []byte) ([]byte, bool, error) {
-	if len(body) == 0 || !bytes.Contains(body, []byte("$ref")) {
-		return body, false, nil
-	}
-	return sanitizeOpenAIResponsesToolSchemas(body, openAIResponsesToolSchemaOptions{
-		stripRefAnnotationSiblings:   true,
-		includeResponseFormatSchemas: true,
-	})
+	return sanitizeOpenAISchemaRefs(body, true, false)
 }
 
 func openAIResponsesBodyMayContainRegexLookaround(body []byte) bool {
@@ -171,6 +165,12 @@ type openAIResponsesToolSchemaOptions struct {
 	// includeResponseFormatSchemas also walks text.format.schema (Responses)
 	// and response_format.json_schema.schema (Chat Completions).
 	includeResponseFormatSchemas bool
+	// fixInvalidRefURIs repairs $ref values that are not RFC 3986 URI
+	// references (OpenAI rejects them with `"..." is not a "uri-reference"`),
+	// e.g. Springfox generic names like "#/components/schemas/Page«User»".
+	// A ref that resolves inside its schema root is percent-encoded, which keeps
+	// the same target; a ref that cannot resolve is dropped.
+	fixInvalidRefURIs bool
 }
 
 type openAIResponsesToolSchemaContext uint8
@@ -207,6 +207,10 @@ type openAIResponsesToolSchemaParser struct {
 	options   openAIResponsesToolSchemaOptions
 	edits     []openAIResponsesToolSchemaEdit
 	probeType string
+	// refRoot is the schema root (tool parameters / response format schema)
+	// that the current $ref values resolve against. It is decoded lazily, only
+	// when an invalid $ref is found.
+	refRoot openAIResponsesRefRoot
 }
 
 func sanitizeOpenAIResponsesToolSchemas(
@@ -328,13 +332,26 @@ func (p *openAIResponsesToolSchemaParser) parseObject(
 		valueStart := p.pos
 
 		childContext, childSchemaRoot := openAIResponsesToolSchemaChildContext(context, key, p.options)
+		enclosingRefRoot := p.refRoot
+		if childSchemaRoot && p.options.fixInvalidRefURIs {
+			p.refRoot = openAIResponsesRefRoot{start: valueStart, set: true}
+		}
 		if err := p.parseValue(childContext, childSchemaRoot, depth); err != nil {
 			return err
 		}
+		p.refRoot = enclosingRefRoot
 		valueEnd := p.pos
 		p.skipWhitespace()
 
 		deleteMember := false
+		isRefKey := context == openAIResponsesToolSchema && openAIResponsesJSONStringEquals(key, "$ref")
+		if isRefKey && p.options.fixInvalidRefURIs {
+			drop, err := p.fixInvalidRefURI(valueStart, valueEnd)
+			if err != nil {
+				return err
+			}
+			deleteMember = drop
+		}
 		if context == openAIResponsesToolSchemaTypeProbe && openAIResponsesJSONStringEquals(key, "type") {
 			if value, ok := decodeOpenAIResponsesJSONStringValue(p.body[valueStart:valueEnd]); ok {
 				p.probeType = strings.TrimSpace(value)
@@ -363,7 +380,8 @@ func (p *openAIResponsesToolSchemaParser) parseObject(
 		}
 
 		if trackRefSiblings {
-			isRef := openAIResponsesJSONStringEquals(key, "$ref")
+			// A dropped $ref no longer anchors its annotation siblings.
+			isRef := isRefKey && !deleteMember
 			hasRef = hasRef || isRef
 			refSiblings = append(refSiblings, openAIResponsesRefSibling{
 				start:      memberStart,
@@ -818,4 +836,185 @@ func applyOpenAIResponsesToolSchemaEdits(
 		return nil, false, fmt.Errorf("sanitize OpenAI Responses tool schemas: patch produced invalid JSON")
 	}
 	return sanitized, true, nil
+}
+
+// openAIResponsesRefRoot is the schema document that local $ref pointers in the
+// current tool parameters / response format schema resolve against.
+type openAIResponsesRefRoot struct {
+	start   int
+	set     bool
+	decoded bool
+	ok      bool
+	value   any
+}
+
+// fixInvalidRefURI repairs one $ref member value. It returns true when the
+// member must be dropped because the reference cannot resolve.
+func (p *openAIResponsesToolSchemaParser) fixInvalidRefURI(valueStart, valueEnd int) (bool, error) {
+	ref, ok := decodeOpenAIResponsesJSONStringValue(p.body[valueStart:valueEnd])
+	if !ok || openAIResponsesRefIsURIReference(ref) {
+		return false, nil
+	}
+	switch p.resolveRef(ref) {
+	case openAIResponsesRefResolved:
+		// Percent-encoding only touches bytes a URI reference may not contain,
+		// and JSON Pointer fragments are percent-decoded before evaluation
+		// (RFC 6901 section 6), so the encoded ref names the same target.
+		return false, p.addEdit(valueStart, valueEnd, `"`+openAIResponsesEncodeRefURI(ref)+`"`)
+	case openAIResponsesRefDangling:
+		return true, nil
+	default:
+		// The schema root could not be decoded: leave the request as sent and
+		// let the upstream report its own error.
+		return false, nil
+	}
+}
+
+type openAIResponsesRefResolution uint8
+
+const (
+	openAIResponsesRefUnknown openAIResponsesRefResolution = iota
+	openAIResponsesRefResolved
+	openAIResponsesRefDangling
+)
+
+func (p *openAIResponsesToolSchemaParser) resolveRef(ref string) openAIResponsesRefResolution {
+	if !p.refRoot.set {
+		return openAIResponsesRefUnknown
+	}
+	if !p.refRoot.decoded {
+		p.refRoot.decoded = true
+		decoder := json.NewDecoder(bytes.NewReader(p.body[p.refRoot.start:]))
+		decoder.UseNumber()
+		p.refRoot.ok = decoder.Decode(&p.refRoot.value) == nil
+	}
+	if !p.refRoot.ok {
+		return openAIResponsesRefUnknown
+	}
+	fragment, local := strings.CutPrefix(ref, "#")
+	if !local {
+		// An external document is never fetched by the upstream.
+		return openAIResponsesRefDangling
+	}
+	pointer := openAIResponsesPercentDecode(fragment)
+	if pointer == "" {
+		return openAIResponsesRefResolved
+	}
+	if !strings.HasPrefix(pointer, "/") {
+		// Plain-name fragments ($anchor) are not looked up here.
+		return openAIResponsesRefDangling
+	}
+	node := p.refRoot.value
+	for _, token := range strings.Split(pointer[1:], "/") {
+		token = strings.ReplaceAll(strings.ReplaceAll(token, "~1", "/"), "~0", "~")
+		switch current := node.(type) {
+		case map[string]any:
+			next, ok := current[token]
+			if !ok {
+				return openAIResponsesRefDangling
+			}
+			node = next
+		case []any:
+			index, err := strconv.Atoi(token)
+			if err != nil || index < 0 || index >= len(current) || (len(token) > 1 && token[0] == '0') {
+				return openAIResponsesRefDangling
+			}
+			node = current[index]
+		default:
+			return openAIResponsesRefDangling
+		}
+	}
+	return openAIResponsesRefResolved
+}
+
+// openAIResponsesRefIsURIReference reports whether ref only uses characters an
+// RFC 3986 URI reference may contain. It is a character-level check, which is
+// what the upstream "uri-reference" format rejects in practice.
+func openAIResponsesRefIsURIReference(ref string) bool {
+	head, fragment, hasFragment := strings.Cut(ref, "#")
+	return openAIResponsesURIPartValid(head, false) && (!hasFragment || openAIResponsesURIPartValid(fragment, true))
+}
+
+func openAIResponsesURIPartValid(part string, fragment bool) bool {
+	for i := 0; i < len(part); i++ {
+		b := part[i]
+		if b == '%' {
+			if i+2 >= len(part) || !isOpenAIResponsesJSONHexDigit(part[i+1]) || !isOpenAIResponsesJSONHexDigit(part[i+2]) {
+				return false
+			}
+			i += 2
+			continue
+		}
+		if !openAIResponsesURIByteAllowed(b, fragment) {
+			return false
+		}
+	}
+	return true
+}
+
+func openAIResponsesURIByteAllowed(b byte, fragment bool) bool {
+	if b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' {
+		return true
+	}
+	switch b {
+	case '-', '.', '_', '~', '!', '$', '&', '\'', '(', ')', '*', '+', ',', ';', '=', ':', '@', '/', '?':
+		return true
+	case '[', ']':
+		// Only legal in an IP-literal authority, never in a fragment.
+		return !fragment
+	}
+	return false
+}
+
+// openAIResponsesEncodeRefURI percent-encodes every byte a URI reference may
+// not contain, keeping existing valid escapes. The result is plain ASCII with
+// no quote or backslash, so it can be written into JSON without escaping.
+func openAIResponsesEncodeRefURI(ref string) string {
+	head, fragment, hasFragment := strings.Cut(ref, "#")
+	out := openAIResponsesEncodeURIPart(head, false)
+	if hasFragment {
+		out += "#" + openAIResponsesEncodeURIPart(fragment, true)
+	}
+	return out
+}
+
+func openAIResponsesEncodeURIPart(part string, fragment bool) string {
+	const hex = "0123456789ABCDEF"
+	var b strings.Builder
+	for i := 0; i < len(part); i++ {
+		c := part[i]
+		if c == '%' && i+2 < len(part) && isOpenAIResponsesJSONHexDigit(part[i+1]) && isOpenAIResponsesJSONHexDigit(part[i+2]) {
+			b.WriteString(part[i : i+3])
+			i += 2
+			continue
+		}
+		if c != '%' && openAIResponsesURIByteAllowed(c, fragment) {
+			b.WriteByte(c)
+			continue
+		}
+		b.WriteByte('%')
+		b.WriteByte(hex[c>>4])
+		b.WriteByte(hex[c&0x0f])
+	}
+	return b.String()
+}
+
+// openAIResponsesPercentDecode decodes valid %XX escapes and leaves anything
+// else as it is, so a raw (unencoded) pointer and its encoded form decode to the
+// same string.
+func openAIResponsesPercentDecode(value string) string {
+	if !strings.Contains(value, "%") {
+		return value
+	}
+	var b strings.Builder
+	for i := 0; i < len(value); i++ {
+		if value[i] == '%' && i+2 < len(value) && isOpenAIResponsesJSONHexDigit(value[i+1]) && isOpenAIResponsesJSONHexDigit(value[i+2]) {
+			n, _ := strconv.ParseUint(value[i+1:i+3], 16, 8)
+			b.WriteByte(byte(n))
+			i += 2
+			continue
+		}
+		b.WriteByte(value[i])
+	}
+	return b.String()
 }

@@ -78,12 +78,12 @@ func TestStripOpenAISchemaRefSiblingsForGroupHonorsAllowlist(t *testing.T) {
 	cfg.Gateway.OpenAIStripSchemaRefSiblingsGroupIDs = []int64{2}
 	svc := &OpenAIGatewayService{cfg: cfg}
 
-	require.NotContains(t, string(svc.stripOpenAISchemaRefSiblingsForGroup(newCtx(&two), body)), "description")
-	require.Equal(t, string(body), string(svc.stripOpenAISchemaRefSiblingsForGroup(newCtx(&three), body)))
-	require.Equal(t, string(body), string(svc.stripOpenAISchemaRefSiblingsForGroup(newCtx(nil), body)))
+	require.NotContains(t, string(svc.applyOpenAISchemaRefCompatForGroup(newCtx(&two), body)), "description")
+	require.Equal(t, string(body), string(svc.applyOpenAISchemaRefCompatForGroup(newCtx(&three), body)))
+	require.Equal(t, string(body), string(svc.applyOpenAISchemaRefCompatForGroup(newCtx(nil), body)))
 
 	disabled := &OpenAIGatewayService{cfg: &config.Config{}}
-	require.Equal(t, string(body), string(disabled.stripOpenAISchemaRefSiblingsForGroup(newCtx(&two), body)))
+	require.Equal(t, string(body), string(disabled.applyOpenAISchemaRefCompatForGroup(newCtx(&two), body)))
 }
 
 func indexOf(body []byte, needle string) int {
