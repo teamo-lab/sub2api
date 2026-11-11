@@ -381,6 +381,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			ms := int(time.Since(startTime).Milliseconds())
 			firstTokenMs = &ms
 			requestprofile.Mark(c.Request.Context(), "first_semantic", 0)
+			markOpenAIRouteFirstToken(c)
 		}
 		eventStartsClientOutput = false
 		eventStartsTTFTOutput = false
@@ -860,6 +861,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				ms := int(time.Since(startTime).Milliseconds())
 				firstTokenMs = &ms
 				requestprofile.Mark(c.Request.Context(), "first_semantic", 0)
+				markOpenAIRouteFirstToken(c)
 				stopFirstOutputTimer()
 			}
 			s.parseSSEUsageBytesWithType(dataBytes, eventType, usage)
