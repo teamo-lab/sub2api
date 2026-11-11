@@ -255,10 +255,13 @@ type openAIRouteTicket struct {
 	shape     string
 	start     time.Time
 	firstAt   time.Time
-	done      bool
-	stats     *openAIRouteStats
-	decision  *OpenAIRouteDecision
-	halfLife  float64
+	// stream：客户端要的是流式。非流式请求不一定会走到 first_semantic，
+	// 等首字超时不能当成挂住，只计入在途。
+	stream   bool
+	done     bool
+	stats    *openAIRouteStats
+	decision *OpenAIRouteDecision
+	halfLife float64
 }
 
 // openAIRouteCellKey 是「账号 × 请求档位」格子。
@@ -321,7 +324,7 @@ func openAIRouteShape(model, effort, band string) string {
 	return model + "|" + effort + "|" + band
 }
 
-func (st *openAIRouteStats) startTicket(accountID int64, model, shape string, decision *OpenAIRouteDecision, halfLife float64, now time.Time) *openAIRouteTicket {
+func (st *openAIRouteStats) startTicket(accountID int64, model, shape string, stream bool, decision *OpenAIRouteDecision, halfLife float64, now time.Time) *openAIRouteTicket {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.nextID++
@@ -331,6 +334,7 @@ func (st *openAIRouteStats) startTicket(accountID int64, model, shape string, de
 		model:     model,
 		shape:     shape,
 		start:     now,
+		stream:    stream,
 		stats:     st,
 		decision:  decision,
 		halfLife:  halfLife,
@@ -522,6 +526,7 @@ func (st *openAIRouteStats) estimateLocked(account *Account, shape string, fit o
 
 	stallThreshold := math.Max(est.PredMs*cfg.StallFactor, cfg.StallMinMs)
 	maxStallAge := 0.0
+	streamInflight := 0
 	for id, t := range st.inflight[account.ID] {
 		age := float64(now.Sub(t.start).Milliseconds())
 		if now.Sub(t.start) > openAIRouteTicketMaxAge {
@@ -529,6 +534,10 @@ func (st *openAIRouteStats) estimateLocked(account *Account, shape string, fit o
 			continue
 		}
 		est.Inflight++
+		if !t.stream {
+			continue
+		}
+		streamInflight++
 		if t.firstAt.IsZero() && age > stallThreshold {
 			est.Stalled++
 			if age > maxStallAge {
@@ -536,8 +545,8 @@ func (st *openAIRouteStats) estimateLocked(account *Account, shape string, fit o
 			}
 		}
 	}
-	if est.Inflight > 0 && est.Stalled > 0 {
-		est.StallMs = float64(est.Stalled) / float64(est.Inflight) * maxStallAge
+	if streamInflight > 0 && est.Stalled > 0 {
+		est.StallMs = float64(est.Stalled) / float64(streamInflight) * maxStallAge
 	}
 	if d := st.errs[account.ID]; d != nil {
 		mean, w := d.value(now, cfg.HalfLifeSec)
@@ -778,8 +787,9 @@ func openAIRouteSoftOrder(items []accountWithLoad, estimates []openAIRouteEstima
 // ---------------------------------------------------------------------------
 
 // StartOpenAIRouteAttempt 在转发前调用：把本次选号的实验决策挂到 gin 上下文并登记在途。
+// stream 是客户端是否要流式；只有流式请求参与挂住判定。
 // 不在实验里时什么都不做。重复调用会先结束上一张未结束的票据（按失败计）。
-func (s *OpenAIGatewayService) StartOpenAIRouteAttempt(c *gin.Context, selection *AccountSelectionResult) {
+func (s *OpenAIGatewayService) StartOpenAIRouteAttempt(c *gin.Context, selection *AccountSelectionResult, stream bool) {
 	if s == nil || c == nil {
 		return
 	}
@@ -794,7 +804,7 @@ func (s *OpenAIGatewayService) StartOpenAIRouteAttempt(c *gin.Context, selection
 	d.Picked = selection.Account.ID
 	st := s.openAIRouteStats()
 	cfg, _ := s.openAIRouteABRuntimeConfig(c.Request.Context())
-	t := st.startTicket(selection.Account.ID, d.model, d.shape, d, cfg.HalfLifeSec, time.Now())
+	t := st.startTicket(selection.Account.ID, d.model, d.shape, stream, d, cfg.HalfLifeSec, time.Now())
 	c.Set(openAIRouteTicketGinKey, t)
 }
 

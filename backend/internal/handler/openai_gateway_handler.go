@@ -799,7 +799,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		attemptBody := h.deriveOpenAIForwardAttemptBody(reqLog, forwardBody, account, &passthroughFailoverState)
 		forwardAttempts++
 		endRecoveryAttempt := service.BeginErrorRecoveryAttempt(c)
-		h.gatewayService.StartOpenAIRouteAttempt(c, selection)
+		h.gatewayService.StartOpenAIRouteAttempt(c, selection, reqStream)
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
 				if accountReleaseFunc != nil {

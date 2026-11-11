@@ -40,7 +40,7 @@ func routeTestAccount(id int64, priority int, rate float64) *Account {
 func feedRouteSamples(st *openAIRouteStats, accountID int64, model, shape string, ms int, n int, now time.Time) {
 	for i := 0; i < n; i++ {
 		start := now.Add(-time.Duration(ms) * time.Millisecond)
-		tk := st.startTicket(accountID, model, shape, nil, 180, start)
+		tk := st.startTicket(accountID, model, shape, true, nil, 180, start)
 		tk.markFirstToken(now)
 		tk.finish(true, now)
 	}
@@ -174,12 +174,12 @@ func TestOpenAIRouteEstimateCountsStalledInflightImmediately(t *testing.T) {
 	feedRouteSamples(st, 4, "gpt-6.1-terra", shape, 3000, 20, now)
 
 	// 账号 1 有 4 条在途：2 条已等 90 秒没首字（挂住），2 条刚开始。
-	st.startTicket(1, "gpt-6.1-terra", shape, nil, 180, now.Add(-90*time.Second))
-	st.startTicket(1, "gpt-6.1-terra", shape, nil, 180, now.Add(-90*time.Second))
-	st.startTicket(1, "gpt-6.1-terra", shape, nil, 180, now.Add(-time.Second))
-	st.startTicket(1, "gpt-6.1-terra", shape, nil, 180, now.Add(-time.Second))
+	st.startTicket(1, "gpt-6.1-terra", shape, true, nil, 180, now.Add(-90*time.Second))
+	st.startTicket(1, "gpt-6.1-terra", shape, true, nil, 180, now.Add(-90*time.Second))
+	st.startTicket(1, "gpt-6.1-terra", shape, true, nil, 180, now.Add(-time.Second))
+	st.startTicket(1, "gpt-6.1-terra", shape, true, nil, 180, now.Add(-time.Second))
 	// 已出首字的长输出请求不算挂住。
-	long := st.startTicket(4, "gpt-6.1-terra", shape, nil, 180, now.Add(-200*time.Second))
+	long := st.startTicket(4, "gpt-6.1-terra", shape, true, nil, 180, now.Add(-200*time.Second))
 	long.markFirstToken(now.Add(-197 * time.Second))
 
 	hung := st.estimate(routeTestAccount(1, 1, 0.16), "gpt-6.1-terra", shape, cfg, now)
@@ -191,13 +191,37 @@ func TestOpenAIRouteEstimateCountsStalledInflightImmediately(t *testing.T) {
 	require.Greater(t, hung.Score, ok.Score+30000)
 }
 
+// 非流式请求不一定走到 first_semantic，长时间没首字不能算挂住，也不能稀释流式的挂住占比。
+func TestOpenAIRouteEstimateIgnoresNonStreamForStall(t *testing.T) {
+	cfg := defaultOpenAIRouteABConfig()
+	st := newOpenAIRouteStats()
+	now := time.Now()
+	shape := openAIRouteShape("gpt-6.1-sol", "xhigh", "m")
+	feedRouteSamples(st, 1, "gpt-6.1-sol", shape, 3000, 20, now)
+
+	// 3 条非流式已跑 120 秒（正常的长推理），1 条流式已等 90 秒没首字。
+	for i := 0; i < 3; i++ {
+		st.startTicket(1, "gpt-6.1-sol", shape, false, nil, 180, now.Add(-120*time.Second))
+	}
+	est := st.estimate(routeTestAccount(1, 1, 0.16), "gpt-6.1-sol", shape, cfg, now)
+	require.Equal(t, 3, est.Inflight)
+	require.Zero(t, est.Stalled)
+	require.Zero(t, est.StallMs)
+
+	st.startTicket(1, "gpt-6.1-sol", shape, true, nil, 180, now.Add(-90*time.Second))
+	est = st.estimate(routeTestAccount(1, 1, 0.16), "gpt-6.1-sol", shape, cfg, now)
+	require.Equal(t, 4, est.Inflight)
+	require.Equal(t, 1, est.Stalled)
+	require.InDelta(t, 90000, est.StallMs, 1000, "the only streaming request is stuck: full 90s, not diluted by non-stream")
+}
+
 func TestOpenAIRouteEstimateErrorPenaltyAndDecay(t *testing.T) {
 	cfg := defaultOpenAIRouteABConfig()
 	st := newOpenAIRouteStats()
 	now := time.Now()
 	shape := openAIRouteShape("gpt-6-astra", "high", "m")
 	for i := 0; i < 20; i++ {
-		tk := st.startTicket(3, "gpt-6-astra", shape, nil, cfg.HalfLifeSec, now)
+		tk := st.startTicket(3, "gpt-6-astra", shape, true, nil, cfg.HalfLifeSec, now)
 		tk.finish(false, now) // 429/502
 	}
 	bad := st.estimate(routeTestAccount(3, 1, 0.1), "gpt-6-astra", shape, cfg, now)
@@ -355,12 +379,12 @@ func TestOpenAIRouteAttemptLifecycleOnGinContext(t *testing.T) {
 	c.Request = httptest.NewRequest("POST", "/v1/responses", nil)
 
 	// 不在实验里：什么都不写。
-	svc.StartOpenAIRouteAttempt(c, &AccountSelectionResult{Account: &Account{ID: 1}})
+	svc.StartOpenAIRouteAttempt(c, &AccountSelectionResult{Account: &Account{ID: 1}}, true)
 	require.Nil(t, OpenAIRouteDecisionJSON(c))
 
 	shape := openAIRouteShape("gpt-6.1-sol", "high", "m")
 	decision := &OpenAIRouteDecision{Arm: OpenAIRouteArmShadow, Layer: openAIRouteLayerLoad, Shape: shape, Best: 17, model: "gpt-6.1-sol", shape: shape}
-	svc.StartOpenAIRouteAttempt(c, &AccountSelectionResult{Account: &Account{ID: 1}, RouteDecision: decision})
+	svc.StartOpenAIRouteAttempt(c, &AccountSelectionResult{Account: &Account{ID: 1}, RouteDecision: decision}, true)
 	st := svc.openAIRouteStats()
 	require.Len(t, st.inflight[1], 1)
 
@@ -380,8 +404,8 @@ func TestOpenAIRouteAttemptLifecycleOnGinContext(t *testing.T) {
 	require.Equal(t, float64(17), got["best"])
 
 	// 失败重选：上一张未结束的票据被结束，新的一张登记到新账号。
-	svc.StartOpenAIRouteAttempt(c, &AccountSelectionResult{Account: &Account{ID: 17}, RouteDecision: &OpenAIRouteDecision{Arm: "S", model: "gpt-6.1-sol", shape: shape}})
-	svc.StartOpenAIRouteAttempt(c, &AccountSelectionResult{Account: &Account{ID: 3}, RouteDecision: &OpenAIRouteDecision{Arm: "S", model: "gpt-6.1-sol", shape: shape}})
+	svc.StartOpenAIRouteAttempt(c, &AccountSelectionResult{Account: &Account{ID: 17}, RouteDecision: &OpenAIRouteDecision{Arm: "S", model: "gpt-6.1-sol", shape: shape}}, true)
+	svc.StartOpenAIRouteAttempt(c, &AccountSelectionResult{Account: &Account{ID: 3}, RouteDecision: &OpenAIRouteDecision{Arm: "S", model: "gpt-6.1-sol", shape: shape}}, true)
 	require.Empty(t, st.inflight[17])
 	require.Len(t, st.inflight[3], 1)
 	svc.FinishOpenAIRouteAttempt(c, false)
