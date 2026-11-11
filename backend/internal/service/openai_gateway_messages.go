@@ -987,6 +987,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 			ms := int(time.Since(startTime).Milliseconds())
 			firstTokenMs = &ms
 			requestprofile.Mark(c.Request.Context(), "first_semantic", 0)
+			markOpenAIRouteFirstToken(c)
 		}
 		if countSearch {
 			searchCount += countGrokNativeSearchCallsInSSEDataDedup([]byte(payload), streamSearchSeen)

@@ -271,6 +271,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 		adjustedSizeBeforeForward := service.OpenAICompactKeepaliveAdjustedWrittenSize(c)
 		forwardAttempts++
 		endRecoveryAttempt := service.BeginErrorRecoveryAttempt(c)
+		h.gatewayService.StartOpenAIRouteAttempt(c, selection)
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
 				if accountReleaseFunc != nil {
@@ -279,6 +280,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			}()
 			return h.gatewayService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody, promptCacheKey, "")
 		}()
+		h.gatewayService.FinishOpenAIRouteAttempt(c, err == nil && openAIForwardSucceededForScheduling(result))
 		endRecoveryAttempt(err)
 		upstreamFacts := service.OpenAIUpstreamAttemptFactsFromContext(c.Request.Context())
 		h.gatewayService.ObserveOpenAIStickyBurstResult(
@@ -315,6 +317,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
 			sessionID := service.ExtractClientSessionID(c)
 			cyberBlocked := service.GetOpsCyberPolicy(c) != nil
+			routeDecision := service.OpenAIRouteDecisionJSON(c)
 			h.submitOpenAIUsageRecordTask(c.Request.Context(), res, func(ctx context.Context) {
 				if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
 					Result:             res,
@@ -332,6 +335,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 					ChannelUsageFields: clientRequestedUsageFields(c, channelMapping, reqModel, res.UpstreamModel),
 					PricingAt:          pricingAt,
 					CyberBlocked:       cyberBlocked,
+					RouteDecision:      routeDecision,
 				}); err != nil {
 					logger.L().With(
 						zap.String("component", "handler.openai_gateway.chat_completions"),

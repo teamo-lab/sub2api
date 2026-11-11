@@ -373,6 +373,7 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 					elapsed := int(time.Since(startTime).Milliseconds())
 					firstTokenMs = &elapsed
 					requestprofile.Mark(c.Request.Context(), "first_semantic", 0)
+					markOpenAIRouteFirstToken(c)
 				}
 			}
 		}

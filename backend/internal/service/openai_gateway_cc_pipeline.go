@@ -330,6 +330,7 @@ func (s *OpenAIGatewayService) scanCCStream(
 			ms := int(time.Since(startTime).Milliseconds())
 			st.FirstTokenMs = &ms
 			requestprofile.Mark(c.Request.Context(), "first_semantic", 0)
+			markOpenAIRouteFirstToken(c)
 		}
 		emit(&chunk)
 	}

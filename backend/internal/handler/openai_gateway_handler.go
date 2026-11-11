@@ -799,6 +799,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		attemptBody := h.deriveOpenAIForwardAttemptBody(reqLog, forwardBody, account, &passthroughFailoverState)
 		forwardAttempts++
 		endRecoveryAttempt := service.BeginErrorRecoveryAttempt(c)
+		h.gatewayService.StartOpenAIRouteAttempt(c, selection)
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
 				if accountReleaseFunc != nil {
@@ -807,6 +808,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			}()
 			return h.gatewayService.Forward(c.Request.Context(), c, account, attemptBody)
 		}()
+		h.gatewayService.FinishOpenAIRouteAttempt(c, err == nil && openAIForwardSucceededForScheduling(result))
 		endRecoveryAttempt(err)
 		upstreamFacts := service.OpenAIUpstreamAttemptFactsFromContext(c.Request.Context())
 		h.gatewayService.ObserveOpenAIStickyBurstResult(
@@ -843,6 +845,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
 			sessionID := service.ExtractClientSessionID(c)
 			cyberBlocked := service.GetOpsCyberPolicy(c) != nil
+			routeDecision := service.OpenAIRouteDecisionJSON(c)
 			h.submitOpenAIUsageRecordTask(c.Request.Context(), res, func(ctx context.Context) {
 				if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
 					Result:             res,
@@ -862,6 +865,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					PricingAt:          pricingAt,
 					CyberBlocked:       cyberBlocked,
 					NativeCompactionV2: nativeV2,
+					RouteDecision:      routeDecision,
 				}); err != nil {
 					logger.L().With(
 						zap.String("component", "handler.openai_gateway.responses"),

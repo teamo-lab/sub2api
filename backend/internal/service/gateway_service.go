@@ -583,6 +583,8 @@ type AccountSelectionResult struct {
 	// StickyBurstBypass reports that this selection borrowed the configured
 	// temporary sticky slots above the account's durable concurrency.
 	StickyBurstBypass bool
+	// RouteDecision 是选路实验（影子 / A/B）记下的决策；分组不在实验里时为 nil。
+	RouteDecision *OpenAIRouteDecision
 	// profitGate 携带本次选号真实生效的利润门（无门为 nil）。门安装在调度栈的
 	// 局部 ctx 上，handler 必须经 ContextWithSelectionProfitGate 重放后才能在
 	// 调度栈之外做抢槽后终检与准入后粘性绑定。

@@ -1195,6 +1195,8 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 	if len(accounts) == 0 {
 		return nil, noAvailableOpenAISelectionError(requestedModel, false, openAISelectionFilterStats{}.summary(""))
 	}
+	// 选路实验（影子 / A/B）：不在实验分组时为 nil，以下所有挂钩都是空操作。
+	route := s.newOpenAIRouteSelection(ctx, groupID, sessionHash, requestedModel)
 
 	isExcluded := func(accountID int64) bool {
 		if excludedIDs == nil {
@@ -1258,6 +1260,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 								return nil, selectErr
 							}
 							selection.StickyBurstBypass = burst
+							selection.RouteDecision = route.newDecision(openAIRouteLayerSticky, account.ID)
 							_ = s.refreshStickySessionTTL(ctx, groupID, sessionHash, openaiStickySessionTTL)
 							return selection, nil
 						}
@@ -1272,6 +1275,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 							})
 							if selection != nil {
 								selection.StickyBurstBypass = burst
+								selection.RouteDecision = route.newDecision(openAIRouteLayerSticky, accountID)
 							}
 							return selection, selectErr
 						}
@@ -1420,6 +1424,10 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		} else {
 			selectionOrder = append(selectionOrder, available...)
 		}
+		var routeDecision *OpenAIRouteDecision
+		if route != nil && !requireCompact {
+			selectionOrder, routeDecision = route.order(selectionOrder)
+		}
 
 		for _, item := range selectionOrder {
 			fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, item.account, platform, requestedModel, false, requiredCapability)
@@ -1438,6 +1446,13 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 				selection, selectErr := s.newAcquiredSelectionResult(ctx, fresh, result.ReleaseFunc)
 				if selectErr != nil {
 					return nil, true, selectErr
+				}
+				if routeDecision != nil {
+					decision := *routeDecision
+					decision.Picked = fresh.ID
+					selection.RouteDecision = &decision
+				} else {
+					selection.RouteDecision = route.newDecision(openAIRouteLayerLoad, fresh.ID)
 				}
 				if sessionHash != "" && !stickySpillover && !gatewayProfitControlGateActive(ctx) {
 					_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, fresh.ID, openaiStickySessionTTL)
@@ -1479,6 +1494,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 				if selectErr != nil {
 					return nil, selectErr
 				}
+				selection.RouteDecision = route.newDecision(openAIRouteLayerFallback, fresh.ID)
 				if sessionHash != "" && !stickySpillover && !gatewayProfitControlGateActive(ctx) {
 					_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, fresh.ID, openaiStickySessionTTL)
 				}
@@ -1524,12 +1540,16 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		if needsUpstreamCheck && s.isUpstreamModelRestrictedByChannel(ctx, *groupID, fresh, requestedModel, requireCompact) {
 			continue
 		}
-		return s.newSelectionResult(ctx, fresh, false, nil, &AccountWaitPlan{
+		selection, selectErr := s.newSelectionResult(ctx, fresh, false, nil, &AccountWaitPlan{
 			AccountID:      fresh.ID,
 			MaxConcurrency: fresh.Concurrency,
 			Timeout:        cfg.FallbackWaitTimeout,
 			MaxWaiting:     cfg.FallbackMaxWaiting,
 		})
+		if selection != nil {
+			selection.RouteDecision = route.newDecision(openAIRouteLayerFallback, fresh.ID)
+		}
+		return selection, selectErr
 	}
 
 	if requireCompact && baseCandidateCount > 0 {
