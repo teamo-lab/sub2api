@@ -43,6 +43,8 @@ type OpenAIRecordUsageInput struct {
 	// Responses handler from stream=true + compaction_trigger. It never stores
 	// the request payload and does not replace the transport request type.
 	NativeCompactionV2 bool
+	// RouteDecision 是选路实验的决策 JSON（usage_logs.route_decision）；不在实验里为 nil。
+	RouteDecision []byte
 	ChannelUsageFields
 }
 
@@ -399,6 +401,7 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		ImageSizeSource:          optionalTrimmedStringPtr(result.ImageSizeSource),
 		ImageSizeBreakdown:       result.ImageSizeBreakdown,
 		NativeCompactionV2:       input.NativeCompactionV2,
+		RouteDecision:            input.RouteDecision,
 	}
 	isVideoUsage := isGrokVideoUsageResult(result, billingModels)
 	if isVideoUsage {

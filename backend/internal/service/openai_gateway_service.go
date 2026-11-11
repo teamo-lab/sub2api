@@ -458,6 +458,8 @@ type OpenAIGatewayService struct {
 	openaiWSStateStoreOnce         sync.Once
 	openaiSchedulerOnce            sync.Once
 	openaiProxyStreamCircuitOnce   sync.Once
+	openaiRouteStatsOnce           sync.Once
+	openaiRouteStatsState          *openAIRouteStats
 	openaiWSPassthroughDialerOnce  sync.Once
 	openaiModelTransientOnce       sync.Once
 	agentIdentityTaskMu            sync.Mutex

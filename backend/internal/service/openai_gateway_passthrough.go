@@ -2524,6 +2524,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				ms := int(time.Since(startTime).Milliseconds())
 				firstTokenMs = &ms
 				requestprofile.Mark(c.Request.Context(), "first_semantic", 0)
+				markOpenAIRouteFirstToken(c)
 			}
 			s.parseSSEUsageBytesWithType(dataBytes, eventType, usage)
 		}
