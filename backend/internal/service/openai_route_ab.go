@@ -8,8 +8,9 @@ package service
 //  1. openAIRouteStats：进程内的实时观测。首字按「账号 × 档位（模型 × effort ×
 //     请求体档）」记对数均值（按时间衰减），预测时拟合「档位基线 + 账号偏移」：
 //     账号只和同档位的其他号比、按账号等权，请求构成不同不会被当成快慢，占大头
-//     流量的号变慢也不会把基线一起拖慢；在途请求里等首字已明显超时的条数立刻
-//     计入，不用等它完成。
+//     流量的号变慢也不会把基线一起拖慢。样本少的号向它自己近一小时的偏移收缩
+//     （不是向平均收缩），再叠加该号在本档位自己的残差。在途请求里等首字已明显
+//     超时的条数立刻计入，不用等它完成；超时按每条请求自己的档位判。
 //  2. 评分：预计首字 + 挂住罚分 + 报错罚分 + 成本（倍率折算成毫秒）。
 //  3. 分组开关（settings 表 openai_route_ab，JSON）：
 //     - mode=shadow：只算不选，所有请求照旧走老逻辑，usage_logs.route_decision
@@ -71,7 +72,9 @@ type openAIRouteABConfig struct {
 	Salt   string                              `json:"salt"`
 	// HalfLifeSec 观测的半衰期，默认 180 秒（「这一分钟」量级）。
 	HalfLifeSec float64 `json:"half_life_sec"`
-	// CostMsPerRate 把账号成本倍率折成毫秒：默认 60000，即 0.05x ≈ 3s。
+	// LongHalfLifeSec 长期观测的半衰期，默认 3600 秒：短期样本少时账号偏移向它收缩。
+	LongHalfLifeSec float64 `json:"long_half_life_sec"`
+	// CostMsPerRate 把账号成本倍率折成毫秒：默认 30000，即 0.05x ≈ 1.5s。
 	CostMsPerRate float64 `json:"cost_ms_per_rate"`
 	// TemperatureMs 软分配温度：分数差这么多毫秒，权重差 e 倍。
 	TemperatureMs float64 `json:"temperature_ms"`
@@ -90,17 +93,18 @@ type openAIRouteABConfig struct {
 
 func defaultOpenAIRouteABConfig() openAIRouteABConfig {
 	return openAIRouteABConfig{
-		Groups:         map[string]openAIRouteABGroupConfig{},
-		Salt:           "route-ab",
-		HalfLifeSec:    180,
-		CostMsPerRate:  60000,
-		TemperatureMs:  5000,
-		Explore:        0.03,
-		MaxPriority:    2,
-		StallFactor:    2,
-		StallMinMs:     15000,
-		ErrorPenaltyMs: 30000,
-		PriorSamples:   5,
+		Groups:          map[string]openAIRouteABGroupConfig{},
+		Salt:            "route-ab",
+		HalfLifeSec:     180,
+		LongHalfLifeSec: 3600,
+		CostMsPerRate:   30000,
+		TemperatureMs:   5000,
+		Explore:         0.03,
+		MaxPriority:     2,
+		StallFactor:     2,
+		StallMinMs:      15000,
+		ErrorPenaltyMs:  30000,
+		PriorSamples:    5,
 	}
 }
 
@@ -121,6 +125,7 @@ func parseOpenAIRouteABConfig(raw string) (openAIRouteABConfig, bool) {
 		}
 	}
 	positive(&cfg.HalfLifeSec, def.HalfLifeSec)
+	positive(&cfg.LongHalfLifeSec, def.LongHalfLifeSec)
 	positive(&cfg.TemperatureMs, def.TemperatureMs)
 	positive(&cfg.StallFactor, def.StallFactor)
 	positive(&cfg.StallMinMs, def.StallMinMs)
@@ -257,11 +262,12 @@ type openAIRouteTicket struct {
 	firstAt   time.Time
 	// stream：客户端要的是流式。非流式请求不一定会走到 first_semantic，
 	// 等首字超时不能当成挂住，只计入在途。
-	stream   bool
-	done     bool
-	stats    *openAIRouteStats
-	decision *OpenAIRouteDecision
-	halfLife float64
+	stream       bool
+	done         bool
+	stats        *openAIRouteStats
+	decision     *OpenAIRouteDecision
+	halfLife     float64
+	longHalfLife float64
 }
 
 // openAIRouteCellKey 是「账号 × 请求档位」格子。
@@ -277,6 +283,8 @@ type openAIRouteStats struct {
 	// 同档位的格子之间比较、按账号等权，所以「哪个号接了更重的请求」不会被当成
 	// 快慢，某个号占大头流量时也不会把基线拖着一起变慢。
 	cells map[string]map[openAIRouteCellKey]*openAIRouteDecayed
+	// cellsLong 同 cells，但用长半衰期：给短期偏移当收缩目标。
+	cellsLong map[string]map[openAIRouteCellKey]*openAIRouteDecayed
 	// errs: accountID → 失败(1)/成功(0)
 	errs     map[int64]*openAIRouteDecayed
 	inflight map[int64]map[uint64]*openAIRouteTicket
@@ -285,9 +293,10 @@ type openAIRouteStats struct {
 
 func newOpenAIRouteStats() *openAIRouteStats {
 	return &openAIRouteStats{
-		cells:    map[string]map[openAIRouteCellKey]*openAIRouteDecayed{},
-		errs:     map[int64]*openAIRouteDecayed{},
-		inflight: map[int64]map[uint64]*openAIRouteTicket{},
+		cells:     map[string]map[openAIRouteCellKey]*openAIRouteDecayed{},
+		cellsLong: map[string]map[openAIRouteCellKey]*openAIRouteDecayed{},
+		errs:      map[int64]*openAIRouteDecayed{},
+		inflight:  map[int64]map[uint64]*openAIRouteTicket{},
 	}
 }
 
@@ -324,20 +333,24 @@ func openAIRouteShape(model, effort, band string) string {
 	return model + "|" + effort + "|" + band
 }
 
-func (st *openAIRouteStats) startTicket(accountID int64, model, shape string, stream bool, decision *OpenAIRouteDecision, halfLife float64, now time.Time) *openAIRouteTicket {
+func (st *openAIRouteStats) startTicket(accountID int64, model, shape string, stream bool, decision *OpenAIRouteDecision, halfLife, longHalfLife float64, now time.Time) *openAIRouteTicket {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.nextID++
 	t := &openAIRouteTicket{
-		id:        st.nextID,
-		accountID: accountID,
-		model:     model,
-		shape:     shape,
-		start:     now,
-		stream:    stream,
-		stats:     st,
-		decision:  decision,
-		halfLife:  halfLife,
+		id:           st.nextID,
+		accountID:    accountID,
+		model:        model,
+		shape:        shape,
+		start:        now,
+		stream:       stream,
+		stats:        st,
+		decision:     decision,
+		halfLife:     halfLife,
+		longHalfLife: longHalfLife,
+	}
+	if t.longHalfLife <= 0 { // 没给长半衰期时按默认值
+		t.longHalfLife = defaultOpenAIRouteABConfig().LongHalfLifeSec
 	}
 	m := st.inflight[accountID]
 	if m == nil {
@@ -364,18 +377,23 @@ func (t *openAIRouteTicket) markFirstToken(now time.Time) {
 	if ms < 1 {
 		ms = 1
 	}
-	byCell := st.cells[t.model]
+	key := openAIRouteCellKey{accountID: t.accountID, shape: t.shape}
+	openAIRouteCell(st.cells, t.model, key).add(math.Log(ms), now, t.halfLife)
+	openAIRouteCell(st.cellsLong, t.model, key).add(math.Log(ms), now, t.longHalfLife)
+}
+
+func openAIRouteCell(cells map[string]map[openAIRouteCellKey]*openAIRouteDecayed, model string, key openAIRouteCellKey) *openAIRouteDecayed {
+	byCell := cells[model]
 	if byCell == nil {
 		byCell = map[openAIRouteCellKey]*openAIRouteDecayed{}
-		st.cells[t.model] = byCell
+		cells[model] = byCell
 	}
-	key := openAIRouteCellKey{accountID: t.accountID, shape: t.shape}
 	d := byCell[key]
 	if d == nil {
 		d = &openAIRouteDecayed{}
 		byCell[key] = d
 	}
-	d.add(math.Log(ms), now, t.halfLife)
+	return d
 }
 
 // finish 结束一次尝试：移出在途，记成功/失败。
@@ -413,57 +431,74 @@ type openAIRouteFit struct {
 	shapeBase   map[string]float64
 	accountOff  map[int64]float64
 	accountW    map[int64]float64
+	cells       map[openAIRouteCellKey]openAIRouteCellValue
 	overallBase float64
 	hasData     bool
 }
 
-// fitLocked 做几轮交替最小二乘：base[s] = 加权均值(m − off[a])，
-// off[a] = 加权和(m − base[s]) / (权重 + 先验)，再把账号偏移按账号等权居中。
-// 先验让样本少的账号向「和大家一样」收缩；格子和账号都很少（个位数号 × 几十档），
-// 每次选号算一遍的开销可以忽略。
+type openAIRouteCellValue struct {
+	mean float64
+	w    float64
+}
+
+// fitLocked 先用长半衰期的观测拟合一遍（收缩到 0），再用短半衰期拟合、把账号偏移
+// 向长期偏移收缩：样本少的号（比如流量很少的慢号）不会因为最近几条样本少就被当成
+// 「和大家一样」。短期没有样本、长期有的号直接用长期偏移。
 func (st *openAIRouteStats) fitLocked(model string, now time.Time, cfg openAIRouteABConfig) openAIRouteFit {
+	long := fitOpenAIRouteCellsLocked(st.cellsLong[model], now, cfg.LongHalfLifeSec, cfg.PriorSamples, nil)
+	fit := fitOpenAIRouteCellsLocked(st.cells[model], now, cfg.HalfLifeSec, cfg.PriorSamples, long.accountOff)
+	if fit.hasData {
+		for id, off := range long.accountOff {
+			if _, ok := fit.accountOff[id]; !ok {
+				fit.accountOff[id] = off
+			}
+		}
+	}
+	return fit
+}
+
+// fitOpenAIRouteCellsLocked 做几轮交替最小二乘：base[s] = 加权均值(m − off[a])，
+// off[a] = (加权和(m − base[s]) + 先验×目标[a]) / (权重 + 先验)，再把账号偏移按账号
+// 等权居中。目标为 nil 时向 0（「和大家一样」）收缩。格子和账号都很少（个位数号 ×
+// 几十档），每次选号算一遍的开销可以忽略。
+func fitOpenAIRouteCellsLocked(src map[openAIRouteCellKey]*openAIRouteDecayed, now time.Time, halfLife, prior float64, target map[int64]float64) openAIRouteFit {
 	fit := openAIRouteFit{
 		shapeBase:  map[string]float64{},
 		accountOff: map[int64]float64{},
 		accountW:   map[int64]float64{},
+		cells:      map[openAIRouteCellKey]openAIRouteCellValue{},
 	}
-	type cell struct {
-		key  openAIRouteCellKey
-		mean float64
-		w    float64
-	}
-	cells := make([]cell, 0, len(st.cells[model]))
-	for key, d := range st.cells[model] {
-		mean, w := d.value(now, cfg.HalfLifeSec)
+	for key, d := range src {
+		mean, w := d.value(now, halfLife)
 		if w < 0.01 {
 			if w <= 0 || now.Sub(d.at) > 24*time.Hour {
-				delete(st.cells[model], key)
+				delete(src, key)
 			}
 			continue
 		}
-		cells = append(cells, cell{key: key, mean: mean, w: w})
+		fit.cells[key] = openAIRouteCellValue{mean: mean, w: w}
 		fit.accountW[key.accountID] += w
 	}
-	if len(cells) == 0 {
+	if len(fit.cells) == 0 {
 		return fit
 	}
 	fit.hasData = true
 	for iter := 0; iter < 8; iter++ {
 		num, den := map[string]float64{}, map[string]float64{}
-		for _, c := range cells {
-			num[c.key.shape] += c.w * (c.mean - fit.accountOff[c.key.accountID])
-			den[c.key.shape] += c.w
+		for key, c := range fit.cells {
+			num[key.shape] += c.w * (c.mean - fit.accountOff[key.accountID])
+			den[key.shape] += c.w
 		}
 		for shape := range den {
 			fit.shapeBase[shape] = num[shape] / den[shape]
 		}
 		anum := map[int64]float64{}
-		for _, c := range cells {
-			anum[c.key.accountID] += c.w * (c.mean - fit.shapeBase[c.key.shape])
+		for key, c := range fit.cells {
+			anum[key.accountID] += c.w * (c.mean - fit.shapeBase[key.shape])
 		}
 		center := 0.0
 		for id, w := range fit.accountW {
-			fit.accountOff[id] = anum[id] / (w + cfg.PriorSamples)
+			fit.accountOff[id] = (anum[id] + prior*target[id]) / (w + prior)
 			center += fit.accountOff[id]
 		}
 		center /= float64(len(fit.accountW))
@@ -472,12 +507,30 @@ func (st *openAIRouteStats) fitLocked(model string, now time.Time, cfg openAIRou
 		}
 	}
 	totalW, totalNum := 0.0, 0.0
-	for _, c := range cells {
-		totalNum += c.w * (c.mean - fit.accountOff[c.key.accountID])
+	for key, c := range fit.cells {
+		totalNum += c.w * (c.mean - fit.accountOff[key.accountID])
 		totalW += c.w
 	}
 	fit.overallBase = totalNum / totalW
 	return fit
+}
+
+// predictLog 返回预计首字（对数毫秒）和账号偏移：档位基线 + 账号偏移，再向该号
+// 在本档位自己的观测收缩（权重 w/(w+先验)），把「某个号只在某些档位慢」也算进去。
+func (fit openAIRouteFit) predictLog(accountID int64, shape string, prior float64) (logPred, off float64) {
+	if !fit.hasData {
+		return math.Log(openAIRouteDefaultBaselineMs), 0
+	}
+	off = fit.accountOff[accountID]
+	base, ok := fit.shapeBase[shape]
+	if !ok {
+		return fit.overallBase + off, off
+	}
+	logPred = base + off
+	if c, ok := fit.cells[openAIRouteCellKey{accountID: accountID, shape: shape}]; ok {
+		logPred += (c.mean - logPred) * c.w / (c.w + prior)
+	}
+	return logPred, off
 }
 
 // openAIRouteEstimate 是单个候选号的评分明细（毫秒）。
@@ -498,10 +551,19 @@ type openAIRouteEstimate struct {
 func (st *openAIRouteStats) estimateAll(accounts []*Account, model, shape string, cfg openAIRouteABConfig, now time.Time) []openAIRouteEstimate {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	fit := st.fitLocked(model, now, cfg)
+	fits := map[string]openAIRouteFit{}
+	fitFor := func(m string) openAIRouteFit {
+		f, ok := fits[m]
+		if !ok {
+			f = st.fitLocked(m, now, cfg)
+			fits[m] = f
+		}
+		return f
+	}
+	fit := fitFor(model)
 	out := make([]openAIRouteEstimate, len(accounts))
 	for i, account := range accounts {
-		out[i] = st.estimateLocked(account, shape, fit, cfg, now)
+		out[i] = st.estimateLocked(account, shape, fit, fitFor, cfg, now)
 	}
 	return out
 }
@@ -510,21 +572,16 @@ func (st *openAIRouteStats) estimate(account *Account, model, shape string, cfg 
 	return st.estimateAll([]*Account{account}, model, shape, cfg, now)[0]
 }
 
-func (st *openAIRouteStats) estimateLocked(account *Account, shape string, fit openAIRouteFit, cfg openAIRouteABConfig, now time.Time) openAIRouteEstimate {
+// estimateLocked 给单个号打分。fitFor 返回某个模型的拟合（同一次打分内缓存），
+// 用来按每条在途请求自己的模型和档位判挂住：忙的号正在跑的大请求本来就慢，
+// 不能拿这次要选的小请求的预计首字去衡量它。
+func (st *openAIRouteStats) estimateLocked(account *Account, shape string, fit openAIRouteFit, fitFor func(string) openAIRouteFit, cfg openAIRouteABConfig, now time.Time) openAIRouteEstimate {
 	est := openAIRouteEstimate{AccountID: account.ID, SlowFactor: 1}
-	baseLog := math.Log(openAIRouteDefaultBaselineMs)
-	if fit.hasData {
-		baseLog = fit.overallBase
-		if b, ok := fit.shapeBase[shape]; ok {
-			baseLog = b
-		}
-	}
-	off := fit.accountOff[account.ID]
+	logPred, off := fit.predictLog(account.ID, shape, cfg.PriorSamples)
 	est.Samples = fit.accountW[account.ID]
 	est.SlowFactor = math.Exp(off)
-	est.PredMs = math.Exp(baseLog + off)
+	est.PredMs = math.Exp(logPred)
 
-	stallThreshold := math.Max(est.PredMs*cfg.StallFactor, cfg.StallMinMs)
 	maxStallAge := 0.0
 	streamInflight := 0
 	for id, t := range st.inflight[account.ID] {
@@ -538,7 +595,11 @@ func (st *openAIRouteStats) estimateLocked(account *Account, shape string, fit o
 			continue
 		}
 		streamInflight++
-		if t.firstAt.IsZero() && age > stallThreshold {
+		if !t.firstAt.IsZero() {
+			continue
+		}
+		ticketLog, _ := fitFor(t.model).predictLog(account.ID, t.shape, cfg.PriorSamples)
+		if stallThreshold := math.Max(math.Exp(ticketLog)*cfg.StallFactor, cfg.StallMinMs); age > stallThreshold {
 			est.Stalled++
 			if age > maxStallAge {
 				maxStallAge = age
@@ -804,7 +865,7 @@ func (s *OpenAIGatewayService) StartOpenAIRouteAttempt(c *gin.Context, selection
 	d.Picked = selection.Account.ID
 	st := s.openAIRouteStats()
 	cfg, _ := s.openAIRouteABRuntimeConfig(c.Request.Context())
-	t := st.startTicket(selection.Account.ID, d.model, d.shape, stream, d, cfg.HalfLifeSec, time.Now())
+	t := st.startTicket(selection.Account.ID, d.model, d.shape, stream, d, cfg.HalfLifeSec, cfg.LongHalfLifeSec, time.Now())
 	c.Set(openAIRouteTicketGinKey, t)
 }
 
