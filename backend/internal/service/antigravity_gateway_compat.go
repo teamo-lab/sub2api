@@ -207,6 +207,12 @@ func (s *AntigravityGatewayService) prepareAntigravityCompatCall(
 	account *Account,
 	request antigravityCompatRequest,
 ) (*antigravityCompatUpstreamCall, error) {
+	inlinedBody, err := inlineClaudeImageURLs(ctx, c, request.claudeBody)
+	if err != nil {
+		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+	}
+	request.claudeBody = inlinedBody
+
 	var claudeRequest antigravity.ClaudeRequest
 	if json.Unmarshal(request.claudeBody, &claudeRequest) != nil {
 		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", "Invalid request body")

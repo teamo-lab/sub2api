@@ -44,6 +44,14 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		return nil, err
 	}
 
+	// Claude 格式请求要转给 OpenAI/国产供应商：url 图片先下载成 base64，不依赖上游对图片 URL 的支持。
+	inlinedBody, err := inlineClaudeImageURLs(ctx, c, body)
+	if err != nil {
+		writeAnthropicError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return nil, err
+	}
+	body = inlinedBody
+
 	// 入口分流（国产供应商 Anthropic 协议）：上游为供应商原生 Anthropic 端点时，
 	// /v1/messages 请求零转换直通（仅模型名映射 + 少量 body 清洗），完整保留
 	// thinking / tool_use / cache 语义，适配 Claude Code 等原生客户端。

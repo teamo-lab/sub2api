@@ -158,6 +158,17 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		body = parsed.Body.Bytes()
 		return nil
 	}
+	// Vertex 上的 Claude 不支持 url 图片源，先下载成 base64。
+	if account.Platform == PlatformAnthropic && account.Type == AccountTypeServiceAccount {
+		inlinedBody, inlineErr := inlineClaudeImageURLs(ctx, c, body)
+		if inlineErr != nil {
+			writeAnthropicError(c, http.StatusBadRequest, "invalid_request_error", inlineErr.Error())
+			return nil, inlineErr
+		}
+		if err := replaceBody(inlinedBody); err != nil {
+			return nil, err
+		}
+	}
 	reqModel := parsed.Model
 	reqStream := parsed.Stream
 	originalModel := reqModel
