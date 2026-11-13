@@ -602,6 +602,10 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 		mappedModel = account.GetMappedModel(req.Model)
 	}
 
+	body, err := inlineClaudeImageURLs(ctx, c, body)
+	if err != nil {
+		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+	}
 	geminiReq, err := convertClaudeMessagesToGeminiGenerateContent(body)
 	if err != nil {
 		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
@@ -3427,7 +3431,10 @@ func convertClaudeMessagesToGeminiContents(messages any, toolUseIDToName map[str
 					})
 				case "image":
 					if src, ok := bm["source"].(map[string]any); ok {
-						if srcType, _ := src["type"].(string); srcType == "base64" {
+						if srcType, _ := src["type"].(string); srcType == "url" {
+							// 调用方应先用 inlineClaudeImageURLs 下载成 base64；走到这里说明漏了，报错而不是悄悄丢图。
+							return nil, errors.New("image url source must be inlined before conversion")
+						} else if srcType == "base64" {
 							mediaType, _ := src["media_type"].(string)
 							data, _ := src["data"].(string)
 							if mediaType != "" && data != "" {

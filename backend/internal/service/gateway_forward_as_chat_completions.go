@@ -89,6 +89,12 @@ func (s *GatewayService) ForwardAsChatCompletions(
 	if err != nil {
 		return nil, fmt.Errorf("marshal anthropic request: %w", err)
 	}
+	// Sub2API 转成 Claude 格式的请求统一把 url 图片下载成 base64，不依赖上游对图片 URL 的支持。
+	anthropicBody, err = inlineClaudeImageURLs(ctx, c, anthropicBody)
+	if err != nil {
+		writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return nil, err
+	}
 
 	// 6. Apply Claude Code mimicry for OAuth accounts.
 	// Chat Completions 协议进来的请求永远不是 Claude Code 客户端，所以对 OAuth 账号

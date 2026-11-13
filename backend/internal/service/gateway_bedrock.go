@@ -64,6 +64,13 @@ func (s *GatewayService) forwardBedrock(
 	reqStream := parsed.Stream
 	body := parsed.Body.Bytes()
 
+	// Bedrock 上的 Claude 不支持 url 图片源，先下载成 base64。
+	body, err := inlineClaudeImageURLs(ctx, c, body)
+	if err != nil {
+		writeAnthropicError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return nil, err
+	}
+
 	region := bedrockRuntimeRegion(account)
 	mappedModel, ok := ResolveBedrockModelID(account, reqModel)
 	if !ok {
