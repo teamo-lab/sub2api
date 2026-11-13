@@ -88,10 +88,6 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 		mappedModel = account.GetMappedModel(req.Model)
 	}
 
-	claudeBody, err := inlineClaudeImageURLs(ctx, c, claudeBody)
-	if err != nil {
-		return nil, s.writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
-	}
 	geminiReq, err := convertClaudeMessagesToGeminiGenerateContent(claudeBody)
 	if err != nil {
 		return nil, s.writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
@@ -116,6 +112,8 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 		useUpstreamStream,
 		GeminiRequestSessionID(c),
 	)
+
+	imageURLFallbackPending := claudeBodyHasImageURL(claudeBody)
 
 	var resp *http.Response
 	for attempt := 1; attempt <= geminiMaxRetries; attempt++ {
@@ -148,6 +146,33 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 			}
 			setOpsUpstreamError(c, 0, safeErr, "")
 			return nil, s.writeChatCompletionsError(c, http.StatusBadGateway, "upstream_error", "Upstream request failed after retries: "+safeErr)
+		}
+
+		// 上游拉不到 fileData 里的图片链接：由我们下载成 base64 重试一次。
+		if resp.StatusCode == http.StatusBadRequest && imageURLFallbackPending {
+			respBody := s.readUpstreamErrorBody(resp)
+			_ = resp.Body.Close()
+			resp = &http.Response{StatusCode: resp.StatusCode, Header: resp.Header.Clone(), Body: io.NopCloser(bytes.NewReader(respBody))}
+			if isGeminiImageURLFetchError(respBody) {
+				imageURLFallbackPending = false
+				inlinedBody, inlineErr := inlineClaudeImageURLs(ctx, c, claudeBody)
+				if inlineErr != nil {
+					return nil, s.writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", inlineErr.Error())
+				}
+				if retryGeminiReq, txErr := convertClaudeMessagesToGeminiGenerateContent(inlinedBody); txErr == nil {
+					logger.LegacyPrintf("service.gemini_chat_completions", "Gemini account %d: upstream could not fetch image url, retrying with inlined images", account.ID)
+					claudeBody = inlinedBody
+					buildReq, requestIDHeader = s.buildGeminiChatCompletionsUpstreamRequestFunc(
+						account,
+						mappedModel,
+						ensureGeminiFunctionCallThoughtSignatures(retryGeminiReq),
+						clientStream,
+						useUpstreamStream,
+						GeminiRequestSessionID(c),
+					)
+					continue
+				}
+			}
 		}
 
 		if matched, rebuilt := s.checkErrorPolicyInLoop(ctx, account, resp, mappedModel); matched {

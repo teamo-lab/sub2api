@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
@@ -168,64 +169,151 @@ func TestIsPublicImageFetchIP(t *testing.T) {
 	}
 }
 
-func TestConvertClaudeToGemini_RejectsUninlinedURLImage(t *testing.T) {
-	body := []byte(`{"model":"gemini-4-argon","messages":[{"role":"user","content":[{"type":"image","source":{"type":"url","url":"https://example.com/a.png"}}]}]}`)
-	_, err := convertClaudeMessagesToGeminiGenerateContent(body)
-	require.Error(t, err)
-	require.True(t, strings.Contains(err.Error(), "inlined"))
+func TestConvertClaudeToGemini_URLImageBecomesFileData(t *testing.T) {
+	body := []byte(`{"model":"gemini-4-argon","messages":[{"role":"user","content":[` +
+		`{"type":"image","source":{"type":"url","url":"https://img.alicdn.com/imgextra/i1/O1CN01_!!6000-0-tps-1024-406.jpg"}},` +
+		`{"type":"image","source":{"type":"url","url":"https://example.com/a.png?x=1"}}]}]}`)
+	out, err := convertClaudeMessagesToGeminiGenerateContent(body)
+	require.NoError(t, err)
+	first := gjson.GetBytes(out, "contents.0.parts.0.fileData")
+	require.Equal(t, "https://img.alicdn.com/imgextra/i1/O1CN01_!!6000-0-tps-1024-406.jpg", first.Get("fileUri").String())
+	require.Equal(t, "image/jpeg", first.Get("mimeType").String())
+	require.Equal(t, "image/png", gjson.GetBytes(out, "contents.0.parts.1.fileData.mimeType").String())
 }
 
-func geminiImageCompatFixture(t *testing.T) (*GeminiMessagesCompatService, *geminiCompatHTTPUpstreamStub, *Account) {
+func TestGuessImageMIMEFromURL(t *testing.T) {
+	require.Equal(t, "image/png", guessImageMIMEFromURL("https://a.com/x.PNG?sig=1"))
+	require.Equal(t, "image/webp", guessImageMIMEFromURL("https://a.com/x.webp"))
+	require.Equal(t, "image/jpeg", guessImageMIMEFromURL("https://a.com/x"))
+}
+
+func TestIsGeminiImageURLFetchError(t *testing.T) {
+	require.True(t, isGeminiImageURLFetchError([]byte(`{"error":{"message":"Cannot fetch content from the provided URL. Status: URL_ERROR-ERROR_OTHER"}}`)))
+	require.True(t, isGeminiImageURLFetchError([]byte(`Status: URL_UNREACHABLE-UNREACHABLE_ROBOTS_ERROR`)))
+	require.False(t, isGeminiImageURLFetchError([]byte(`{"error":{"message":"Invalid thought signature"}}`)))
+}
+
+func TestAccountRequiresInlineImageURLs(t *testing.T) {
+	require.True(t, accountRequiresInlineImageURLs(&Account{Platform: PlatformAnthropic, Type: AccountTypeServiceAccount}))
+	require.True(t, accountRequiresInlineImageURLs(&Account{Platform: PlatformAnthropic, Type: AccountTypeBedrock}))
+	require.False(t, accountRequiresInlineImageURLs(&Account{Platform: PlatformAnthropic, Type: AccountTypeAPIKey}))
+	require.False(t, accountRequiresInlineImageURLs(&Account{Platform: PlatformAnthropic, Type: AccountTypeOAuth}))
+	require.False(t, accountRequiresInlineImageURLs(nil))
+}
+
+const geminiImageOKSSE = `data: {"response":{"candidates":[{"content":{"parts":[{"text":"a geometry exercise"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1100,"candidatesTokenCount":3}}}` + "\n\n" + "data: [DONE]\n\n"
+
+const geminiCannotFetchBody = `{"error":{"code":400,"message":"Cannot fetch content from the provided URL. Please ensure the URL is valid and accessible. Status: URL_ERROR-ERROR_OTHER","status":"INVALID_ARGUMENT"}}`
+
+// geminiSeqUpstreamStub 按顺序返回预设响应，并记录每次请求体。
+type geminiSeqUpstreamStub struct {
+	responses []func() *http.Response
+	bodies    [][]byte
+}
+
+func (s *geminiSeqUpstreamStub) Do(req *http.Request, proxyURL string, accountID int64, accountConcurrency int) (*http.Response, error) {
+	b, _ := io.ReadAll(req.Body)
+	s.bodies = append(s.bodies, b)
+	i := len(s.bodies) - 1
+	if i >= len(s.responses) {
+		i = len(s.responses) - 1
+	}
+	return s.responses[i](), nil
+}
+
+func (s *geminiSeqUpstreamStub) DoWithTLS(req *http.Request, proxyURL string, accountID int64, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	return s.Do(req, proxyURL, accountID, accountConcurrency)
+}
+
+func sseResponse() *http.Response {
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(geminiImageOKSSE))}
+}
+
+func cannotFetchResponse() *http.Response {
+	return &http.Response{StatusCode: http.StatusBadRequest, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(geminiCannotFetchBody))}
+}
+
+func geminiImageFixture(t *testing.T, responses ...func() *http.Response) (*GeminiMessagesCompatService, *geminiSeqUpstreamStub, *Account) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-	upstreamBody := `data: {"response":{"candidates":[{"content":{"parts":[{"text":"a geometry exercise"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1100,"candidatesTokenCount":3}}}` + "\n\n" + "data: [DONE]\n\n"
-	stub := &geminiCompatHTTPUpstreamStub{response: &http.Response{
-		StatusCode: http.StatusOK,
-		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-		Body:       io.NopCloser(strings.NewReader(upstreamBody)),
-	}}
+	stub := &geminiSeqUpstreamStub{responses: responses}
 	svc := &GeminiMessagesCompatService{tokenProvider: &GeminiTokenProvider{}, httpUpstream: stub, cfg: &config.Config{}}
 	account := &Account{ID: 1118, Platform: PlatformGemini, Type: AccountTypeOAuth, Concurrency: 1,
 		Credentials: map[string]any{"access_token": "ya29.test-token", "project_id": "project-1"}}
 	return svc, stub, account
 }
 
-// 复现 11-13 的线上问题：OpenAI 格式带 http 图片 URL，经 Gemini 组转发，上游必须收到 inlineData。
-func TestGeminiForwardAsChatCompletions_InlinesHTTPImageURL(t *testing.T) {
-	allowLoopbackImageFetch(t)
-	srv := newImageServer(t, nil)
-	svc, stub, account := geminiImageCompatFixture(t)
-
+func chatImageRequest(t *testing.T, imageURL string) (*gin.Context, *httptest.ResponseRecorder, []byte) {
+	t.Helper()
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
-	body := []byte(`{"model":"gemini-4-argon","messages":[{"role":"user","content":[{"type":"text","text":"描述这张图片"},{"type":"image_url","image_url":{"url":"` + srv.URL + `/a.png"}}]}]}`)
+	body := []byte(`{"model":"gemini-4-argon","messages":[{"role":"user","content":[{"type":"text","text":"描述这张图片"},{"type":"image_url","image_url":{"url":"` + imageURL + `"}}]}]}`)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	return c, rec, body
+}
+
+// 复现 11-13 的线上问题：OpenAI 格式带 http 图片 URL 经 Gemini 组转发，上游要收到这张图；
+// 默认把 URL 放进 fileData 交给上游去拉，我们不下载。
+func TestGeminiForwardAsChatCompletions_PassesImageURLAsFileData(t *testing.T) {
+	allowLoopbackImageFetch(t)
+	var hits int32
+	srv := newImageServer(t, &hits)
+	svc, stub, account := geminiImageFixture(t, sseResponse)
+	c, rec, body := chatImageRequest(t, srv.URL+"/a.png")
 
 	_, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, rec.Code)
+	require.Len(t, stub.bodies, 1)
+	fileData := gjson.GetBytes(stub.bodies[0], "request.contents.0.parts.#(fileData).fileData")
+	require.Equal(t, srv.URL+"/a.png", fileData.Get("fileUri").String(), "upstream request must carry the image url: %s", stub.bodies[0])
+	require.Equal(t, "image/png", fileData.Get("mimeType").String())
+	require.Equal(t, int32(0), atomic.LoadInt32(&hits), "should not download when upstream can fetch")
+}
 
-	sent, err := io.ReadAll(stub.lastReq.Body)
+// 上游拉不到链接（400 Cannot fetch content）时，下载成 base64 重试一次。
+func TestGeminiForwardAsChatCompletions_FallsBackToInlineWhenUpstreamCannotFetch(t *testing.T) {
+	allowLoopbackImageFetch(t)
+	srv := newImageServer(t, nil)
+	svc, stub, account := geminiImageFixture(t, cannotFetchResponse, sseResponse)
+	c, rec, body := chatImageRequest(t, srv.URL+"/a.png")
+
+	_, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body)
 	require.NoError(t, err)
-	inline := gjson.GetBytes(sent, "request.contents.0.parts.#(inlineData).inlineData")
-	require.True(t, inline.Exists(), "upstream request must carry the image: %s", sent)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Len(t, stub.bodies, 2)
+	require.True(t, gjson.GetBytes(stub.bodies[0], "request.contents.0.parts.#(fileData)").Exists())
+	inline := gjson.GetBytes(stub.bodies[1], "request.contents.0.parts.#(inlineData).inlineData")
 	require.Equal(t, "image/png", inline.Get("mimeType").String())
 	require.Equal(t, base64.StdEncoding.EncodeToString(testPNG), inline.Get("data").String())
 }
 
-func TestGeminiForwardAsChatCompletions_UnreachableImageURLReturns400(t *testing.T) {
+func TestGeminiForwardAsChatCompletions_FallbackDownloadFailureReturns400(t *testing.T) {
 	allowLoopbackImageFetch(t)
 	srv := newImageServer(t, nil)
-	svc, stub, account := geminiImageCompatFixture(t)
-
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	body := []byte(`{"model":"gemini-4-argon","messages":[{"role":"user","content":[{"type":"text","text":"描述这张图片"},{"type":"image_url","image_url":{"url":"` + srv.URL + `/missing"}}]}]}`)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	svc, stub, account := geminiImageFixture(t, cannotFetchResponse, sseResponse)
+	c, rec, body := chatImageRequest(t, srv.URL+"/missing")
 
 	_, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body)
 	require.Error(t, err)
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	require.Contains(t, rec.Body.String(), "failed to fetch image url")
-	require.Equal(t, 0, stub.calls, "must not call upstream without the image")
+	require.Len(t, stub.bodies, 1, "must not retry upstream without the image")
+}
+
+func TestGeminiForwardMessages_FallsBackToInlineWhenUpstreamCannotFetch(t *testing.T) {
+	allowLoopbackImageFetch(t)
+	srv := newImageServer(t, nil)
+	svc, stub, account := geminiImageFixture(t, cannotFetchResponse, sseResponse)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{"model":"gemini-4-argon","max_tokens":256,"messages":[{"role":"user","content":[{"type":"text","text":"描述"},{"type":"image","source":{"type":"url","url":"` + srv.URL + `/a.png"}}]}]}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+
+	_, err := svc.Forward(context.Background(), c, account, body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Len(t, stub.bodies, 2)
+	require.Equal(t, srv.URL+"/a.png", gjson.GetBytes(stub.bodies[0], "request.contents.0.parts.#(fileData).fileData.fileUri").String())
+	require.Equal(t, base64.StdEncoding.EncodeToString(testPNG), gjson.GetBytes(stub.bodies[1], "request.contents.0.parts.#(inlineData).inlineData.data").String())
 }

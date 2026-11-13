@@ -159,7 +159,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		return nil
 	}
 	// Vertex 上的 Claude 不支持 url 图片源，先下载成 base64。
-	if account.Platform == PlatformAnthropic && account.Type == AccountTypeServiceAccount {
+	if accountRequiresInlineImageURLs(account) {
 		inlinedBody, inlineErr := inlineClaudeImageURLs(ctx, c, body)
 		if inlineErr != nil {
 			writeAnthropicError(c, http.StatusBadRequest, "invalid_request_error", inlineErr.Error())

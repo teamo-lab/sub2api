@@ -602,16 +602,13 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 		mappedModel = account.GetMappedModel(req.Model)
 	}
 
-	body, err := inlineClaudeImageURLs(ctx, c, body)
-	if err != nil {
-		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
-	}
 	geminiReq, err := convertClaudeMessagesToGeminiGenerateContent(body)
 	if err != nil {
 		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 	}
 	geminiReq = ensureGeminiFunctionCallThoughtSignatures(geminiReq)
 	originalClaudeBody := body
+	imageURLFallbackPending := claudeBodyHasImageURL(body)
 
 	proxyURL := ""
 	if account.ProxyID != nil && account.Proxy != nil {
@@ -806,6 +803,26 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 			}
 			setOpsUpstreamError(c, 0, safeErr, "")
 			return nil, s.writeClaudeError(c, http.StatusBadGateway, "upstream_error", "Upstream request failed after retries: "+safeErr)
+		}
+
+		// 上游拉不到 fileData 里的图片链接：由我们下载成 base64 重试一次。
+		if resp.StatusCode == http.StatusBadRequest && imageURLFallbackPending {
+			respBody := s.readUpstreamErrorBody(resp)
+			_ = resp.Body.Close()
+			resp = &http.Response{StatusCode: resp.StatusCode, Header: resp.Header.Clone(), Body: io.NopCloser(bytes.NewReader(respBody))}
+			if isGeminiImageURLFetchError(respBody) {
+				imageURLFallbackPending = false
+				inlinedBody, inlineErr := inlineClaudeImageURLs(ctx, c, originalClaudeBody)
+				if inlineErr != nil {
+					return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", inlineErr.Error())
+				}
+				if retryGeminiReq, txErr := convertClaudeMessagesToGeminiGenerateContent(inlinedBody); txErr == nil {
+					logger.LegacyPrintf("service.gemini_messages_compat", "Gemini account %d: upstream could not fetch image url, retrying with inlined images", account.ID)
+					originalClaudeBody = inlinedBody
+					geminiReq = ensureGeminiFunctionCallThoughtSignatures(retryGeminiReq)
+					continue
+				}
+			}
 		}
 
 		// Special-case: signature/thought_signature validation errors are not transient, but may be fixed by
@@ -3432,8 +3449,19 @@ func convertClaudeMessagesToGeminiContents(messages any, toolUseIDToName map[str
 				case "image":
 					if src, ok := bm["source"].(map[string]any); ok {
 						if srcType, _ := src["type"].(string); srcType == "url" {
-							// 调用方应先用 inlineClaudeImageURLs 下载成 base64；走到这里说明漏了，报错而不是悄悄丢图。
-							return nil, errors.New("image url source must be inlined before conversion")
+							// Gemini 上游（含各家中转、Vertex）会自己去拉 fileData 里的 http(s) 链接，直接透传省掉下载和流量；
+							// 上游拉不到时回 400 "Cannot fetch content"，由调用方下载成 base64 重试一次。
+							imageURL, _ := src["url"].(string)
+							imageURL = strings.TrimSpace(imageURL)
+							if imageURL == "" {
+								return nil, errors.New("image url source is empty")
+							}
+							parts = append(parts, map[string]any{
+								"fileData": map[string]any{
+									"mimeType": guessImageMIMEFromURL(imageURL),
+									"fileUri":  imageURL,
+								},
+							})
 						} else if srcType == "base64" {
 							mediaType, _ := src["media_type"].(string)
 							data, _ := src["data"].(string)

@@ -102,11 +102,13 @@ func (s *GatewayService) ForwardAsResponses(
 	if err != nil {
 		return nil, fmt.Errorf("marshal anthropic request: %w", err)
 	}
-	// Sub2API 转成 Claude 格式的请求统一把 url 图片下载成 base64，不依赖上游对图片 URL 的支持。
-	anthropicBody, err = inlineClaudeImageURLs(ctx, c, anthropicBody)
-	if err != nil {
-		writeResponsesError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return nil, err
+	// Bedrock、Vertex 上的 Claude 不支持 url 图片源，先下载成 base64；其他上游直接透传 URL。
+	if accountRequiresInlineImageURLs(account) {
+		anthropicBody, err = inlineClaudeImageURLs(ctx, c, anthropicBody)
+		if err != nil {
+			writeResponsesError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+			return nil, err
+		}
 	}
 
 	// 6. Apply Claude Code mimicry for OAuth accounts (non-Claude-Code endpoints).

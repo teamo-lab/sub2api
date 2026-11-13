@@ -25,12 +25,13 @@ import (
 	"go.uber.org/zap"
 )
 
-// Claude 格式请求里的 {"type":"image","source":{"type":"url","url":...}} 需要先下载成
-// base64，再交给不会自己拉 URL 的上游或转换器：
-//   - Claude → Gemini / Antigravity 的转换只认 base64，URL 图片会被跳过，模型看不到图却返回 200；
-//   - Bedrock、Vertex 上的 Claude 不支持 url 图片源；
-//   - Chat Completions / Responses 进来、由 Sub2API 转成 Claude 格式的请求，统一在这里内联，
-//     不依赖下游各家对图片 URL 的支持程度。
+// 图片 URL 默认直接交给上游去拉，省掉我们这边的下载和出网流量（11-13 实测：Gemini 各中转/Vertex
+// 都认 fileData 里的 http 链接，Claude 中转认 url 图片源，OpenAI 认 image_url）。只有下面几种情况
+// 才由我们把 Claude 格式里的 {"type":"image","source":{"type":"url",...}} 下载成 base64：
+//   - Bedrock、Vertex 上的 Claude：不支持 url 图片源；
+//   - Antigravity：走 Cloud Code 内部接口，未验证能拉外链；
+//   - Gemini 上游回 400 "Cannot fetch content from the provided URL"（Google 抓取被 robots 或站点拦截）
+//     时，下载后重试一次。
 //
 // 下载失败时返回 *ImageURLInlineError，调用方回 400，不再悄悄丢图。
 const (
@@ -400,4 +401,54 @@ func redactImageURL(raw string) string {
 		out = out[:200] + "..."
 	}
 	return out
+}
+
+// accountRequiresInlineImageURLs 报告该账号的上游是否不支持 url 图片源，需要先下载成 base64。
+func accountRequiresInlineImageURLs(account *Account) bool {
+	if account == nil {
+		return false
+	}
+	return account.IsBedrock() || (account.Platform == PlatformAnthropic && account.Type == AccountTypeServiceAccount)
+}
+
+// claudeBodyHasImageURL 报告 Claude 格式请求体里是否有 url 图片源。
+func claudeBodyHasImageURL(body []byte) bool {
+	if len(body) == 0 || !bytes.Contains(body, []byte(`"url"`)) || !gjson.ValidBytes(body) {
+		return false
+	}
+	return len(collectClaudeImageURLRefs(body)) > 0
+}
+
+// isGeminiImageURLFetchError 识别 Gemini 上游拉不到 fileData 链接时的 400，例如
+// "Cannot fetch content from the provided URL ... Status: URL_ERROR-ERROR_OTHER" 或
+// "URL_UNREACHABLE-UNREACHABLE_ROBOTS_ERROR"。
+func isGeminiImageURLFetchError(body []byte) bool {
+	lower := strings.ToLower(string(body))
+	return strings.Contains(lower, "cannot fetch content") ||
+		strings.Contains(lower, "url_unreachable") ||
+		strings.Contains(lower, "url_error")
+}
+
+// guessImageMIMEFromURL 按扩展名猜图片类型，猜不到用 image/jpeg。Gemini 的 fileData 必须带
+// mimeType（Vertex 不填会 400），但类型填错不影响识别（实测 webp 填 image/jpeg、image/png 都正常）。
+func guessImageMIMEFromURL(raw string) string {
+	path := raw
+	if parsed, err := url.Parse(raw); err == nil {
+		path = parsed.Path
+	}
+	lower := strings.ToLower(path)
+	switch {
+	case strings.HasSuffix(lower, ".png"):
+		return "image/png"
+	case strings.HasSuffix(lower, ".webp"):
+		return "image/webp"
+	case strings.HasSuffix(lower, ".gif"):
+		return "image/gif"
+	case strings.HasSuffix(lower, ".heic"):
+		return "image/heic"
+	case strings.HasSuffix(lower, ".heif"):
+		return "image/heif"
+	default:
+		return "image/jpeg"
+	}
 }
