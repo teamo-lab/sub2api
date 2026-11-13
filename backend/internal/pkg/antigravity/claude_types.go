@@ -88,9 +88,10 @@ type ContentBlock struct {
 
 // ImageSource Claude 图片来源
 type ImageSource struct {
-	Type      string `json:"type"`       // "base64"
+	Type      string `json:"type"`       // "base64" 或 "url"
 	MediaType string `json:"media_type"` // "image/png", "image/jpeg" 等
 	Data      string `json:"data"`
+	URL       string `json:"url,omitempty"`
 }
 
 // ClaudeResponse Claude Messages API 响应

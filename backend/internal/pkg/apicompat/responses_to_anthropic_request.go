@@ -261,7 +261,7 @@ func responsesFunctionOutputToAnthropicContent(item ResponsesInputItem) json.Raw
 					blocks = append(blocks, AnthropicContentBlock{Type: "text", Text: part.Text})
 				}
 			case "input_image":
-				if source := dataURIToAnthropicImageSource(part.ImageURL); source != nil {
+				if source := imageURLToAnthropicImageSource(part.ImageURL); source != nil {
 					blocks = append(blocks, AnthropicContentBlock{Type: "image", Source: source})
 				}
 			}
@@ -477,7 +477,7 @@ func convertResponsesUserToAnthropicContent(raw json.RawMessage) (json.RawMessag
 				})
 			}
 		case "input_image":
-			src := dataURIToAnthropicImageSource(p.ImageURL)
+			src := imageURLToAnthropicImageSource(p.ImageURL)
 			if src != nil {
 				blocks = append(blocks, AnthropicContentBlock{
 					Type:   "image",
@@ -545,6 +545,21 @@ func fromResponsesCallIDToAnthropic(id string) string {
 		return "toolu_" + id
 	}
 	return id
+}
+
+// imageURLToAnthropicImageSource converts a Responses/Chat image_url value into
+// an AnthropicImageSource: data URIs become base64 sources and http(s) URLs
+// become url sources. Anything else returns nil. URL sources used to be
+// dropped here, which silently removed the image from the request; callers
+// whose upstream cannot fetch URLs inline them afterwards (see
+// service.inlineClaudeImageURLs).
+func imageURLToAnthropicImageSource(raw string) *AnthropicImageSource {
+	trimmed := strings.TrimSpace(raw)
+	lower := strings.ToLower(trimmed)
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
+		return &AnthropicImageSource{Type: "url", URL: trimmed}
+	}
+	return dataURIToAnthropicImageSource(trimmed)
 }
 
 // dataURIToAnthropicImageSource parses a data URI into an AnthropicImageSource.

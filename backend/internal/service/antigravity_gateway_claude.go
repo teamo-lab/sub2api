@@ -39,6 +39,12 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 	sessionID := getSessionID(c)
 	prefix := logPrefix(sessionID, account.Name)
 
+	// url 图片先下载成 base64：Claude → Gemini 的转换只认 base64
+	body, err := inlineClaudeImageURLs(ctx, c, body)
+	if err != nil {
+		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+	}
+
 	// 解析 Claude 请求
 	var claudeReq antigravity.ClaudeRequest
 	if err := json.Unmarshal(body, &claudeReq); err != nil {

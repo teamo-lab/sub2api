@@ -498,6 +498,9 @@ func buildParts(content json.RawMessage, toolIDToName map[string]string, allowDu
 						Data:     block.Source.Data,
 					},
 				})
+			} else if block.Source != nil && block.Source.Type == "url" {
+				// 调用方应先把 url 图片下载成 base64；走到这里说明漏了，报错而不是悄悄丢图。
+				return nil, false, fmt.Errorf("image url source must be inlined before conversion")
 			}
 
 		case "tool_use":
