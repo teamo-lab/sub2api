@@ -40,7 +40,7 @@ func routeTestAccount(id int64, priority int, rate float64) *Account {
 func feedRouteSamples(st *openAIRouteStats, accountID int64, model, shape string, ms int, n int, now time.Time) {
 	for i := 0; i < n; i++ {
 		start := now.Add(-time.Duration(ms) * time.Millisecond)
-		tk := st.startTicket(accountID, model, shape, true, nil, 180, start)
+		tk := st.startTicket(accountID, model, shape, true, nil, 180, 3600, start)
 		tk.markFirstToken(now)
 		tk.finish(true, now)
 	}
@@ -57,6 +57,8 @@ func TestParseOpenAIRouteABConfig(t *testing.T) {
 	def := defaultOpenAIRouteABConfig()
 	require.Equal(t, def.HalfLifeSec, cfg.HalfLifeSec, "invalid half life falls back to default")
 	require.Equal(t, def.Explore, cfg.Explore, "explore above 0.5 falls back to default")
+	require.Equal(t, 30000.0, def.CostMsPerRate, "0.05x rate is worth 1.5s")
+	require.Equal(t, 3600.0, cfg.LongHalfLifeSec)
 
 	g6 := int64(6)
 	g, ok := cfg.groupConfig(&g6)
@@ -174,12 +176,12 @@ func TestOpenAIRouteEstimateCountsStalledInflightImmediately(t *testing.T) {
 	feedRouteSamples(st, 4, "gpt-6.1-terra", shape, 3000, 20, now)
 
 	// 账号 1 有 4 条在途：2 条已等 90 秒没首字（挂住），2 条刚开始。
-	st.startTicket(1, "gpt-6.1-terra", shape, true, nil, 180, now.Add(-90*time.Second))
-	st.startTicket(1, "gpt-6.1-terra", shape, true, nil, 180, now.Add(-90*time.Second))
-	st.startTicket(1, "gpt-6.1-terra", shape, true, nil, 180, now.Add(-time.Second))
-	st.startTicket(1, "gpt-6.1-terra", shape, true, nil, 180, now.Add(-time.Second))
+	st.startTicket(1, "gpt-6.1-terra", shape, true, nil, 180, 3600, now.Add(-90*time.Second))
+	st.startTicket(1, "gpt-6.1-terra", shape, true, nil, 180, 3600, now.Add(-90*time.Second))
+	st.startTicket(1, "gpt-6.1-terra", shape, true, nil, 180, 3600, now.Add(-time.Second))
+	st.startTicket(1, "gpt-6.1-terra", shape, true, nil, 180, 3600, now.Add(-time.Second))
 	// 已出首字的长输出请求不算挂住。
-	long := st.startTicket(4, "gpt-6.1-terra", shape, true, nil, 180, now.Add(-200*time.Second))
+	long := st.startTicket(4, "gpt-6.1-terra", shape, true, nil, 180, 3600, now.Add(-200*time.Second))
 	long.markFirstToken(now.Add(-197 * time.Second))
 
 	hung := st.estimate(routeTestAccount(1, 1, 0.16), "gpt-6.1-terra", shape, cfg, now)
@@ -201,18 +203,92 @@ func TestOpenAIRouteEstimateIgnoresNonStreamForStall(t *testing.T) {
 
 	// 3 条非流式已跑 120 秒（正常的长推理），1 条流式已等 90 秒没首字。
 	for i := 0; i < 3; i++ {
-		st.startTicket(1, "gpt-6.1-sol", shape, false, nil, 180, now.Add(-120*time.Second))
+		st.startTicket(1, "gpt-6.1-sol", shape, false, nil, 180, 3600, now.Add(-120*time.Second))
 	}
 	est := st.estimate(routeTestAccount(1, 1, 0.16), "gpt-6.1-sol", shape, cfg, now)
 	require.Equal(t, 3, est.Inflight)
 	require.Zero(t, est.Stalled)
 	require.Zero(t, est.StallMs)
 
-	st.startTicket(1, "gpt-6.1-sol", shape, true, nil, 180, now.Add(-90*time.Second))
+	st.startTicket(1, "gpt-6.1-sol", shape, true, nil, 180, 3600, now.Add(-90*time.Second))
 	est = st.estimate(routeTestAccount(1, 1, 0.16), "gpt-6.1-sol", shape, cfg, now)
 	require.Equal(t, 4, est.Inflight)
 	require.Equal(t, 1, est.Stalled)
 	require.InDelta(t, 90000, est.StallMs, 1000, "the only streaming request is stuck: full 90s, not diluted by non-stream")
+}
+
+// 挂住按在途请求自己的档位判：忙的号上正在跑的大请求本来就要 30 秒才出首字，
+// 不能拿这次要选的小请求（3 秒）的预计去判它挂住。
+func TestOpenAIRouteEstimateStallUsesTicketShape(t *testing.T) {
+	cfg := defaultOpenAIRouteABConfig()
+	st := newOpenAIRouteStats()
+	now := time.Now()
+	heavy := openAIRouteShape("gpt-6.1-sol", "xhigh", "l")
+	light := openAIRouteShape("gpt-6.1-sol", "low", "s")
+	for _, id := range []int64{1, 17} {
+		feedRouteSamples(st, id, "gpt-6.1-sol", heavy, 30000, 20, now)
+		feedRouteSamples(st, id, "gpt-6.1-sol", light, 3000, 20, now)
+	}
+
+	// 大请求已等 40 秒：在它自己的档位里还没到 2 倍预计（60 秒），不算挂住。
+	st.startTicket(1, "gpt-6.1-sol", heavy, true, nil, 180, 3600, now.Add(-40*time.Second))
+	est := st.estimate(routeTestAccount(1, 1, 0.16), "gpt-6.1-sol", light, cfg, now)
+	require.Equal(t, 1, est.Inflight)
+	require.Zero(t, est.Stalled, "a long-prefill request within its own shape's budget is not stalled")
+
+	// 小请求已等 40 秒：远超它自己档位的 max(6s, 15s)，算挂住。
+	st.startTicket(1, "gpt-6.1-sol", light, true, nil, 180, 3600, now.Add(-40*time.Second))
+	est = st.estimate(routeTestAccount(1, 1, 0.16), "gpt-6.1-sol", heavy, cfg, now)
+	require.Equal(t, 2, est.Inflight)
+	require.Equal(t, 1, est.Stalled)
+	require.InDelta(t, 20000, est.StallMs, 1000)
+}
+
+// 稀疏的慢号：近 3 分钟只有 1 条样本，但近一小时一直慢。向长期偏移收缩时仍判它慢，
+// 不能因为最近样本少就当成「和大家一样」被首选。
+func TestOpenAIRouteEstimateShrinksSparseAccountTowardLongTerm(t *testing.T) {
+	cfg := defaultOpenAIRouteABConfig()
+	st := newOpenAIRouteStats()
+	now := time.Now()
+	shape := openAIRouteShape("gpt-6.1-sol", "high", "m")
+	earlier := now.Add(-30 * time.Minute)
+	feedRouteSamples(st, 1, "gpt-6.1-sol", shape, 5000, 30, earlier)
+	feedRouteSamples(st, 17, "gpt-6.1-sol", shape, 5000, 30, earlier)
+	feedRouteSamples(st, 4, "gpt-6.1-sol", shape, 60000, 20, earlier)
+	feedRouteSamples(st, 1, "gpt-6.1-sol", shape, 5000, 20, now)
+	feedRouteSamples(st, 17, "gpt-6.1-sol", shape, 5000, 20, now)
+	feedRouteSamples(st, 4, "gpt-6.1-sol", shape, 60000, 1, now)
+
+	ests := st.estimateAll([]*Account{routeTestAccount(1, 1, 0.16), routeTestAccount(4, 2, 0.2)}, "gpt-6.1-sol", shape, cfg, now)
+	require.Greater(t, ests[1].PredMs, 5*ests[0].PredMs, "sparse slow account keeps its long-term slowness")
+	require.Greater(t, ests[1].Score, ests[0].Score)
+
+	// 对照：没有长期历史时，1 条样本按「和大家一样」收缩。
+	fresh := newOpenAIRouteStats()
+	feedRouteSamples(fresh, 1, "gpt-6.1-sol", shape, 5000, 20, now)
+	feedRouteSamples(fresh, 17, "gpt-6.1-sol", shape, 5000, 20, now)
+	feedRouteSamples(fresh, 4, "gpt-6.1-sol", shape, 60000, 1, now)
+	cold := fresh.estimate(routeTestAccount(4, 2, 0.2), "gpt-6.1-sol", shape, cfg, now)
+	require.Less(t, cold.PredMs, ests[1].PredMs/2)
+}
+
+// 某个号只在某一档位慢（比如大上下文），在其他档位正常：预测这一档时要叠加它
+// 在该档位自己的残差，而不是只用全档位平均出来的账号偏移。
+func TestOpenAIRouteEstimateBlendsAccountShapeResidual(t *testing.T) {
+	cfg := defaultOpenAIRouteABConfig()
+	st := newOpenAIRouteStats()
+	now := time.Now()
+	big := openAIRouteShape("gpt-6.1-sol", "high", "l")
+	small := openAIRouteShape("gpt-6.1-sol", "high", "s")
+	feedRouteSamples(st, 1, "gpt-6.1-sol", big, 40000, 30, now)
+	feedRouteSamples(st, 17, "gpt-6.1-sol", big, 10000, 30, now)
+	feedRouteSamples(st, 1, "gpt-6.1-sol", small, 3000, 30, now)
+	feedRouteSamples(st, 17, "gpt-6.1-sol", small, 3000, 30, now)
+
+	bigEst := st.estimate(routeTestAccount(1, 1, 0.16), "gpt-6.1-sol", big, cfg, now)
+	smallEst := st.estimate(routeTestAccount(1, 1, 0.16), "gpt-6.1-sol", small, cfg, now)
+	require.Greater(t, bigEst.PredMs, 30000.0, "slow-on-big-requests shows up for the big shape")
+	require.Less(t, smallEst.PredMs, 4000.0, "and does not leak into the small shape")
 }
 
 func TestOpenAIRouteEstimateErrorPenaltyAndDecay(t *testing.T) {
@@ -221,7 +297,7 @@ func TestOpenAIRouteEstimateErrorPenaltyAndDecay(t *testing.T) {
 	now := time.Now()
 	shape := openAIRouteShape("gpt-6-astra", "high", "m")
 	for i := 0; i < 20; i++ {
-		tk := st.startTicket(3, "gpt-6-astra", shape, true, nil, cfg.HalfLifeSec, now)
+		tk := st.startTicket(3, "gpt-6-astra", shape, true, nil, cfg.HalfLifeSec, cfg.LongHalfLifeSec, now)
 		tk.finish(false, now) // 429/502
 	}
 	bad := st.estimate(routeTestAccount(3, 1, 0.1), "gpt-6-astra", shape, cfg, now)
