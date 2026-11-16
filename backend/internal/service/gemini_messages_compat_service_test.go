@@ -499,6 +499,74 @@ func TestCleanToolSchema_RemovesNestedDeprecatedAndNormalizesMixedScalarEnum(t *
 	require.Equal(t, []any{"enabled", "false", "1", "null"}, enumSchema["enum"])
 }
 
+func TestCleanToolSchema_DropsRecordKeywordsRejectedByGemini(t *testing.T) {
+	// Zod/TypeBox 生成的 Record<string, string> 形状；Vertex 对 propertyNames 回
+	// 400 "Unknown name \"propertyNames\" at 'tools[0].function_declarations[22]...'"。
+	schema := map[string]any{
+		"type":     "object",
+		"$comment": "generated",
+		"properties": map[string]any{
+			"env": map[string]any{
+				"type":                 "object",
+				"propertyNames":        map[string]any{"type": "string", "pattern": "^[A-Z_]+$"},
+				"additionalProperties": map[string]any{"type": "string"},
+				"examples":             []any{map[string]any{"HOME": "/root"}},
+				"x-mcp-header":         "X-Env",
+			},
+			"items": map[string]any{
+				"type":                  "array",
+				"items":                 map[string]any{"type": "object", "unevaluatedProperties": false},
+				"unevaluatedItems":      false,
+				"unevaluatedProperties": false,
+			},
+		},
+		"required": []any{"env"},
+	}
+
+	cleaned, ok := cleanToolSchema(schema).(map[string]any)
+	require.True(t, ok)
+	require.NotContains(t, cleaned, "$comment")
+	properties, ok := cleaned["properties"].(map[string]any)
+	require.True(t, ok)
+
+	env, ok := properties["env"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, map[string]any{"type": "OBJECT"}, env)
+
+	items, ok := properties["items"].(map[string]any)
+	require.True(t, ok)
+	require.NotContains(t, items, "unevaluatedItems")
+	require.NotContains(t, items, "unevaluatedProperties")
+	itemSchema, ok := items["items"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, map[string]any{"type": "OBJECT"}, itemSchema)
+	require.Equal(t, []any{"env"}, cleaned["required"])
+}
+
+func TestCleanToolSchema_KeepsPropertiesNamedLikeSchemaKeywords(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"deprecated":    map[string]any{"type": "boolean", "deprecated": true},
+			"propertyNames": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "minItems": 1},
+			"maxLength":     map[string]any{"type": "integer"},
+			"x-request-id":  map[string]any{"type": "string"},
+		},
+		"required": []any{"deprecated", "propertyNames"},
+	}
+
+	cleaned, ok := cleanToolSchema(schema).(map[string]any)
+	require.True(t, ok)
+	properties, ok := cleaned["properties"].(map[string]any)
+	require.True(t, ok)
+	require.Len(t, properties, 4)
+	require.Equal(t, map[string]any{"type": "STRING"}, properties["x-request-id"])
+	require.Equal(t, map[string]any{"type": "BOOLEAN"}, properties["deprecated"])
+	require.Equal(t, map[string]any{"type": "ARRAY", "items": map[string]any{"type": "STRING"}}, properties["propertyNames"])
+	require.Equal(t, map[string]any{"type": "INTEGER"}, properties["maxLength"])
+	require.Equal(t, []any{"deprecated", "propertyNames"}, cleaned["required"])
+}
+
 func TestCleanToolSchema_DropsEnumWithNonScalarValue(t *testing.T) {
 	schema := map[string]any{
 		"enum": []any{"valid", map[string]any{"invalid": true}},

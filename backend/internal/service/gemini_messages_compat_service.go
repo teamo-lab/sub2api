@@ -3645,6 +3645,32 @@ func isClaudeWebSearchToolMap(tool map[string]any) bool {
 	return strings.HasPrefix(toolType, "web_search") || toolType == "google_search"
 }
 
+// geminiUnsupportedToolSchemaKeys 是 Gemini functionDeclarations.parameters
+// （OpenAPI Schema 子集）不认识的 JSON Schema 关键字。Vertex / AI Studio 遇到
+// 未知字段会直接回 400 "Invalid JSON payload received. Unknown name ..."。
+// propertyNames 常见于 Zod/TypeBox 生成的 record 类型（pi、opencode、ai-sdk 等客户端）；
+// examples 是注解字段，Gemini 只认单数的 example。
+var geminiUnsupportedToolSchemaKeys = map[string]struct{}{
+	"$schema":               {},
+	"$id":                   {},
+	"$ref":                  {},
+	"$defs":                 {},
+	"definitions":           {},
+	"$comment":              {},
+	"examples":              {},
+	"additionalProperties":  {},
+	"patternProperties":     {},
+	"propertyNames":         {},
+	"unevaluatedProperties": {},
+	"unevaluatedItems":      {},
+	"minLength":             {},
+	"maxLength":             {},
+	"minItems":              {},
+	"maxItems":              {},
+	"exclusiveMinimum":      {},
+	"deprecated":            {},
+}
+
 // cleanToolSchema 清理工具的 JSON Schema，移除 Gemini 不支持的字段
 func cleanToolSchema(schema any) any {
 	if schema == nil {
@@ -3656,12 +3682,22 @@ func cleanToolSchema(schema any) any {
 		cleaned := make(map[string]any)
 		for key, value := range v {
 			// 跳过不支持的字段
-			if key == "$schema" || key == "$id" || key == "$ref" ||
-				key == "$defs" || key == "definitions" ||
-				key == "additionalProperties" || key == "patternProperties" || key == "minLength" ||
-				key == "maxLength" || key == "minItems" || key == "maxItems" || key == "exclusiveMinimum" ||
-				key == "deprecated" {
+			if _, unsupported := geminiUnsupportedToolSchemaKeys[key]; unsupported || strings.HasPrefix(key, "x-") {
+				// x-* 是厂商扩展（例如 MCP 的 x-mcp-header），Gemini 同样不认识。
 				continue
+			}
+			if key == "properties" {
+				// properties 的键是用户定义的参数名，不是 schema 关键字：
+				// 参数名叫 deprecated / propertyNames 之类时不能被当成关键字删掉，
+				// 否则 required 会引用一个不存在的属性。
+				if props, ok := value.(map[string]any); ok {
+					cleanedProps := make(map[string]any, len(props))
+					for name, propSchema := range props {
+						cleanedProps[name] = cleanToolSchema(propSchema)
+					}
+					cleaned[key] = cleanedProps
+					continue
+				}
 			}
 			// 递归清理嵌套对象
 			cleaned[key] = cleanToolSchema(value)
