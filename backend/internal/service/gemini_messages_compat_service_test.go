@@ -841,20 +841,45 @@ func TestConvertClaudeMessagesToGeminiGenerateContent_ExtractsToolResultImages(t
 
 	var geminiReq map[string]any
 	require.NoError(t, json.Unmarshal(converted, &geminiReq))
-	contents := geminiReq["contents"].([]any)
-	parts := contents[1].(map[string]any)["parts"].([]any)
-	require.Len(t, parts, 4)
+	contents, ok := geminiReq["contents"].([]any)
+	require.True(t, ok)
+	content, ok := contents[1].(map[string]any)
+	require.True(t, ok)
+	parts, ok := content["parts"].([]any)
+	require.True(t, ok)
+	// Gemini 拒绝 functionResponse 之后仍带其它 part 的轮次
+	//（"Requests ending with a model turn are not supported."），
+	// 工具结果图片因此被拆到紧随其后的独立 user 轮。
+	require.Len(t, parts, 2)
 
 	firstResponse := parts[0].(map[string]any)["functionResponse"].(map[string]any)
 	require.Equal(t, "inspect", firstResponse["name"])
 	require.Equal(t, "found it", firstResponse["response"].(map[string]any)["content"])
-	secondResponse := parts[1].(map[string]any)["functionResponse"].(map[string]any)
-	require.Equal(t, "[image attached below]", secondResponse["response"].(map[string]any)["content"])
+	secondPart, ok := parts[1].(map[string]any)
+	require.True(t, ok)
+	secondResponse, ok := secondPart["functionResponse"].(map[string]any)
+	require.True(t, ok)
+	secondResponseBody, ok := secondResponse["response"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "[image attached below]", secondResponseBody["content"])
 
-	firstImage := parts[2].(map[string]any)["inlineData"].(map[string]any)
+	imageContent, ok := contents[2].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "user", imageContent["role"])
+	imageParts, ok := imageContent["parts"].([]any)
+	require.True(t, ok)
+	require.Len(t, imageParts, 2)
+
+	firstImagePart, ok := imageParts[0].(map[string]any)
+	require.True(t, ok)
+	firstImage, ok := firstImagePart["inlineData"].(map[string]any)
+	require.True(t, ok)
 	require.Equal(t, "image/png", firstImage["mimeType"])
 	require.Equal(t, "aGVsbG8=", firstImage["data"])
-	secondImage := parts[3].(map[string]any)["inlineData"].(map[string]any)
+	secondImagePart, ok := imageParts[1].(map[string]any)
+	require.True(t, ok)
+	secondImage, ok := secondImagePart["inlineData"].(map[string]any)
+	require.True(t, ok)
 	require.Equal(t, "image/jpeg", secondImage["mimeType"])
 	require.Equal(t, "d29ybGQ=", secondImage["data"])
 }
