@@ -33,7 +33,7 @@ var geminiEmptyResponseClientBody = []byte(`{"error":{"code":502,"message":"Upst
 // SSE data 帧），判断这次回复里有没有真正的回答。
 //
 // 空回复：没有任何非 thought 的 text（去掉首尾空白后非空）/ functionCall / inlineData
-// 等内容 part，candidatesTokenCount 为 0（或只出现了空白文本），并且没有 MAX_TOKENS、SAFETY 等「有意义」的结束原因。
+// 等内容 part，candidatesTokenCount 为 0（或 text 字段存在但为空/纯空白），并且没有 MAX_TOKENS、SAFETY 等「有意义」的结束原因。
 type geminiEmptyResponseDetector struct {
 	sawEvent       bool   // 至少解析到一个 Gemini 响应对象
 	sawUnknownData bool   // 有非空但无法识别为 Gemini 响应的数据（格式未知，不拦）
@@ -41,7 +41,7 @@ type geminiEmptyResponseDetector struct {
 	passthrough    bool   // 出现了必须原样转发的结束原因 / 拦截 / 错误
 	finishReason   string // 最近看到的 finishReason
 	outputTokens   int64  // 观察到的最大 candidatesTokenCount
-	sawBlankText   bool   // 出现过只有空白字符（空格/换行/制表符）的非 thought text
+	sawBlankText   bool   // 出现过没有可见内容的非 thought text（"" 或只有空格/换行/制表符）
 }
 
 // decided 表示已经可以确定「不是空回复」，后续数据不用再缓冲。
@@ -54,8 +54,8 @@ func (d *geminiEmptyResponseDetector) empty() bool {
 	if d.decided() {
 		return false
 	}
-	// 只有空白文本时，上游通常会为这些空白计 1~2 个 candidatesTokenCount，
-	// 客户端看到的仍是空白回复，同样按空回复处理。
+	// 只出现空文本（"" 或纯空白）时，上游可能仍计了 candidatesTokenCount，
+	// 但客户端看到的是空白回复，同样按空回复处理。
 	return d.outputTokens == 0 || d.sawBlankText
 }
 
@@ -143,13 +143,14 @@ func geminiPartHasAnswer(part gjson.Result) bool {
 	return strings.TrimSpace(part.Get("text").String()) != ""
 }
 
-// geminiPartIsBlankText 判断 part 是否为非空但只含空白字符的非 thought text。
+// geminiPartIsBlankText 判断 part 是否为没有可见内容的非 thought text：字段存在，
+// 去掉首尾空白后为空（包括 "" 本身）。
 func geminiPartIsBlankText(part gjson.Result) bool {
 	if !part.IsObject() || part.Get("thought").Bool() {
 		return false
 	}
-	text := part.Get("text").String()
-	return text != "" && strings.TrimSpace(text) == ""
+	text := part.Get("text")
+	return text.Type == gjson.String && strings.TrimSpace(text.String()) == ""
 }
 
 // geminiReplayBody 把已经预读的数据放回响应体前面，Close 时关闭原始响应体。

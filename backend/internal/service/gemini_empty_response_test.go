@@ -30,6 +30,11 @@ func TestGeminiEmptyResponseDetector_NonStream(t *testing.T) {
 		{"empty body", ``, true},
 		{"whitespace body", "  \n", true},
 		{"code assist wrapper empty", `{"response":{"candidates":[],"usageMetadata":{"promptTokenCount":5}}}`, true},
+		{"empty string text with token counted", `{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":812,"candidatesTokenCount":1}}`, true},
+		{"empty string text with signature and token counted", `{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"sig"}]}}],"usageMetadata":{"candidatesTokenCount":3}}`, true},
+		{"no parts with token counted", `{"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}],"usageMetadata":{"candidatesTokenCount":3}}`, false},
+		{"empty string text with safety", `{"candidates":[{"content":{"parts":[{"text":""}]},"finishReason":"SAFETY"}],"usageMetadata":{"candidatesTokenCount":1}}`, false},
+		{"empty thought text with token counted", `{"candidates":[{"content":{"parts":[{"text":"","thought":true}]},"finishReason":"STOP"}],"usageMetadata":{"candidatesTokenCount":2}}`, false},
 		{"whitespace text", `{"candidates":[{"content":{"parts":[{"text":" "}]},"finishReason":"STOP"}],"usageMetadata":{"candidatesTokenCount":0}}`, true},
 		{"newline text with token counted", `{"candidates":[{"content":{"parts":[{"text":"\n\n"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":812,"candidatesTokenCount":1}}`, true},
 		{"mixed whitespace parts", `{"candidates":[{"content":{"parts":[{"text":" \t"},{"text":"\r\n "},{"text":"done","thought":true}]}}],"usageMetadata":{"candidatesTokenCount":2}}`, true},
@@ -85,6 +90,7 @@ func TestGeminiEmptyResponseDetector_Stream(t *testing.T) {
 		{"done only", "data: [DONE]\n\n", true},
 		{"thought then empty stop", geminiSSE(`{"candidates":[{"content":{"parts":[{"text":"hmm","thought":true}]}}]}`, `{"candidates":[{"content":{"parts":[{"text":""}]},"finishReason":"STOP"}]}`), true},
 		{"comment lines only", ": keepalive\n\n", true},
+		{"empty string chunks with token counted", geminiSSE(`{"candidates":[{"content":{"parts":[{"text":""}]}}]}`, `{"candidates":[{"content":{"parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":812,"candidatesTokenCount":1}}`), true},
 		{"whitespace chunks", geminiSSE(`{"candidates":[{"content":{"parts":[{"text":" "}]}}]}`, `{"candidates":[{"content":{"parts":[{"text":"\n\t"}]},"finishReason":"STOP"}],"usageMetadata":{"candidatesTokenCount":2}}`), true},
 
 		{"text in second chunk", geminiSSE(`{"candidates":[{"content":{"parts":[{"text":""}]}}]}`, `{"candidates":[{"content":{"parts":[{"text":"Hi"}]},"finishReason":"STOP"}]}`), false},
@@ -409,4 +415,33 @@ func TestGeminiForwardAsChatCompletions_LeadingNewlineThenTextPassesThrough(t *t
 	_, err := svc.ForwardAsChatCompletions(context.Background(), c, geminiPoolModeAPIKeyAccount(), body)
 	require.NoError(t, err)
 	require.Contains(t, rec.Body.String(), "Hello")
+}
+
+func TestGeminiForwardAsChatCompletions_EmptyStringWithTokensStreamFailsOver(t *testing.T) {
+	stream := geminiSSE(`{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":812,"candidatesTokenCount":1}}`)
+	svc, _ := newGeminiSkippedWriteService(http.StatusOK, stream)
+	c, rec := newGeminiEmptyTestContext("/v1/chat/completions")
+	body := []byte(strings.Replace(geminiChatTestBody, "%s", "true", 1))
+
+	res, err := svc.ForwardAsChatCompletions(context.Background(), c, geminiPoolModeAPIKeyAccount(), body)
+	require.Nil(t, res)
+	requireGeminiEmptyFailover(t, c, rec, err)
+}
+
+func TestGeminiForwardNative_EmptyStringWithTokensNonStreamFailsOver(t *testing.T) {
+	svc, _ := newGeminiSkippedWriteService(http.StatusOK, `{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":1}}`)
+	c, rec := newGeminiEmptyTestContext("/v1beta/models/gemini-3.8-flash:generateContent")
+
+	res, err := svc.ForwardNative(context.Background(), c, geminiPoolModeAPIKeyAccount(), "gemini-3.8-flash", "generateContent", false, []byte(geminiUsageTestRequest))
+	require.Nil(t, res)
+	requireGeminiEmptyFailover(t, c, rec, err)
+}
+
+// 正常回答结尾常带一个 {"text":"","thoughtSignature":...} 的收尾块，不能因此被误判。
+func TestGeminiEmptyResponseDetector_TextThenEmptyTailPassesThrough(t *testing.T) {
+	stream := geminiSSE(`{"candidates":[{"content":{"parts":[{"text":"Hello"}]}}]}`,
+		`{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"sig"}]},"finishReason":"STOP"}],"usageMetadata":{"candidatesTokenCount":2}}`)
+	_, det, err := peekGeminiResponseForEmpty(io.NopCloser(strings.NewReader(stream)), true, 0)
+	require.NoError(t, err)
+	require.False(t, det.empty())
 }
