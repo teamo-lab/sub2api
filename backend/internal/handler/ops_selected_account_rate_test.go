@@ -33,3 +33,38 @@ func TestSetOpsSelectedServiceAccountPublishesAccountAndCostRate(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, int64(1118), accountID)
 }
+
+func TestSetOpsSelectedServiceAccountPublishesSellRateAcrossFailover(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-4-argon:streamGenerateContent", nil)
+	c.Request.Header.Set(service.RouterContractHeader, service.RouterContractV2)
+
+	low, premium, cost := 0.4, 4.727, 0.45
+	setOpsSelectedServiceAccount(c, &service.Account{ID: 1124, Platform: service.PlatformGemini, SellRateMultiplier: &low})
+	setOpsSelectedServiceAccount(c, &service.Account{ID: 1132, Platform: service.PlatformGemini, SellRateMultiplier: &premium, RateMultiplier: &cost})
+	setOpsSelectedServiceAccount(c, &service.Account{ID: 1128, Platform: service.PlatformGemini})
+
+	var attempts []service.RouterUpstreamAttempt
+	require.NoError(t, json.Unmarshal([]byte(recorder.Header().Get(service.RouterAttemptsHeader)), &attempts))
+	require.Len(t, attempts, 3)
+	require.Equal(t, int64(1128), attempts[2].AccountID)
+	var sell map[string]float64
+	require.NoError(t, json.Unmarshal([]byte(recorder.Header().Get(service.RouterAccountSellRatesHeader)), &sell))
+	require.Equal(t, map[string]float64{"1124": 0.4, "1132": 4.727}, sell)
+	var costRates map[string]float64
+	require.NoError(t, json.Unmarshal([]byte(recorder.Header().Get(service.RouterAccountRatesHeader)), &costRates))
+	require.Equal(t, map[string]float64{"1132": 0.45}, costRates)
+}
+
+func TestSetOpsSelectedServiceAccountOmitsSellRateForPublicCallers(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	premium := 1.6
+	setOpsSelectedServiceAccount(c, &service.Account{ID: 1119, Platform: service.PlatformGemini, SellRateMultiplier: &premium})
+	require.Empty(t, recorder.Header().Get(service.RouterAccountSellRatesHeader))
+}

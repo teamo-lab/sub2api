@@ -232,25 +232,52 @@ const (
 	routerAccountRatesKey    = "router_upstream_account_rates"
 )
 
+// RouterAccountSellRatesHeader carries the sell multiplier
+// (Account.SellRateMultiplier, the per-account price that overrides the group
+// rate in ResolveSellRateMultiplier) of every account this request selected,
+// keyed by Sub2API's positive account id. Router charges the user by the last
+// attempted account's entry and falls back to the group rate when absent.
+const (
+	RouterAccountSellRatesHeader = "x-teamo-upstream-account-sell-rates"
+	routerAccountSellRatesKey    = "router_upstream_account_sell_rates"
+)
+
 // RecordRouterUpstreamAccountCostRate publishes the selected account's
 // configured cost multiplier. Accounts without an explicit, finite,
 // non-negative multiplier are omitted so Router keeps its group-rate fallback
 // instead of trusting BillingRateMultiplier's implicit 1.0 default.
 func RecordRouterUpstreamAccountCostRate(c *gin.Context, account *Account) {
-	if account == nil || account.ID <= 0 || account.RateMultiplier == nil || !RouterContractV2Requested(c) {
+	if account == nil || account.RateMultiplier == nil {
 		return
 	}
-	rate := *account.RateMultiplier
+	recordRouterUpstreamAccountRate(c, routerAccountRatesKey, RouterAccountRatesHeader, account.ID, *account.RateMultiplier)
+}
+
+// RecordRouterUpstreamAccountSellRate publishes the selected account's
+// explicit sell multiplier. Accounts whose SellRateOverride is not in effect
+// (nil, negative, NaN, Inf) are omitted so Router keeps charging the group rate.
+func RecordRouterUpstreamAccountSellRate(c *gin.Context, account *Account) {
+	rate, ok := account.SellRateOverride()
+	if !ok {
+		return
+	}
+	recordRouterUpstreamAccountRate(c, routerAccountSellRatesKey, RouterAccountSellRatesHeader, account.ID, rate)
+}
+
+func recordRouterUpstreamAccountRate(c *gin.Context, stateKey, header string, accountID int64, rate float64) {
+	if accountID <= 0 || !RouterContractV2Requested(c) {
+		return
+	}
 	if math.IsNaN(rate) || math.IsInf(rate, 0) || rate < 0 {
 		return
 	}
-	rates, _ := c.Get(routerAccountRatesKey)
+	rates, _ := c.Get(stateKey)
 	state, _ := rates.(map[string]float64)
 	if state == nil {
 		state = make(map[string]float64)
-		c.Set(routerAccountRatesKey, state)
+		c.Set(stateKey, state)
 	}
-	key := strconv.FormatInt(account.ID, 10)
+	key := strconv.FormatInt(accountID, 10)
 	if current, ok := state[key]; ok && current == rate {
 		return
 	}
@@ -262,5 +289,5 @@ func RecordRouterUpstreamAccountCostRate(c *gin.Context, account *Account) {
 	if err != nil {
 		return
 	}
-	setRouterPrivateHeader(c, RouterAccountRatesHeader, string(payload))
+	setRouterPrivateHeader(c, header, string(payload))
 }

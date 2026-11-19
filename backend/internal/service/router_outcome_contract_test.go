@@ -152,3 +152,61 @@ func TestRouterUpstreamAccountCostRatesNotWrittenAfterResponse(t *testing.T) {
 	RecordRouterUpstreamAccountCostRate(c, &Account{ID: 1118, RateMultiplier: &cheap})
 	require.Empty(t, recorder.Header().Get(RouterAccountRatesHeader))
 }
+
+func TestRouterUpstreamAccountSellRatesFollowSelectedAccounts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-4-argon:generateContent", nil)
+	c.Request.Header.Set(RouterContractHeader, RouterContractV2)
+
+	// 1124 serves first, fails over to 1132; both priced accounts stay in the map.
+	low, premium, free := 0.4, 4.727, 0.0
+	RecordRouterUpstreamAccountSellRate(c, &Account{ID: 1124, SellRateMultiplier: &low})
+	RecordRouterUpstreamAccountSellRate(c, &Account{ID: 1132, SellRateMultiplier: &premium})
+	RecordRouterUpstreamAccountSellRate(c, &Account{ID: 7, SellRateMultiplier: &free})
+	// Unpriced account: omitted so Router keeps the group rate.
+	cost := 0.45
+	RecordRouterUpstreamAccountSellRate(c, &Account{ID: 1118, RateMultiplier: &cost})
+
+	var rates map[string]float64
+	require.NoError(t, json.Unmarshal([]byte(recorder.Header().Get(RouterAccountSellRatesHeader)), &rates))
+	require.Equal(t, map[string]float64{"1124": 0.4, "1132": 4.727, "7": 0}, rates)
+	// Sell and cost headers are independent.
+	require.Empty(t, recorder.Header().Get(RouterAccountRatesHeader))
+}
+
+func TestRouterUpstreamAccountSellRatesRejectInvalidOrPublicCallers(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	negative, nan, inf := -1.0, math.NaN(), math.Inf(1)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Request.Header.Set(RouterContractHeader, RouterContractV2)
+	RecordRouterUpstreamAccountSellRate(c, &Account{ID: 1, SellRateMultiplier: &negative})
+	RecordRouterUpstreamAccountSellRate(c, &Account{ID: 2, SellRateMultiplier: &nan})
+	RecordRouterUpstreamAccountSellRate(c, &Account{ID: 3, SellRateMultiplier: &inf})
+	RecordRouterUpstreamAccountSellRate(c, &Account{ID: 4})
+	RecordRouterUpstreamAccountSellRate(c, nil)
+	require.Empty(t, recorder.Header().Get(RouterAccountSellRatesHeader))
+
+	premium := 1.6
+	public := httptest.NewRecorder()
+	pc, _ := gin.CreateTestContext(public)
+	pc.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	RecordRouterUpstreamAccountSellRate(pc, &Account{ID: 1119, SellRateMultiplier: &premium})
+	require.Empty(t, public.Header().Get(RouterAccountSellRatesHeader))
+}
+
+func TestRouterUpstreamAccountSellRatesNotWrittenAfterResponse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Request.Header.Set(RouterContractHeader, RouterContractV2)
+	c.String(http.StatusOK, "committed")
+	premium := 1.6
+	RecordRouterUpstreamAccountSellRate(c, &Account{ID: 1119, SellRateMultiplier: &premium})
+	require.Empty(t, recorder.Header().Get(RouterAccountSellRatesHeader))
+}
