@@ -293,6 +293,11 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 		return nil, s.writeGeminiChatCompletionsMappedError(c, account, resp.StatusCode, requestID, evBody)
 	}
 
+	// 上游 200 但没有任何回答：按上游故障换号，不把空回复交给客户端计费。
+	if err := s.guardGeminiEmptyResponse(c, account, resp, useUpstreamStream, requestID, mappedModel, "chat_completions"); err != nil {
+		return nil, err
+	}
+
 	var usage *ClaudeUsage
 	var firstTokenMs *int
 	if clientStream {

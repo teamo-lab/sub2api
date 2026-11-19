@@ -1107,6 +1107,11 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 		c.Header("x-request-id", requestID)
 	}
 
+	// 上游 200 但没有任何回答：按上游故障换号，不把空回复交给客户端计费。
+	if err := s.guardGeminiEmptyResponse(c, account, resp, req.Stream || useUpstreamStream, requestID, mappedModel, "messages"); err != nil {
+		return nil, err
+	}
+
 	var usage *ClaudeUsage
 	var firstTokenMs *int
 	if req.Stream {
@@ -1617,6 +1622,13 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 		}
 
 		return nil, s.writeGeminiNativeUpstreamError(c, account, resp, respBody, requestID, isOAuth)
+	}
+
+	// 上游 200 但没有任何回答：按上游故障换号，不把空回复交给客户端计费。
+	if action != "countTokens" {
+		if err := s.guardGeminiEmptyResponse(c, account, resp, useUpstreamStream, requestID, mappedModel, "native_"+action); err != nil {
+			return nil, err
+		}
 	}
 
 	var usage *ClaudeUsage
