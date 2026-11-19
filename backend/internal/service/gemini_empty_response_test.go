@@ -305,3 +305,67 @@ func TestGeminiForwardMessages_EmptyNonStreamFailsOver(t *testing.T) {
 	require.Nil(t, res)
 	requireGeminiEmptyFailover(t, c, rec, err)
 }
+
+// geminiEndlessReader 模拟迟迟不换行的上游：无限输出同一个字节，并记录被读走多少。
+type geminiEndlessReader struct {
+	b    byte
+	read int
+}
+
+func (r *geminiEndlessReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = r.b
+	}
+	r.read += len(p)
+	return len(p), nil
+}
+
+// 单个 data: 行超过预读上限且一直不换行时，预读必须在上限附近停下并放行，不能无界读取。
+func TestGeminiEmptyResponsePeek_HugeLineWithoutNewlineIsBounded(t *testing.T) {
+	const limit = 100 << 10
+	prefix := `data: {"candidates":[{"content":{"parts":[{"text":"`
+	src := &geminiEndlessReader{b: 'x'}
+	body := io.NopCloser(io.MultiReader(strings.NewReader(prefix), src))
+
+	replay, det, err := peekGeminiResponseForEmpty(body, true, limit)
+	require.NoError(t, err)
+	require.False(t, det.empty(), "an oversized line must pass through")
+	require.LessOrEqual(t, len(prefix)+src.read, limit+2*geminiEmptyResponsePeekChunk, "peek must stop near the limit")
+
+	got := make([]byte, limit+4096)
+	_, readErr := io.ReadFull(replay, got)
+	require.NoError(t, readErr)
+	require.Equal(t, prefix, string(got[:len(prefix)]))
+	require.Equal(t, strings.Repeat("x", len(got)-len(prefix)), string(got[len(prefix):]), "replay must continue the stream without gaps")
+}
+
+// 单行大于上限（例如大图片 inlineData）最终换行结束：放行，且重放字节完全一致。
+func TestGeminiEmptyResponsePeek_HugeSingleLineReplaysExactly(t *testing.T) {
+	const limit = 64 << 10
+	stream := geminiSSE(`{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"`+strings.Repeat("A", 3*limit)+`"}}]},"finishReason":"STOP"}]}`) +
+		geminiSSE(`{"candidates":[],"usageMetadata":{"candidatesTokenCount":1290}}`)
+
+	replay, det, err := peekGeminiResponseForEmpty(io.NopCloser(strings.NewReader(stream)), true, limit)
+	require.NoError(t, err)
+	require.False(t, det.empty())
+	got, readErr := io.ReadAll(replay)
+	require.NoError(t, readErr)
+	require.Equal(t, stream, string(got))
+}
+
+// 空回复被分成很小的片段到达（每次 Read 只给几个字节）也要能判定。
+func TestGeminiEmptyResponsePeek_EmptyStreamInTinyReads(t *testing.T) {
+	stream := geminiEmptyStopStream + geminiSSE(`{"usageMetadata":{"promptTokenCount":3}}`)
+	_, det, err := peekGeminiResponseForEmpty(io.NopCloser(iotestOneByteReader{r: strings.NewReader(stream)}), true, 0)
+	require.NoError(t, err)
+	require.True(t, det.empty())
+}
+
+type iotestOneByteReader struct{ r io.Reader }
+
+func (o iotestOneByteReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return o.r.Read(p[:1])
+}

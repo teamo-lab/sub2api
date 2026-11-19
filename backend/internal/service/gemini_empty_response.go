@@ -18,9 +18,13 @@ import (
 // 这种响应原样转给客户端会被当成成功计费，所以按上游故障处理并换号重试。
 const GeminiEmptyResponseReason GatewayFailureReason = "empty_response"
 
-// geminiEmptyResponsePeekLimit 是判定空回复前最多缓冲的字节数。超过上限说明上游
-// 已经吐了大量数据（多半是很长的 thought），不再拦截，直接按原样转发。
-const geminiEmptyResponsePeekLimit = 8 << 20
+// geminiEmptyResponsePeekLimit 是判定空回复前最多缓冲的字节数。真正的空回复只有
+// 几百字节；超过上限说明上游已经吐了大量数据（很长的 thought 或大图片行），不再拦截，
+// 直接按原样转发。每个请求的预读内存峰值约为 limit + geminiEmptyResponsePeekChunk。
+const geminiEmptyResponsePeekLimit = 1 << 20
+
+// geminiEmptyResponsePeekChunk 是流式预读的单次读取上限，也是超长行的分段大小。
+const geminiEmptyResponsePeekChunk = 32 << 10
 
 // geminiEmptyResponseClientBody 是所有账号都返回空回复时交给 handler 的错误体。
 var geminiEmptyResponseClientBody = []byte(`{"error":{"code":502,"message":"Upstream returned an empty response","status":"UNAVAILABLE"}}`)
@@ -183,22 +187,32 @@ func peekGeminiResponseForEmpty(body io.ReadCloser, upstreamStream bool, limit i
 		return replay, det, nil
 	}
 
-	br := bufio.NewReaderSize(body, 64*1024)
+	// ReadSlice 每次最多返回一个缓冲区大小的片段，超长行（大 thought / inlineData、
+	// 或迟迟不换行的异常上游）会被分段读入，每段之后都检查预算，内存峰值不超过
+	// limit + geminiEmptyResponsePeekChunk。
+	br := bufio.NewReaderSize(body, geminiEmptyResponsePeekChunk)
 	var buf bytes.Buffer
+	lineStart := 0
+	passthrough := func() io.ReadCloser {
+		return &geminiReplayBody{
+			Reader: io.MultiReader(bytes.NewReader(buf.Bytes()), br),
+			closer: body,
+		}
+	}
 	for {
-		line, err := br.ReadBytes('\n')
-		if len(line) > 0 {
-			buf.Write(line)
-			trimmed := bytes.TrimSpace(line)
-			if bytes.HasPrefix(trimmed, []byte("data:")) {
-				payload := bytes.TrimSpace(trimmed[len("data:"):])
-				if len(payload) > 0 && !bytes.Equal(payload, []byte("[DONE]")) {
-					det.observeJSON(payload)
-				}
-			} else if len(trimmed) > 0 && !geminiSSEMetaLine(trimmed) {
-				// 不是 SSE 格式（例如 JSON 数组流），无法判断，放行。
+		frag, err := br.ReadSlice('\n')
+		buf.Write(frag)
+		if errors.Is(err, bufio.ErrBufferFull) {
+			// 当前行还没读完。
+			if buf.Len() > limit {
 				det.sawUnknownData = true
+				return passthrough(), det, nil
 			}
+			continue
+		}
+		if buf.Len() > lineStart {
+			det.observeSSELine(buf.Bytes()[lineStart:])
+			lineStart = buf.Len()
 		}
 		if err != nil {
 			replay := &geminiReplayBody{closer: body}
@@ -209,15 +223,32 @@ func peekGeminiResponseForEmpty(body io.ReadCloser, upstreamStream bool, limit i
 			replay.Reader = io.MultiReader(bytes.NewReader(buf.Bytes()), geminiStickyErrReader{err: err})
 			return replay, det, err
 		}
-		if det.decided() || buf.Len() > limit {
-			if !det.decided() {
-				det.sawUnknownData = true
-			}
-			return &geminiReplayBody{
-				Reader: io.MultiReader(bytes.NewReader(buf.Bytes()), br),
-				closer: body,
-			}, det, nil
+		if det.decided() {
+			return passthrough(), det, nil
 		}
+		if buf.Len() > limit {
+			det.sawUnknownData = true
+			return passthrough(), det, nil
+		}
+	}
+}
+
+// observeSSELine 观察一行完整的 SSE 数据。
+func (d *geminiEmptyResponseDetector) observeSSELine(line []byte) {
+	trimmed := bytes.TrimSpace(line)
+	if len(trimmed) == 0 {
+		return
+	}
+	if bytes.HasPrefix(trimmed, []byte("data:")) {
+		payload := bytes.TrimSpace(trimmed[len("data:"):])
+		if len(payload) > 0 && !bytes.Equal(payload, []byte("[DONE]")) {
+			d.observeJSON(payload)
+		}
+		return
+	}
+	if !geminiSSEMetaLine(trimmed) {
+		// 不是 SSE 格式（例如 JSON 数组流），无法判断，放行。
+		d.sawUnknownData = true
 	}
 }
 
