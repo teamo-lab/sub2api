@@ -32,8 +32,8 @@ var geminiEmptyResponseClientBody = []byte(`{"error":{"code":502,"message":"Upst
 // geminiEmptyResponseDetector 逐个观察 Gemini 响应对象（非流式整包，或流式的每个
 // SSE data 帧），判断这次回复里有没有真正的回答。
 //
-// 空回复：没有任何非 thought 的 text / functionCall / inlineData 等内容 part，
-// candidatesTokenCount 为 0，并且没有 MAX_TOKENS、SAFETY 等「有意义」的结束原因。
+// 空回复：没有任何非 thought 的 text（去掉首尾空白后非空）/ functionCall / inlineData
+// 等内容 part，candidatesTokenCount 为 0（或只出现了空白文本），并且没有 MAX_TOKENS、SAFETY 等「有意义」的结束原因。
 type geminiEmptyResponseDetector struct {
 	sawEvent       bool   // 至少解析到一个 Gemini 响应对象
 	sawUnknownData bool   // 有非空但无法识别为 Gemini 响应的数据（格式未知，不拦）
@@ -41,6 +41,7 @@ type geminiEmptyResponseDetector struct {
 	passthrough    bool   // 出现了必须原样转发的结束原因 / 拦截 / 错误
 	finishReason   string // 最近看到的 finishReason
 	outputTokens   int64  // 观察到的最大 candidatesTokenCount
+	sawBlankText   bool   // 出现过只有空白字符（空格/换行/制表符）的非 thought text
 }
 
 // decided 表示已经可以确定「不是空回复」，后续数据不用再缓冲。
@@ -53,7 +54,9 @@ func (d *geminiEmptyResponseDetector) empty() bool {
 	if d.decided() {
 		return false
 	}
-	return d.outputTokens == 0
+	// 只有空白文本时，上游通常会为这些空白计 1~2 个 candidatesTokenCount，
+	// 客户端看到的仍是空白回复，同样按空回复处理。
+	return d.outputTokens == 0 || d.sawBlankText
 }
 
 // observeJSON 观察一个 Gemini 响应 JSON（自动解开 Code Assist 的 response 包装）。
@@ -103,6 +106,9 @@ func (d *geminiEmptyResponseDetector) observeJSON(raw []byte) {
 				d.hasContent = true
 				return false
 			}
+			if geminiPartIsBlankText(part) {
+				d.sawBlankText = true
+			}
 			return true
 		})
 		return true
@@ -134,7 +140,16 @@ func geminiPartHasAnswer(part gjson.Result) bool {
 			return true
 		}
 	}
-	return part.Get("text").String() != ""
+	return strings.TrimSpace(part.Get("text").String()) != ""
+}
+
+// geminiPartIsBlankText 判断 part 是否为非空但只含空白字符的非 thought text。
+func geminiPartIsBlankText(part gjson.Result) bool {
+	if !part.IsObject() || part.Get("thought").Bool() {
+		return false
+	}
+	text := part.Get("text").String()
+	return text != "" && strings.TrimSpace(text) == ""
 }
 
 // geminiReplayBody 把已经预读的数据放回响应体前面，Close 时关闭原始响应体。
