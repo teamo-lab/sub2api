@@ -88,6 +88,15 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 		mappedModel = account.GetMappedModel(req.Model)
 	}
 
+	// 有的上游收下 fileData 链接却不去拉（返回 200、模型看不到图），这类账号先下载成 base64。
+	if accountRequiresInlineImageURLs(account) && claudeBodyHasImageURL(claudeBody) {
+		inlinedBody, inlineErr := inlineClaudeImageURLs(ctx, c, claudeBody)
+		if inlineErr != nil {
+			return nil, s.writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", inlineErr.Error())
+		}
+		claudeBody = inlinedBody
+	}
+
 	geminiReq, err := convertClaudeMessagesToGeminiGenerateContent(claudeBody)
 	if err != nil {
 		return nil, s.writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())

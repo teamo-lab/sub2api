@@ -1163,6 +1163,23 @@ func (a *Account) IsCustomErrorCodesEnabled() bool {
 	return false
 }
 
+// InlinesImageURLs 报告该账号是否要求把图片 URL 先下载成 base64 再发上游（credentials.image_url_inline=true）。
+// 用于那些收下 fileData 链接却不去拉、返回 200 但模型看不到图的上游（11-19 实测 RootFlow 1119）。
+func (a *Account) InlinesImageURLs() bool {
+	if a == nil || a.Credentials == nil {
+		return false
+	}
+	if v, ok := a.Credentials["image_url_inline"]; ok {
+		switch t := v.(type) {
+		case bool:
+			return t
+		case string:
+			return strings.EqualFold(strings.TrimSpace(t), "true")
+		}
+	}
+	return false
+}
+
 // IsPoolMode 检查 API Key 账号是否启用池模式。
 // 池模式下，上游错误不标记本地账号状态，而是在同一账号上重试。
 func (a *Account) IsPoolMode() bool {

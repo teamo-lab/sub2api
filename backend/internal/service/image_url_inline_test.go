@@ -199,6 +199,10 @@ func TestAccountRequiresInlineImageURLs(t *testing.T) {
 	require.False(t, accountRequiresInlineImageURLs(&Account{Platform: PlatformAnthropic, Type: AccountTypeAPIKey}))
 	require.False(t, accountRequiresInlineImageURLs(&Account{Platform: PlatformAnthropic, Type: AccountTypeOAuth}))
 	require.False(t, accountRequiresInlineImageURLs(nil))
+	require.True(t, accountRequiresInlineImageURLs(&Account{Platform: PlatformGemini, Type: AccountTypeAPIKey, Credentials: map[string]any{"image_url_inline": true}}))
+	require.True(t, accountRequiresInlineImageURLs(&Account{Platform: PlatformGemini, Type: AccountTypeAPIKey, Credentials: map[string]any{"image_url_inline": "true"}}))
+	require.False(t, accountRequiresInlineImageURLs(&Account{Platform: PlatformGemini, Type: AccountTypeAPIKey, Credentials: map[string]any{"image_url_inline": false}}))
+	require.False(t, accountRequiresInlineImageURLs(&Account{Platform: PlatformGemini, Type: AccountTypeAPIKey}))
 }
 
 const geminiImageOKSSE = `data: {"response":{"candidates":[{"content":{"parts":[{"text":"a geometry exercise"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1100,"candidatesTokenCount":3}}}` + "\n\n" + "data: [DONE]\n\n"
@@ -316,4 +320,57 @@ func TestGeminiForwardMessages_FallsBackToInlineWhenUpstreamCannotFetch(t *testi
 	require.Len(t, stub.bodies, 2)
 	require.Equal(t, srv.URL+"/a.png", gjson.GetBytes(stub.bodies[0], "request.contents.0.parts.#(fileData).fileData.fileUri").String())
 	require.Equal(t, base64.StdEncoding.EncodeToString(testPNG), gjson.GetBytes(stub.bodies[1], "request.contents.0.parts.#(inlineData).inlineData.data").String())
+}
+
+// 11-19 线上问题：RootFlow 1119 收下 fileData 链接却不去拉，返回 200、模型说没收到图。
+// 账号设了 image_url_inline 时，第一次发上游就要带 base64，不能依赖 400 兜底。
+func TestGeminiForwardAsChatCompletions_InlinesImageURLWhenAccountRequires(t *testing.T) {
+	allowLoopbackImageFetch(t)
+	var hits int32
+	srv := newImageServer(t, &hits)
+	svc, stub, account := geminiImageFixture(t, sseResponse)
+	account.Credentials["image_url_inline"] = true
+	c, rec, body := chatImageRequest(t, srv.URL+"/a.png")
+
+	_, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Len(t, stub.bodies, 1)
+	require.False(t, gjson.GetBytes(stub.bodies[0], "request.contents.0.parts.#(fileData)").Exists(), "must not send fileData: %s", stub.bodies[0])
+	inline := gjson.GetBytes(stub.bodies[0], "request.contents.0.parts.#(inlineData).inlineData")
+	require.Equal(t, "image/png", inline.Get("mimeType").String())
+	require.Equal(t, base64.StdEncoding.EncodeToString(testPNG), inline.Get("data").String())
+	require.Equal(t, int32(1), atomic.LoadInt32(&hits))
+}
+
+func TestGeminiForwardAsChatCompletions_InlineDownloadFailureReturns400(t *testing.T) {
+	allowLoopbackImageFetch(t)
+	srv := newImageServer(t, nil)
+	svc, stub, account := geminiImageFixture(t, sseResponse)
+	account.Credentials["image_url_inline"] = true
+	c, rec, body := chatImageRequest(t, srv.URL+"/missing")
+
+	_, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body)
+	require.Error(t, err)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), "failed to fetch image url")
+	require.Empty(t, stub.bodies, "must not call upstream without the image")
+}
+
+func TestGeminiForwardMessages_InlinesImageURLWhenAccountRequires(t *testing.T) {
+	allowLoopbackImageFetch(t)
+	srv := newImageServer(t, nil)
+	svc, stub, account := geminiImageFixture(t, sseResponse)
+	account.Credentials["image_url_inline"] = true
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{"model":"gemini-4-argon","max_tokens":256,"messages":[{"role":"user","content":[{"type":"text","text":"描述"},{"type":"image","source":{"type":"url","url":"` + srv.URL + `/a.png"}}]}]}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+
+	_, err := svc.Forward(context.Background(), c, account, body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Len(t, stub.bodies, 1)
+	require.False(t, gjson.GetBytes(stub.bodies[0], "request.contents.0.parts.#(fileData)").Exists())
+	require.Equal(t, base64.StdEncoding.EncodeToString(testPNG), gjson.GetBytes(stub.bodies[0], "request.contents.0.parts.#(inlineData).inlineData.data").String())
 }

@@ -30,6 +30,8 @@ import (
 // 才由我们把 Claude 格式里的 {"type":"image","source":{"type":"url",...}} 下载成 base64：
 //   - Bedrock、Vertex 上的 Claude：不支持 url 图片源；
 //   - Antigravity：走 Cloud Code 内部接口，未验证能拉外链；
+//   - 账号 credentials 设了 image_url_inline=true：上游收下 fileData 链接却不去拉、返回 200 但模型
+//     看不到图（11-19 实测 RootFlow 1119），报错重试兜不住，只能事先下载；
 //   - Gemini 上游回 400 "Cannot fetch content from the provided URL"（Google 抓取被 robots 或站点拦截）
 //     时，下载后重试一次。
 //
@@ -408,7 +410,7 @@ func accountRequiresInlineImageURLs(account *Account) bool {
 	if account == nil {
 		return false
 	}
-	return account.IsBedrock() || (account.Platform == PlatformAnthropic && account.Type == AccountTypeServiceAccount)
+	return account.InlinesImageURLs() || account.IsBedrock() || (account.Platform == PlatformAnthropic && account.Type == AccountTypeServiceAccount)
 }
 
 // claudeBodyHasImageURL 报告 Claude 格式请求体里是否有 url 图片源。
