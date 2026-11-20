@@ -416,6 +416,12 @@ func (h *GatewayHandler) handleCCFailoverExhausted(c *gin.Context, lastErr *serv
 	if lastErr != nil && lastErr.StatusCode > 0 {
 		statusCode = lastErr.StatusCode
 	}
+	if service.IsGeminiCapabilityMissExhausted(lastErr) {
+		msg := service.ExtractUpstreamErrorMessage(lastErr.ResponseBody)
+		service.SetOpsUpstreamError(c, statusCode, msg, "")
+		h.chatCompletionsErrorResponse(c, statusCode, "invalid_request_error", msg)
+		return
+	}
 	if lastErr != nil && service.IsOpenAISilentRefusalErrorBody(lastErr.ResponseBody) {
 		service.SetOpsUpstreamError(c, statusCode, service.OpenAISilentRefusalClientMessage(), "")
 		h.chatCompletionsErrorResponse(c, http.StatusBadGateway, "upstream_error", service.OpenAISilentRefusalClientMessage())

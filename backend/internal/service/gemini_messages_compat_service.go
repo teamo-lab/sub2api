@@ -778,8 +778,14 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 
 	var resp *http.Response
 	signatureRetryStage := 0
+	var watchdog *geminiUpstreamWatchdog
+	defer func() { watchdog.release() }()
+	transientRetries := 0
 	for attempt := 1; attempt <= geminiMaxRetries; attempt++ {
-		upstreamReq, idHeader, err := buildReq(ctx)
+		watchdog.release()
+		var attemptCtx context.Context
+		attemptCtx, watchdog = newGeminiUpstreamWatchdog(ctx, s.geminiStreamFirstByteTimeout(useUpstreamStream), s.geminiStreamIdleTimeout(useUpstreamStream))
+		upstreamReq, idHeader, err := buildReq(attemptCtx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return nil, err
@@ -794,6 +800,10 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 
 		resp, err = s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
 		if err != nil {
+			reason, ok := geminiTransportFailureReason(ctx, watchdog, GeminiUpstreamRequestErrorReason)
+			if !ok {
+				return nil, ctx.Err()
+			}
 			safeErr := sanitizeUpstreamErrorMessage(err.Error())
 			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 				ProxyID:            opsUpstreamProxyID(account),
@@ -805,14 +815,18 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 				Kind:               "request_error",
 				Message:            safeErr,
 			})
-			if attempt < geminiMaxRetries {
-				logger.LegacyPrintf("service.gemini_messages_compat", "Gemini account %d: upstream request failed, retry %d/%d: %v", account.ID, attempt, geminiMaxRetries, err)
-				sleepGeminiBackoff(attempt)
+			if reason == GeminiUpstreamRequestErrorReason && transientRetries < geminiMaxTransientRetries && attempt < geminiMaxRetries {
+				transientRetries++
+				logger.LegacyPrintf("service.gemini_messages_compat", "Gemini account %d: upstream request failed, retry %d/%d: %v", account.ID, transientRetries, geminiMaxTransientRetries, err)
+				if sleepErr := sleepGeminiBackoffCtx(ctx, transientRetries); sleepErr != nil {
+					return nil, sleepErr
+				}
 				continue
 			}
-			setOpsUpstreamError(c, 0, safeErr, "")
-			return nil, s.writeClaudeError(c, http.StatusBadGateway, "upstream_error", "Upstream request failed after retries: "+safeErr)
+			// 连接失败 / 首字超时：换下一个账号，而不是把 502 直接交给客户端。
+			return nil, geminiTransportFailover(c, account, reason, safeErr)
 		}
+		resp.Body = watchdog.wrapBody(resp.Body)
 
 		// 上游拉不到 fileData 里的图片链接：由我们下载成 base64 重试一次。
 		if resp.StatusCode == http.StatusBadRequest && imageURLFallbackPending {
@@ -890,7 +904,9 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 					logger.LegacyPrintf("service.gemini_messages_compat", "Gemini account %d: detected signature-related 400, retrying with downgraded Claude blocks (%s)", account.ID, stageName)
 					geminiReq = retryGeminiReq
 					// Consume one retry budget attempt and continue with the updated request payload.
-					sleepGeminiBackoff(1)
+					if sleepErr := sleepGeminiBackoffCtx(ctx, 1); sleepErr != nil {
+						return nil, sleepErr
+					}
 					continue
 				}
 			}
@@ -928,7 +944,10 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 				// Mark as rate-limited early so concurrent requests avoid this account.
 				s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
 			}
-			if attempt < geminiMaxRetries {
+			// 中转自己没资源时同号重试没有意义，直接交给下面的换号逻辑。
+			retryable := classifyGeminiUpstreamError(resp.StatusCode, respBody) != geminiErrorNoCapacity
+			if retryable && transientRetries < geminiMaxTransientRetries && attempt < geminiMaxRetries {
+				transientRetries++
 				upstreamReqID := resp.Header.Get(requestIDHeader)
 				if upstreamReqID == "" {
 					upstreamReqID = resp.Header.Get("x-goog-request-id")
@@ -956,8 +975,10 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 					Detail:             upstreamDetail,
 				})
 
-				logger.LegacyPrintf("service.gemini_messages_compat", "Gemini account %d: upstream status %d, retry %d/%d", account.ID, resp.StatusCode, attempt, geminiMaxRetries)
-				sleepGeminiBackoff(attempt)
+				logger.LegacyPrintf("service.gemini_messages_compat", "Gemini account %d: upstream status %d, retry %d/%d", account.ID, resp.StatusCode, transientRetries, geminiMaxTransientRetries)
+				if sleepErr := sleepGeminiBackoffCtx(ctx, transientRetries); sleepErr != nil {
+					return nil, sleepErr
+				}
 				continue
 			}
 			// Final attempt: surface the upstream error body (mapped below) instead of a generic retry error.
@@ -1030,6 +1051,15 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 
 		// ErrorPolicyNone → 原有逻辑
 		s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+		{
+			upstreamReqID := resp.Header.Get(requestIDHeader)
+			if upstreamReqID == "" {
+				upstreamReqID = resp.Header.Get("x-goog-request-id")
+			}
+			if failoverErr := s.geminiImmediateFailover(c, account, resp.StatusCode, respBody, upstreamReqID); failoverErr != nil {
+				return nil, failoverErr
+			}
+		}
 		// 精确匹配服务端配置类 400 错误，触发 failover + 临时封禁
 		if resp.StatusCode == http.StatusBadRequest {
 			msg400 := strings.ToLower(strings.TrimSpace(extractUpstreamErrorMessage(respBody)))
@@ -1108,7 +1138,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 	}
 
 	// 上游 200 但没有任何回答：按上游故障换号，不把空回复交给客户端计费。
-	if err := s.guardGeminiEmptyResponse(c, account, resp, req.Stream || useUpstreamStream, requestID, mappedModel, "messages"); err != nil {
+	if err := s.guardGeminiEmptyResponse(ctx, c, account, resp, watchdog, req.Stream || useUpstreamStream, requestID, mappedModel, "messages"); err != nil {
 		return nil, err
 	}
 
@@ -1356,8 +1386,14 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 	}
 
 	var resp *http.Response
+	var watchdog *geminiUpstreamWatchdog
+	defer func() { watchdog.release() }()
+	transientRetries := 0
 	for attempt := 1; attempt <= geminiMaxRetries; attempt++ {
-		upstreamReq, idHeader, err := buildReq(ctx)
+		watchdog.release()
+		var attemptCtx context.Context
+		attemptCtx, watchdog = newGeminiUpstreamWatchdog(ctx, s.geminiStreamFirstByteTimeout(useUpstreamStream), s.geminiStreamIdleTimeout(useUpstreamStream))
+		upstreamReq, idHeader, err := buildReq(attemptCtx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return nil, err
@@ -1372,6 +1408,10 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 
 		resp, err = s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
 		if err != nil {
+			reason, ok := geminiTransportFailureReason(ctx, watchdog, GeminiUpstreamRequestErrorReason)
+			if !ok {
+				return nil, ctx.Err()
+			}
 			safeErr := sanitizeUpstreamErrorMessage(err.Error())
 			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 				ProxyID:            opsUpstreamProxyID(account),
@@ -1383,9 +1423,12 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 				Kind:               "request_error",
 				Message:            safeErr,
 			})
-			if attempt < geminiMaxRetries {
-				logger.LegacyPrintf("service.gemini_messages_compat", "Gemini account %d: upstream request failed, retry %d/%d: %v", account.ID, attempt, geminiMaxRetries, err)
-				sleepGeminiBackoff(attempt)
+			if reason == GeminiUpstreamRequestErrorReason && transientRetries < geminiMaxTransientRetries && attempt < geminiMaxRetries {
+				transientRetries++
+				logger.LegacyPrintf("service.gemini_messages_compat", "Gemini account %d: upstream request failed, retry %d/%d: %v", account.ID, transientRetries, geminiMaxTransientRetries, err)
+				if sleepErr := sleepGeminiBackoffCtx(ctx, transientRetries); sleepErr != nil {
+					return nil, sleepErr
+				}
 				continue
 			}
 			if action == "countTokens" {
@@ -1401,9 +1444,10 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 					FirstTokenMs:  nil,
 				}, nil
 			}
-			setOpsUpstreamError(c, 0, safeErr, "")
-			return nil, s.writeGoogleError(c, http.StatusBadGateway, "Upstream request failed after retries: "+safeErr)
+			// 连接失败 / 首字超时：换下一个账号，而不是把 502 直接交给客户端。
+			return nil, geminiTransportFailover(c, account, reason, safeErr)
 		}
+		resp.Body = watchdog.wrapBody(resp.Body)
 
 		// 错误策略优先：匹配则跳过重试直接处理。
 		if matched, rebuilt := s.checkErrorPolicyInLoop(ctx, account, resp, mappedModel); matched {
@@ -1428,7 +1472,10 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 			if resp.StatusCode == 429 {
 				s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
 			}
-			if attempt < geminiMaxRetries {
+			// 中转自己没资源时同号重试没有意义，直接交给下面的换号逻辑。
+			retryable := classifyGeminiUpstreamError(resp.StatusCode, respBody) != geminiErrorNoCapacity
+			if retryable && transientRetries < geminiMaxTransientRetries && attempt < geminiMaxRetries {
+				transientRetries++
 				upstreamReqID := resp.Header.Get(requestIDHeader)
 				if upstreamReqID == "" {
 					upstreamReqID = resp.Header.Get("x-goog-request-id")
@@ -1456,8 +1503,10 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 					Detail:             upstreamDetail,
 				})
 
-				logger.LegacyPrintf("service.gemini_messages_compat", "Gemini account %d: upstream status %d, retry %d/%d", account.ID, resp.StatusCode, attempt, geminiMaxRetries)
-				sleepGeminiBackoff(attempt)
+				logger.LegacyPrintf("service.gemini_messages_compat", "Gemini account %d: upstream status %d, retry %d/%d", account.ID, resp.StatusCode, transientRetries, geminiMaxTransientRetries)
+				if sleepErr := sleepGeminiBackoffCtx(ctx, transientRetries); sleepErr != nil {
+					return nil, sleepErr
+				}
 				continue
 			}
 			if action == "countTokens" {
@@ -1564,6 +1613,9 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 
 		// ErrorPolicyNone → 原有逻辑
 		s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+		if failoverErr := s.geminiImmediateFailover(c, account, resp.StatusCode, unwrapIfNeeded(isOAuth, respBody), requestID); failoverErr != nil {
+			return nil, failoverErr
+		}
 		// 精确匹配服务端配置类 400 错误，触发 failover + 临时封禁
 		if resp.StatusCode == http.StatusBadRequest {
 			msg400 := strings.ToLower(strings.TrimSpace(extractUpstreamErrorMessage(respBody)))
@@ -1626,7 +1678,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 
 	// 上游 200 但没有任何回答：按上游故障换号，不把空回复交给客户端计费。
 	if action != "countTokens" {
-		if err := s.guardGeminiEmptyResponse(c, account, resp, useUpstreamStream, requestID, mappedModel, "native_"+action); err != nil {
+		if err := s.guardGeminiEmptyResponse(ctx, c, account, resp, watchdog, useUpstreamStream, requestID, mappedModel, "native_"+action); err != nil {
 			return nil, err
 		}
 	}
@@ -1743,6 +1795,10 @@ func (s *GeminiMessagesCompatService) shouldFailoverGeminiUpstreamError(statusCo
 // （池模式账号按 pool_mode_retry_count 先同账号重试）；返回 nil 表示状态码不可 failover，
 // 由调用方决定客户端写出。Skipped 只豁免账号状态标记，不豁免换号，与 OpenAI 网关路径一致。
 func (s *GeminiMessagesCompatService) skippedErrorPolicyFailoverError(c *gin.Context, account *Account, statusCode int, respBody []byte, upstreamRequestID string) *UpstreamFailoverError {
+	// 能力缺失 / 402 / 中转无资源：直接换号，不按池模式在同一个账号上重试。
+	if failoverErr := s.geminiImmediateFailover(c, account, statusCode, respBody, upstreamRequestID); failoverErr != nil {
+		return failoverErr
+	}
 	if !s.shouldFailoverGeminiUpstreamError(statusCode) {
 		return nil
 	}
@@ -1846,7 +1902,11 @@ func (s *GeminiMessagesCompatService) writeGeminiNativeUpstreamError(c *gin.Cont
 	return fmt.Errorf("gemini upstream error: %d message=%s", resp.StatusCode, upstreamMsg)
 }
 
-func sleepGeminiBackoff(attempt int) {
+// geminiBackoffDelay 返回第 attempt 次重试前的退避时长（指数退避，±20% 抖动）。
+func geminiBackoffDelay(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
 	delay := geminiRetryBaseDelay * time.Duration(1<<uint(attempt-1))
 	if delay > geminiRetryMaxDelay {
 		delay = geminiRetryMaxDelay
@@ -1859,7 +1919,7 @@ func sleepGeminiBackoff(attempt int) {
 	if sleepFor < 0 {
 		sleepFor = 0
 	}
-	time.Sleep(sleepFor)
+	return sleepFor
 }
 
 var (

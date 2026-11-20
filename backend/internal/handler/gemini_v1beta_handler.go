@@ -708,6 +708,13 @@ func (h *GatewayHandler) handleGeminiFailoverExhausted(c *gin.Context, failoverE
 	upstreamMsg := service.ExtractUpstreamErrorMessage(responseBody)
 	service.SetOpsUpstreamError(c, statusCode, upstreamMsg, "")
 
+	// 所有账号都接不了这个请求（能力缺失的 4xx）：原样交回上游错误，客户端能看到真实原因，
+	// 和换号前直接透传的行为一致，而不是统一变成 502。
+	if service.IsGeminiCapabilityMissExhausted(failoverErr) {
+		c.Data(statusCode, "application/json", responseBody)
+		return
+	}
+
 	// 使用默认的错误映射
 	status, message := mapGeminiUpstreamError(statusCode)
 	googleError(c, status, message)

@@ -125,8 +125,14 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 	imageURLFallbackPending := claudeBodyHasImageURL(claudeBody)
 
 	var resp *http.Response
+	var watchdog *geminiUpstreamWatchdog
+	defer func() { watchdog.release() }()
+	transientRetries := 0
 	for attempt := 1; attempt <= geminiMaxRetries; attempt++ {
-		upstreamReq, idHeader, err := buildReq(ctx)
+		watchdog.release()
+		var attemptCtx context.Context
+		attemptCtx, watchdog = newGeminiUpstreamWatchdog(ctx, s.geminiStreamFirstByteTimeout(useUpstreamStream), s.geminiStreamIdleTimeout(useUpstreamStream))
+		upstreamReq, idHeader, err := buildReq(attemptCtx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return nil, err
@@ -137,6 +143,10 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 
 		resp, err = s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
 		if err != nil {
+			reason, ok := geminiTransportFailureReason(ctx, watchdog, GeminiUpstreamRequestErrorReason)
+			if !ok {
+				return nil, ctx.Err()
+			}
 			safeErr := sanitizeUpstreamErrorMessage(err.Error())
 			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 				ProxyID:            opsUpstreamProxyID(account),
@@ -148,14 +158,18 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 				Kind:               "request_error",
 				Message:            safeErr,
 			})
-			if attempt < geminiMaxRetries {
-				logger.LegacyPrintf("service.gemini_chat_completions", "Gemini account %d: upstream request failed, retry %d/%d: %v", account.ID, attempt, geminiMaxRetries, err)
-				sleepGeminiBackoff(attempt)
+			if reason == GeminiUpstreamRequestErrorReason && transientRetries < geminiMaxTransientRetries && attempt < geminiMaxRetries {
+				transientRetries++
+				logger.LegacyPrintf("service.gemini_chat_completions", "Gemini account %d: upstream request failed, retry %d/%d: %v", account.ID, transientRetries, geminiMaxTransientRetries, err)
+				if sleepErr := sleepGeminiBackoffCtx(ctx, transientRetries); sleepErr != nil {
+					return nil, sleepErr
+				}
 				continue
 			}
-			setOpsUpstreamError(c, 0, safeErr, "")
-			return nil, s.writeChatCompletionsError(c, http.StatusBadGateway, "upstream_error", "Upstream request failed after retries: "+safeErr)
+			// 连接失败 / 首字超时：换下一个账号，而不是把 502 直接交给客户端。
+			return nil, geminiTransportFailover(c, account, reason, safeErr)
 		}
+		resp.Body = watchdog.wrapBody(resp.Body)
 
 		// 上游拉不到 fileData 里的图片链接：由我们下载成 base64 重试一次。
 		if resp.StatusCode == http.StatusBadRequest && imageURLFallbackPending {
@@ -205,7 +219,10 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 			if resp.StatusCode == http.StatusTooManyRequests {
 				s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
 			}
-			if attempt < geminiMaxRetries {
+			// 中转自己没资源时同号重试没有意义，直接交给下面的换号逻辑。
+			retryable := classifyGeminiUpstreamError(resp.StatusCode, respBody) != geminiErrorNoCapacity
+			if retryable && transientRetries < geminiMaxTransientRetries && attempt < geminiMaxRetries {
+				transientRetries++
 				upstreamReqID := resp.Header.Get(requestIDHeader)
 				if upstreamReqID == "" {
 					upstreamReqID = resp.Header.Get("x-goog-request-id")
@@ -223,8 +240,10 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 					Kind:               "retry",
 					Message:            upstreamMsg,
 				})
-				logger.LegacyPrintf("service.gemini_chat_completions", "Gemini account %d: upstream status %d, retry %d/%d", account.ID, resp.StatusCode, attempt, geminiMaxRetries)
-				sleepGeminiBackoff(attempt)
+				logger.LegacyPrintf("service.gemini_chat_completions", "Gemini account %d: upstream status %d, retry %d/%d", account.ID, resp.StatusCode, transientRetries, geminiMaxTransientRetries)
+				if sleepErr := sleepGeminiBackoffCtx(ctx, transientRetries); sleepErr != nil {
+					return nil, sleepErr
+				}
 				continue
 			}
 			resp = &http.Response{
@@ -265,6 +284,11 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 		}
 		evBody := unwrapIfNeeded(account.Type == AccountTypeOAuth, respBody)
 
+		// 能力缺失 / 402 / 中转无资源：直接换号，不在同一个账号上重试。
+		if failoverErr := s.geminiImmediateFailover(c, account, resp.StatusCode, evBody, requestID); failoverErr != nil {
+			return nil, failoverErr
+		}
+
 		if s.shouldFailoverGeminiUpstreamError(resp.StatusCode) {
 			upstreamMsg := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(evBody)))
 			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
@@ -294,7 +318,7 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 	}
 
 	// 上游 200 但没有任何回答：按上游故障换号，不把空回复交给客户端计费。
-	if err := s.guardGeminiEmptyResponse(c, account, resp, useUpstreamStream, requestID, mappedModel, "chat_completions"); err != nil {
+	if err := s.guardGeminiEmptyResponse(ctx, c, account, resp, watchdog, useUpstreamStream, requestID, mappedModel, "chat_completions"); err != nil {
 		return nil, err
 	}
 
