@@ -1022,6 +1022,8 @@ func filterSchedulerExtra(extra map[string]any) map[string]any {
 		"auto_pause_5h_disabled",
 		"auto_pause_7d_disabled",
 		"model_rate_limits",
+		// 选路能力过滤（route_ab_gemini.go）在负载层 / 粘性层读这个键，裁掉会让声明失效。
+		service.AccountRouteMissingCapsExtraKey,
 		service.UpstreamBillingProbeExtraKey,
 		service.GrokMediaEligibleExtraKey,
 		"grok_billing_snapshot",
