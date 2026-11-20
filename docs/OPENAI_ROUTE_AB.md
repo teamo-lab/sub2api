@@ -1,4 +1,4 @@
-# OpenAI 选路实验（影子模式 + 按分组 A/B）
+# 选路实验（影子模式 + 按分组 A/B，OpenAI 与 Gemini 共用）
 
 ## 解决什么问题
 
@@ -42,7 +42,48 @@ ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 
 可调参数及默认值：`half_life_sec` 180、`long_half_life_sec` 3600、`cost_ms_per_rate` 30000、`temperature_ms` 5000、`explore` 0.03、`max_priority` 2、`stall_factor` 2、`stall_min_ms` 15000、`error_penalty_ms` 30000、`prior_samples` 5。
 
+### 分组级覆盖
+
+分组配置里可以覆盖下面几项，缺省沿用全局值：
+
+| 字段 | 含义 |
+|---|---|
+| `price_basis` | 价格项口径。`cost`（默认）用账号成本倍率 `rate_multiplier`；`sell` 用用户实际付的售价：账号 `sell_rate_multiplier`，没配时用分组倍率。按落地号售价扣费的分组要用 `sell`，选号直接决定用户付多少 |
+| `cost_ms_per_rate` | 价格权重，倍率每差 1.0 折合多少毫秒。设 0 就只比快慢 |
+| `max_priority` | 参与评分的最大 priority。更大的号只做兜底 |
+| `error_penalty_ms`、`stall_min_ms` | 同全局含义 |
+
+```json
+{"groups":{"6":{"mode":"shadow"},
+           "82":{"mode":"shadow","price_basis":"sell","cost_ms_per_rate":10000,"max_priority":5}},
+ "salt":"route-2026-11"}
+```
+
 统计数据在进程内存里，按实例各自记。蓝绿切换之后要几分钟才能重新攒到样本，这段时间评分退化为「成本 + 报错」。
+
+## Gemini 分组
+
+Gemini 号走 `GatewayService.SelectAccountWithLoadAwareness`，和 OpenAI 是两条选号路径，但打分、软分配、配置、`route_decision` 格式都是同一份（`openai_route_ab.go`），适配在 `route_ab_gemini.go`：
+
+- **入口**：`/v1beta/models/*:generateContent|streamGenerateContent`，以及 Gemini 分组的 `/v1/chat/completions`。其他入口（`/v1/messages` 等）不参与。
+- **档位**：模型 × thinking 档 × 请求体档。thinking 档取 `thinkingLevel`，或把 `thinkingBudget` 分成 off / low（≤2048）/ medium（≤8192）/ high / auto；chat 入口取 `reasoning_effort`。非流式另成一档（档位后缀 `|ns`），样本取整条响应耗时，只和非流式比。
+- **首字**：第一个非 thought 的回答片段（文本、functionCall、inlineData 等）。只出思考摘要不算，所以默认吐思考摘要的中转不会显得更快。
+- **失败**：转发返回错误即失败，包括空回复（上游 200 没有回答，已经按上游故障换号）。
+
+### 能力过滤（不依赖实验开关）
+
+有的中转不认部分 generationConfig，比如 AnyRoute 整个 generationConfig 都不生效，RootFlow 会丢 responseSchema。在账号 `extra` 里声明它缺的能力：
+
+```sql
+UPDATE accounts SET extra = jsonb_set(coalesce(extra,'{}'), '{route_missing_caps}', '["response_schema","output_limits"]') WHERE id = 1136;
+```
+
+| 能力 | 请求里出现这些时需要它 |
+|---|---|
+| `response_schema` | `responseSchema` / `responseJsonSchema` / `responseMimeType=application/json`；chat 的 `response_format` 为 `json_schema` 或 `json_object` |
+| `output_limits` | `maxOutputTokens` / `stopSequences`；chat 的 `max_tokens` / `max_completion_tokens` / `stop` |
+
+请求需要某项能力时，缺这项能力的号不走粘性，也不参与负载层评分。如果所有号都缺，就不排除，降级服务，不让请求变成无号可用。`temperature` 之类不影响结果形状的参数不算需求。
 
 ## usage_logs.route_decision
 
@@ -95,6 +136,7 @@ FROM t GROUP BY 1, 2 ORDER BY 1, 2;
 ## 这一期没做
 
 - 老会话迁移（B2 阶段）：粘性命中时两组都不迁移，只记 `layer=sticky`。
+- Gemini 分组里的 Antigravity OAuth 号（走 `antigravityGatewayService.ForwardGemini`）：会参与评分和在途统计，但流式首字没有打点，这类号不要放进开实验的分组。现在 HK 的 Gemini 分组全是 API Key 号。
 - Responses WebSocket 和 Anthropic Messages 入口：选号同样会按 B 组排序，但不记在途、首字和决策。nova 的流量 82% 是 HTTP `/v1/responses`、16% 是 `/v1/chat/completions`，这两条已经覆盖。
 
 ## 11-12 影子数据回放（为什么这样改）
