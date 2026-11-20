@@ -192,3 +192,28 @@ func TestSellRateRangeBusyInRangeAccountIsNotAPriceVerdict(t *testing.T) {
 	_, _, covered = svc.SellRateRangeCoverage(sellRangeTestContext(group, r), &group.ID, "", r)
 	require.False(t, covered)
 }
+
+func TestSellRateRangeCoverageCountsMixedAntigravityAccounts(t *testing.T) {
+	// Selection in a Gemini group also schedules mixed-enabled Antigravity
+	// accounts, so coverage must count them exactly the same way.
+	group := sellRangeTestGroup(82, 4.727)
+	pricey := sellRangeTestAccount(1132, 1, f64(4.727), group.ID)
+	mixed := sellRangeTestAccount(2001, 2, f64(2.0), group.ID)
+	mixed.Platform = PlatformAntigravity
+	mixed.Extra = map[string]any{"mixed_scheduling": true}
+	until := time.Now().Add(time.Minute)
+	mixed.RateLimitResetAt = &until
+	r := ParseSellRateRange("", "3.85")
+
+	svc := sellRangeTestService(pricey, mixed)
+	_, _, covered := svc.SellRateRangeCoverage(sellRangeTestContext(group, r), &group.ID, "", r)
+	require.True(t, covered, "a busy mixed Antigravity account inside the cap is capacity, not price")
+
+	notMixed := mixed
+	notMixed.Extra = map[string]any{}
+	svc = sellRangeTestService(pricey, notMixed)
+	lowest, found, covered := svc.SellRateRangeCoverage(sellRangeTestContext(group, r), &group.ID, "", r)
+	require.False(t, covered, "an Antigravity account without mixed scheduling never serves this group")
+	require.True(t, found)
+	require.InDelta(t, 4.727, lowest, 1e-9)
+}

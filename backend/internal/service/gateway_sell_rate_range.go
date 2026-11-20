@@ -143,7 +143,8 @@ func (s *GatewayService) isAccountWithinSellRateRange(ctx context.Context, accou
 
 // SellRateRangeCoverage looks at every account in the group that is set up to
 // serve the model: active, switched on for scheduling, not auto-paused after
-// expiry, on the group's platform and mapping the model. Transient state (rate
+// expiry, allowed for the platform exactly as selection allows it (including
+// mixed-enabled Antigravity accounts) and mapping the model. Transient state (rate
 // limits, overload, temporary unschedulability, quota, concurrency) is ignored
 // on purpose: those are capacity problems, not price problems.
 //
@@ -159,10 +160,14 @@ func (s *GatewayService) SellRateRangeCoverage(ctx context.Context, groupID *int
 		return 0, false, true
 	}
 	ctx = s.withGroupContext(ctx, group)
-	platform, _, err := s.resolvePlatform(ctx, groupID, group, requestedModel)
+	platform, hasForcePlatform, err := s.resolvePlatform(ctx, groupID, group, requestedModel)
 	if err != nil {
 		return 0, false, true
 	}
+	// Same platform rule as selection (listSchedulableAccounts /
+	// isAccountAllowedForPlatform): Anthropic and Gemini groups also schedule
+	// mixed-enabled Antigravity accounts unless a platform is forced.
+	useMixed := (platform == PlatformAnthropic || platform == PlatformGemini) && !hasForcePlatform
 	accounts, err := s.accountRepo.ListByGroup(ctx, group.ID)
 	if err != nil {
 		return 0, false, true
@@ -170,7 +175,7 @@ func (s *GatewayService) SellRateRangeCoverage(ctx context.Context, groupID *int
 	now := time.Now()
 	for i := range accounts {
 		acc := &accounts[i]
-		if !acc.IsActive() || !acc.Schedulable || acc.Platform != platform {
+		if !acc.IsActive() || !acc.Schedulable || !s.isAccountAllowedForPlatform(acc, platform, useMixed) {
 			continue
 		}
 		if acc.AutoPauseOnExpired && acc.ExpiresAt != nil && !now.Before(*acc.ExpiresAt) {

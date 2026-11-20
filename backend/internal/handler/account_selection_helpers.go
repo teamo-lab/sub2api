@@ -13,8 +13,17 @@ const maxBusyAccountReselects = 8
 
 // installSellRateRange reads X-Teamo-Sell-Rate-Min/Max from the request and
 // puts the range on the request context. It returns the range (nil when the
-// caller sent none).
-func installSellRateRange(c *gin.Context) *service.SellRateRange {
+// caller sent none or is not trusted).
+//
+// The range steers which accounts may serve, and an account's sell rate is
+// what the request is billed at, so only a trusted caller may set it:
+// TeamoRouter calls Sub2API with keys owned by an admin user. Headers on any
+// other key are ignored, so an ordinary key holder cannot pin requests to
+// cheaper accounts.
+func installSellRateRange(c *gin.Context, apiKey *service.APIKey) *service.SellRateRange {
+	if apiKey == nil || apiKey.User == nil || !apiKey.User.IsAdmin() {
+		return nil
+	}
 	r := service.ParseSellRateRange(c.GetHeader(service.SellRateMinHeader), c.GetHeader(service.SellRateMaxHeader))
 	if r != nil {
 		c.Request = c.Request.WithContext(service.WithSellRateRange(c.Request.Context(), r))

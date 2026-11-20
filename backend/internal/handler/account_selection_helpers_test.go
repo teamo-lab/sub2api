@@ -71,16 +71,33 @@ func TestPreferAccountWithFreeSlotLeavesAcquiredSelectionAlone(t *testing.T) {
 	require.Same(t, first, got)
 }
 
-func TestInstallSellRateRangeReadsHeaders(t *testing.T) {
+func TestInstallSellRateRangeReadsHeadersFromTrustedCaller(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	admin := &service.APIKey{User: &service.User{Role: service.RoleAdmin}}
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-	require.Nil(t, installSellRateRange(c))
+	require.Nil(t, installSellRateRange(c, admin))
 	require.Nil(t, service.SellRateRangeFromContext(c.Request.Context()))
 
 	c.Request.Header.Set(service.SellRateMaxHeader, "3.85")
-	r := installSellRateRange(c)
+	r := installSellRateRange(c, admin)
 	require.NotNil(t, r)
 	require.Same(t, r, service.SellRateRangeFromContext(c.Request.Context()))
 	require.InDelta(t, 3.85, *r.Max, 1e-9)
+}
+
+func TestInstallSellRateRangeIgnoresUntrustedCallers(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for name, key := range map[string]*service.APIKey{
+		"ordinary user": {User: &service.User{Role: service.RoleUser}},
+		"no user":       {},
+		"no key":        nil,
+	} {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		c.Request.Header.Set(service.SellRateMaxHeader, "0.5")
+		c.Request.Header.Set(service.SellRateMinHeader, "0.1")
+		require.Nil(t, installSellRateRange(c, key), name)
+		require.Nil(t, service.SellRateRangeFromContext(c.Request.Context()), name)
+	}
 }
