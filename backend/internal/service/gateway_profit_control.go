@@ -106,7 +106,12 @@ func profitControlVetoLatest(ctx context.Context, selected *Account, snapshot *S
 
 func (s *GatewayService) isGatewayAccountProfitEligible(ctx context.Context, account *Account) bool {
 	vetoed, _ := openAIProfitControlVetoReason(ctx, account)
-	return !vetoed
+	if vetoed {
+		return false
+	}
+	// Same hook as the profit gate so sticky, routed and load-balanced
+	// candidates all honour the caller's sell rate range.
+	return s.isAccountWithinSellRateRange(ctx, account)
 }
 
 func gatewayProfitControlGateActive(ctx context.Context) bool {

@@ -380,6 +380,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	cleanedForUnknownBinding := false
 
 	fs := NewFailoverState(h.maxAccountSwitchesGemini, hasBoundSession)
+	sellRange := installSellRateRange(c)
 
 	// 单账号分组提前设置 SingleAccountRetry 标记，让 Service 层首次 503 就不设模型限流标记。
 	// 避免单账号分组收到 503 (MODEL_CAPACITY_EXHAUSTED) 时设 29s 限流，导致后续请求连续快速失败。
@@ -391,6 +392,11 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	for {
 		selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), apiKey.GroupID, sessionKey, modelName, fs.FailedAccountIDs, "", int64(0)) // Gemini 不使用会话限制
 		if err != nil {
+			if len(fs.FailedAccountIDs) == 0 && sellRange.Rejected() {
+				lowest, found := h.gatewayService.LowestSellRateForModel(c.Request.Context(), apiKey.GroupID, modelName)
+				googleError(c, http.StatusConflict, service.SellRateOutOfRangeMessage(lowest, found))
+				return
+			}
 			if len(fs.FailedAccountIDs) == 0 {
 				cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, modelName, modelName, service.PlatformGemini)
 				if !cls.ModelNotFound {
@@ -417,6 +423,9 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 				return
 			}
 		}
+		selection = preferAccountWithFreeSlot(c.Request.Context(), selection, fs.FailedAccountIDs, func(excluded map[int64]struct{}) (*service.AccountSelectionResult, error) {
+			return h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), apiKey.GroupID, sessionKey, modelName, excluded, "", int64(0))
+		})
 		account := selection.Account
 		setOpsSelectedServiceAccount(c, account)
 
