@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 )
@@ -140,27 +141,39 @@ func (s *GatewayService) isAccountWithinSellRateRange(ctx context.Context, accou
 	return false
 }
 
-// LowestSellRateForModel is the cheapest effective sell rate among the group's
-// schedulable accounts that serve the model, ignoring the requested range and
-// current load. TeamoRouter turns it into the recommended discount fold.
-func (s *GatewayService) LowestSellRateForModel(ctx context.Context, groupID *int64, requestedModel string) (float64, bool) {
+// SellRateRangeCoverage looks at every account in the group that is set up to
+// serve the model: active, switched on for scheduling, not auto-paused after
+// expiry, on the group's platform and mapping the model. Transient state (rate
+// limits, overload, temporary unschedulability, quota, concurrency) is ignored
+// on purpose: those are capacity problems, not price problems.
+//
+// covered reports whether any of them sells within r, so a selection failure
+// is only reported as sell_rate_out_of_range when the user's cap really leaves
+// no account for this model. lowest/found give the cheapest of them, which
+// TeamoRouter turns into the recommended discount fold.
+func (s *GatewayService) SellRateRangeCoverage(ctx context.Context, groupID *int64, requestedModel string, r *SellRateRange) (lowest float64, found bool, covered bool) {
 	group, err := s.resolveGroupByIDForSellRate(ctx, groupID)
 	if err != nil {
-		return 0, false
+		// Unknown pricing data must not turn a capacity failure into a price
+		// verdict: report the range as covered.
+		return 0, false, true
 	}
 	ctx = s.withGroupContext(ctx, group)
-	platform, hasForcePlatform, err := s.resolvePlatform(ctx, groupID, group, requestedModel)
+	platform, _, err := s.resolvePlatform(ctx, groupID, group, requestedModel)
 	if err != nil {
-		return 0, false
+		return 0, false, true
 	}
-	accounts, useMixed, err := s.listSchedulableAccounts(ctx, groupID, platform, hasForcePlatform)
+	accounts, err := s.accountRepo.ListByGroup(ctx, group.ID)
 	if err != nil {
-		return 0, false
+		return 0, false, true
 	}
-	lowest, found := 0.0, false
+	now := time.Now()
 	for i := range accounts {
 		acc := &accounts[i]
-		if !s.isAccountSchedulableForSelection(acc) || !s.isAccountAllowedForPlatform(acc, platform, useMixed) {
+		if !acc.IsActive() || !acc.Schedulable || acc.Platform != platform {
+			continue
+		}
+		if acc.AutoPauseOnExpired && acc.ExpiresAt != nil && !now.Before(*acc.ExpiresAt) {
 			continue
 		}
 		if requestedModel != "" && !s.isModelSupportedByAccountWithContext(ctx, acc, requestedModel) {
@@ -168,13 +181,18 @@ func (s *GatewayService) LowestSellRateForModel(ctx context.Context, groupID *in
 		}
 		rate, ok := accountEffectiveSellRate(ctx, acc)
 		if !ok {
+			// Cannot price it, so it may well fit: never blame the cap.
+			covered = true
 			continue
+		}
+		if r.Contains(rate) {
+			covered = true
 		}
 		if !found || rate < lowest {
 			lowest, found = rate, true
 		}
 	}
-	return lowest, found
+	return lowest, found, covered
 }
 
 func (s *GatewayService) resolveGroupByIDForSellRate(ctx context.Context, groupID *int64) (*Group, error) {

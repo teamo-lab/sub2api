@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
@@ -41,6 +42,24 @@ func sellRangeTestAccount(id int64, priority int, sell *float64, groupID int64) 
 	}
 }
 
+// sellRangeAccountRepo also answers ListByGroup, which coverage reads to see
+// accounts regardless of their transient state.
+type sellRangeAccountRepo struct {
+	*mockAccountRepoForPlatform
+}
+
+func (r sellRangeAccountRepo) ListByGroup(ctx context.Context, groupID int64) ([]Account, error) {
+	out := make([]Account, 0, len(r.accounts))
+	for _, acc := range r.accounts {
+		for _, gid := range acc.GroupIDs {
+			if gid == groupID {
+				out = append(out, acc)
+			}
+		}
+	}
+	return out, nil
+}
+
 func sellRangeTestService(accounts ...Account) *GatewayService {
 	byID := make(map[int64]*Account, len(accounts))
 	for i := range accounts {
@@ -49,7 +68,7 @@ func sellRangeTestService(accounts ...Account) *GatewayService {
 	cfg := &config.Config{RunMode: config.RunModeStandard}
 	cfg.Gateway.Scheduling.LoadBatchEnabled = true
 	return &GatewayService{
-		accountRepo:        &mockAccountRepoForPlatform{accounts: accounts, accountsByID: byID},
+		accountRepo:        sellRangeAccountRepo{&mockAccountRepoForPlatform{accounts: accounts, accountsByID: byID}},
 		cache:              &mockGatewayCacheForPlatform{},
 		cfg:                cfg,
 		concurrencyService: NewConcurrencyService(stubConcurrencyCache{}),
@@ -116,8 +135,9 @@ func TestSellRateRangeNoAccountWithinCap(t *testing.T) {
 	require.ErrorIs(t, err, ErrNoAvailableAccounts)
 	require.True(t, r.Rejected(), "the handler tells this apart from capacity exhaustion")
 
-	lowest, found := svc.LowestSellRateForModel(ctx, &group.ID, "")
+	lowest, found, covered := svc.SellRateRangeCoverage(ctx, &group.ID, "", r)
 	require.True(t, found)
+	require.False(t, covered, "no account of this group sells within 2.1")
 	require.InDelta(t, 4.065, lowest, 1e-9)
 	require.Equal(t, "sell_rate_out_of_range: no account within the requested sell rate range; min_available_sell_rate=4.0650", SellRateOutOfRangeMessage(lowest, found))
 }
@@ -139,4 +159,36 @@ func TestSellRateRangeFallsBackToGroupRate(t *testing.T) {
 	require.Equal(t, noOverride.ID, result.Account.ID)
 	require.False(t, r.Rejected())
 	result.ReleaseFunc()
+}
+
+func TestSellRateRangeBusyInRangeAccountIsNotAPriceVerdict(t *testing.T) {
+	// Review P1: a 3.85 cap, one pricey account and one in-range account that
+	// is rate limited. Selection fails and the pricey one was skipped for its
+	// rate, but the cap does leave an account for the model: this is a
+	// capacity failure, not sell_rate_out_of_range.
+	group := sellRangeTestGroup(82, 4.727)
+	pricey := sellRangeTestAccount(1132, 1, f64(4.727), group.ID)
+	cheap := sellRangeTestAccount(1136, 2, f64(2.0), group.ID)
+	until := time.Now().Add(time.Minute)
+	cheap.RateLimitResetAt = &until
+	svc := sellRangeTestService(pricey, cheap)
+
+	r := ParseSellRateRange("", "3.85")
+	ctx := sellRangeTestContext(group, r)
+	result, err := svc.SelectAccountWithLoadAwareness(ctx, &group.ID, "", "", nil, "", 0)
+	require.Nil(t, result)
+	require.ErrorIs(t, err, ErrNoAvailableAccounts)
+	require.True(t, r.Rejected())
+
+	lowest, found, covered := svc.SellRateRangeCoverage(ctx, &group.ID, "", r)
+	require.True(t, covered, "the rate-limited 2.0 account still fits the cap")
+	require.True(t, found)
+	require.InDelta(t, 2.0, lowest, 1e-9)
+
+	// An account switched off for scheduling is not capacity: it does not count.
+	cheap.RateLimitResetAt = nil
+	cheap.Schedulable = false
+	svc = sellRangeTestService(pricey, cheap)
+	_, _, covered = svc.SellRateRangeCoverage(sellRangeTestContext(group, r), &group.ID, "", r)
+	require.False(t, covered)
 }

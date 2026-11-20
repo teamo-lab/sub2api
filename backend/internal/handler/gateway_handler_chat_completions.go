@@ -174,9 +174,13 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), apiKey.GroupID, selectionSessionHash, reqModel, fs.FailedAccountIDs, "", int64(0))
 		if err != nil {
 			if len(fs.FailedAccountIDs) == 0 && sellRange.Rejected() {
-				lowest, found := h.gatewayService.LowestSellRateForModel(c.Request.Context(), apiKey.GroupID, reqModel)
-				h.chatCompletionsErrorResponse(c, http.StatusConflict, service.SellRateOutOfRangeCode, service.SellRateOutOfRangeMessage(lowest, found))
-				return
+				// Only a cap that leaves no account for this model is a price
+				// verdict; an in-range account that is merely busy or rate
+				// limited falls through to the normal capacity errors.
+				if lowest, found, covered := h.gatewayService.SellRateRangeCoverage(c.Request.Context(), apiKey.GroupID, reqModel, sellRange); !covered {
+					h.chatCompletionsErrorResponse(c, http.StatusConflict, service.SellRateOutOfRangeCode, service.SellRateOutOfRangeMessage(lowest, found))
+					return
+				}
 			}
 			if len(fs.FailedAccountIDs) == 0 {
 				cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, reqModel, reqModel, groupPlatform)
