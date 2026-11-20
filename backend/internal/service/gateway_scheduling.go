@@ -229,6 +229,8 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 	}
 	ctx = s.withWindowCostPrefetch(ctx, accounts)
 	ctx = s.withRPMPrefetch(ctx, accounts)
+	// Gemini 选路实验（route_ab_gemini.go）：非 Gemini 平台或分组未配置时为 nil，下面全部按老逻辑。
+	route := s.newGeminiRouteSelection(ctx, group, groupID, platform, sessionHash, requestedModel)
 
 	// 提前构建 accountByID（供 Layer 1 和 Layer 1.5 使用）
 	accountByID := make(map[int64]*Account, len(accounts))
@@ -549,6 +551,8 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 				windowCostOK := s.isAccountSchedulableForWindowCost(ctx, account, true)
 				rpmOK := s.isAccountSchedulableForRPM(ctx, account, true)
 				schedulable := s.isAccountSchedulableForSelection(account)
+				// 请求要求的能力（结构化输出等）这个号不具备时不走粘性，交给负载层重新选。
+				capabilityOK := routeAccountFitsRequest(ctx, account)
 
 				slog.Debug("sticky.layer1_5_no_routing_checks",
 					"account_id", accountID,
@@ -563,9 +567,10 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 					"quota_ok", quotaOK,
 					"window_cost_ok", windowCostOK,
 					"rpm_ok", rpmOK,
+					"capability_ok", capabilityOK,
 				)
 
-				if !clearSticky && platformOK && profitOK && modelSupported && channelOK && modelSchedulable && quotaOK && windowCostOK && rpmOK && schedulable {
+				if !clearSticky && platformOK && profitOK && modelSupported && channelOK && modelSchedulable && quotaOK && windowCostOK && rpmOK && schedulable && capabilityOK {
 					result, err := s.tryAcquireAccountSlot(ctx, accountID, account.Concurrency)
 					if err == nil && result.Acquired {
 						// 会话数量限制检查
@@ -585,7 +590,8 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 							if s.cache != nil {
 								_ = s.cache.RefreshSessionTTL(ctx, derefGroupID(groupID), sessionHash, stickySessionTTL)
 							}
-							return s.newSelectionResult(ctx, account, true, result.ReleaseFunc, nil)
+							res, err := s.newSelectionResult(ctx, account, true, result.ReleaseFunc, nil)
+							return withRouteDecision(res, err, route.newDecision(openAIRouteLayerSticky, accountID))
 						}
 					} else {
 						slog.Debug("sticky.layer1_5_no_routing_slot_busy",
@@ -605,12 +611,13 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 								"session", shortSessionHash(sessionHash),
 								"result", "wait_plan",
 							)
-							return s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
+							res, err := s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
 								AccountID:      accountID,
 								MaxConcurrency: account.Concurrency,
 								Timeout:        cfg.StickySessionWaitTimeout,
 								MaxWaiting:     cfg.StickySessionMaxWaiting,
 							})
+							return withRouteDecision(res, err, route.newDecision(openAIRouteLayerSticky, accountID))
 						}
 					}
 				} else if !clearSticky {
@@ -704,6 +711,8 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		}
 		return nil, ErrNoAvailableAccounts
 	}
+	// 请求要求的能力（结构化输出等）优先给具备的号；都不具备时不排除。
+	candidates = preferRouteFittingAccounts(ctx, candidates)
 
 	accountLoads := make([]AccountWithConcurrency, 0, len(candidates))
 	for _, acc := range candidates {
@@ -718,7 +727,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		if result, ok, legacyErr := s.tryAcquireByLegacyOrder(ctx, candidates, groupID, sessionHash, preferOAuth); legacyErr != nil {
 			return nil, legacyErr
 		} else if ok {
-			return result, nil
+			return withRouteDecision(result, nil, route.newDecision(openAIRouteLayerFallback, result.Account.ID))
 		}
 	} else {
 		var available []accountWithLoad
@@ -732,6 +741,32 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 					account:  acc,
 					loadInfo: loadInfo,
 				})
+			}
+		}
+
+		// 选路实验：影子 / A 组只记决策、仍走下面的老逻辑；B 组按评分软分配的顺序抢槽。
+		var routeDecision *OpenAIRouteDecision
+		if route != nil && len(available) > 0 {
+			sortAvailableByLegacyOrder(available, preferOAuth)
+			var ordered []accountWithLoad
+			ordered, routeDecision = route.order(available)
+			if routeDecision != nil && routeDecision.Applied {
+				for _, item := range ordered {
+					result, err := s.tryAcquireAccountSlot(ctx, item.account.ID, item.account.Concurrency)
+					if err != nil || !result.Acquired {
+						continue
+					}
+					if !s.checkAndRegisterSession(ctx, item.account, sessionHash) {
+						result.ReleaseFunc()
+						continue
+					}
+					if sessionHash != "" && s.cache != nil {
+						_ = s.bindGatewayStickySessionDuringSelection(ctx, groupID, sessionHash, item.account.ID)
+					}
+					res, err := s.newSelectionResult(ctx, item.account, true, result.ReleaseFunc, nil)
+					return withRouteDecision(res, err, routeDecision)
+				}
+				available = nil // 都满了，落到 Layer 3 排队
 			}
 		}
 
@@ -760,7 +795,8 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 					if sessionHash != "" && s.cache != nil {
 						_ = s.bindGatewayStickySessionDuringSelection(ctx, groupID, sessionHash, selected.account.ID)
 					}
-					return s.newSelectionResult(ctx, selected.account, true, result.ReleaseFunc, nil)
+					res, err := s.newSelectionResult(ctx, selected.account, true, result.ReleaseFunc, nil)
+					return withRouteDecision(res, err, routeDecision)
 				}
 			}
 
@@ -783,12 +819,13 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		if !s.checkAndRegisterSession(ctx, acc, sessionHash) {
 			continue // 会话限制已满，尝试下一个账号
 		}
-		return s.newSelectionResult(ctx, acc, false, nil, &AccountWaitPlan{
+		res, err := s.newSelectionResult(ctx, acc, false, nil, &AccountWaitPlan{
 			AccountID:      acc.ID,
 			MaxConcurrency: acc.Concurrency,
 			Timeout:        cfg.FallbackWaitTimeout,
 			MaxWaiting:     cfg.FallbackMaxWaiting,
 		})
+		return withRouteDecision(res, err, route.newDecision(openAIRouteLayerFallback, acc.ID))
 	}
 	return nil, ErrNoAvailableAccounts
 }

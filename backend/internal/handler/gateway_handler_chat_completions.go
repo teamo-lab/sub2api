@@ -163,6 +163,8 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 	fs := NewFailoverState(h.maxAccountSwitches, false)
 	if groupPlatform == service.PlatformGemini {
 		fs = NewFailoverState(h.maxAccountSwitchesGemini, false)
+		// 选路实验 / 能力过滤用的请求特征（只对 Gemini 分组）。
+		c.Request = c.Request.WithContext(service.WithGeminiRouteRequest(c.Request.Context(), service.ParseChatCompletionsRouteRequest(body, reqStream)))
 	}
 
 	for {
@@ -277,6 +279,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		}
 		var result *service.ForwardResult
 		setActualUpstreamEndpoint(c, "")
+		h.gatewayService.StartRouteAttempt(c, selection, reqStream)
 		if account.Platform == service.PlatformGemini {
 			if h.geminiCompatService == nil {
 				h.chatCompletionsErrorResponse(c, http.StatusBadGateway, "upstream_error", "Gemini compatibility service is not configured")
@@ -303,6 +306,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		if accountReleaseFunc != nil {
 			accountReleaseFunc()
 		}
+		h.gatewayService.FinishRouteAttempt(c, reqStream, err == nil)
 
 		if err != nil {
 			var failoverErr *service.UpstreamFailoverError
@@ -346,11 +350,13 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 
 		quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
 		sessionID := service.ExtractClientSessionID(c)
+		routeDecision := service.RouteDecisionJSON(c)
 		stampForwardRequestedReasoningEffort(result, service.RequestedReasoningEffortFromContext(c.Request.Context()))
 		h.submitUsageRecordTask(c.Request.Context(), func(ctx context.Context) {
 			if err := h.gatewayService.RecordUsage(ctx, &service.RecordUsageInput{
 				Result:             result,
 				QuotaPlatform:      quotaPlatform,
+				RouteDecision:      routeDecision,
 				APIKey:             apiKey,
 				User:               apiKey.User,
 				Account:            account,

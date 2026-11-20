@@ -20,6 +20,10 @@ package service
 //     - 其他值或分组不在配置里：完全不参与（默认）。
 //
 // 老会话（粘性命中）在本阶段两组都不迁移，只记录 layer=sticky。
+//
+// 这套观测、打分、软分配与平台无关：Gemini 分组也用同一个 settings 键、同一份代码，
+// 挂点和请求特征适配见 route_ab_gemini.go。分组配置可以覆盖价格项口径（price_basis）、
+// 价格权重（cost_ms_per_rate）、参与评分的最大 priority 等，见 openAIRouteABGroupConfig。
 
 import (
 	"context"
@@ -60,10 +64,24 @@ const (
 	openAIRouteDefaultBaselineMs = 10000.0
 )
 
-// openAIRouteABGroupConfig 是单个分组的实验开关。
+const (
+	// 价格项口径：cost 按账号成本倍率（rate_multiplier，默认）；sell 按用户实际付的售价
+	// （账号售价 ?? 分组倍率）。按落地号售价扣费的分组（如 Gemini gemini-general）应用 sell：
+	// 选号直接决定用户付多少钱。
+	routePriceBasisCost = "cost"
+	routePriceBasisSell = "sell"
+)
+
+// openAIRouteABGroupConfig 是单个分组的实验开关，以及可选的分组级参数覆盖（缺省沿用全局值）。
 type openAIRouteABGroupConfig struct {
 	Mode    string `json:"mode"`
 	Percent int    `json:"percent"`
+
+	PriceBasis     string   `json:"price_basis,omitempty"`
+	CostMsPerRate  *float64 `json:"cost_ms_per_rate,omitempty"`
+	MaxPriority    *int     `json:"max_priority,omitempty"`
+	ErrorPenaltyMs *float64 `json:"error_penalty_ms,omitempty"`
+	StallMinMs     *float64 `json:"stall_min_ms,omitempty"`
 }
 
 // openAIRouteABConfig 是 settings.openai_route_ab 的 JSON 结构；缺省字段取默认值。
@@ -89,6 +107,51 @@ type openAIRouteABConfig struct {
 	ErrorPenaltyMs float64 `json:"error_penalty_ms"`
 	// PriorSamples 慢系数的收缩强度：样本权重低于它时向「和大家一样」收缩。
 	PriorSamples float64 `json:"prior_samples"`
+
+	// 以下由 forGroup 按分组填入，不来自 JSON 顶层。
+	priceBasis string
+	groupRate  float64
+}
+
+// forGroup 返回套用分组级覆盖后的配置。groupRate 是分组倍率，price_basis=sell 时
+// 给没有配账号售价的号兜底。非法的覆盖值忽略，沿用全局值。
+func (c openAIRouteABConfig) forGroup(g openAIRouteABGroupConfig, groupRate float64) openAIRouteABConfig {
+	out := c
+	finite := func(v *float64) bool { return v != nil && *v >= 0 && !math.IsNaN(*v) && !math.IsInf(*v, 0) }
+	if finite(g.CostMsPerRate) {
+		out.CostMsPerRate = *g.CostMsPerRate
+	}
+	if finite(g.ErrorPenaltyMs) {
+		out.ErrorPenaltyMs = *g.ErrorPenaltyMs
+	}
+	if finite(g.StallMinMs) && *g.StallMinMs > 0 {
+		out.StallMinMs = *g.StallMinMs
+	}
+	if g.MaxPriority != nil && *g.MaxPriority >= 0 {
+		out.MaxPriority = *g.MaxPriority
+	}
+	out.priceBasis = routePriceBasisCost
+	if strings.EqualFold(strings.TrimSpace(g.PriceBasis), routePriceBasisSell) {
+		out.priceBasis = routePriceBasisSell
+	}
+	if groupRate > 0 && !math.IsNaN(groupRate) && !math.IsInf(groupRate, 0) {
+		out.groupRate = groupRate
+	}
+	return out
+}
+
+// priceRate 是评分里价格项用的倍率：sell 口径取账号售价 ?? 分组倍率（都没有时退回成本），
+// 否则取账号成本倍率。
+func (c openAIRouteABConfig) priceRate(account *Account) float64 {
+	if c.priceBasis == routePriceBasisSell {
+		if v, ok := account.SellRateOverride(); ok {
+			return v
+		}
+		if c.groupRate > 0 {
+			return c.groupRate
+		}
+	}
+	return account.BillingRateMultiplier()
 }
 
 func defaultOpenAIRouteABConfig() openAIRouteABConfig {
@@ -186,6 +249,15 @@ var openAIRouteRandFloat = rand.Float64
 
 // openAIRouteABRuntimeConfig 读取（带 5 秒缓存）实验配置。读失败按关闭处理。
 func (s *OpenAIGatewayService) openAIRouteABRuntimeConfig(ctx context.Context) (openAIRouteABConfig, bool) {
+	var repo SettingRepository
+	if s != nil {
+		repo = s.openAIAdvancedSchedulerSettingRepo()
+	}
+	return loadRouteABConfig(ctx, repo)
+}
+
+// loadRouteABConfig 是 OpenAI / Gemini 共用的配置读取（同一个 settings 键、同一份缓存）。
+func loadRouteABConfig(ctx context.Context, repo SettingRepository) (openAIRouteABConfig, bool) {
 	if cached, ok := openAIRouteABConfigCache.Load().(*cachedOpenAIRouteABConfig); ok && cached != nil {
 		if time.Now().UnixNano() < cached.expiresAt {
 			return cached.cfg, cached.enabled
@@ -199,7 +271,7 @@ func (s *OpenAIGatewayService) openAIRouteABRuntimeConfig(ctx context.Context) (
 		}
 	}
 	cfg, enabled := defaultOpenAIRouteABConfig(), false
-	if repo := s.openAIAdvancedSchedulerSettingRepo(); repo != nil {
+	if repo != nil {
 		dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), openAIRouteABSettingDBTimeout)
 		raw, err := repo.GetValue(dbCtx, openAIRouteABSettingKey)
 		cancel()
@@ -613,7 +685,7 @@ func (st *openAIRouteStats) estimateLocked(account *Account, shape string, fit o
 		mean, w := d.value(now, cfg.HalfLifeSec)
 		est.ErrorMs = mean * w / (w + cfg.PriorSamples) * cfg.ErrorPenaltyMs
 	}
-	est.CostMs = account.BillingRateMultiplier() * cfg.CostMsPerRate
+	est.CostMs = cfg.priceRate(account) * cfg.CostMsPerRate
 	est.Score = est.PredMs + est.StallMs + est.ErrorMs + est.CostMs
 	return est
 }
@@ -691,11 +763,20 @@ func (s *OpenAIGatewayService) newOpenAIRouteSelection(ctx context.Context, grou
 		effort = strings.ToLower(strings.TrimSpace(*e))
 	}
 	model := strings.TrimSpace(requestedModel)
+	return newRouteSelection(s.openAIRouteStats(), cfg.forGroup(group, 0), group, sessionHash, model,
+		openAIRouteShape(model, effort, openAIRouteBodyBand(openAIInboundRequestBodyBytesFromContext(ctx))))
+}
+
+// newRouteSelection 按分组开关和会话分桶决定实验组，OpenAI / Gemini 共用。
+func newRouteSelection(stats *openAIRouteStats, cfg openAIRouteABConfig, group openAIRouteABGroupConfig, sessionHash, model, shape string) *openAIRouteSelection {
+	if stats == nil {
+		return nil
+	}
 	sel := &openAIRouteSelection{
-		stats: s.openAIRouteStats(),
+		stats: stats,
 		cfg:   cfg,
 		model: model,
-		shape: openAIRouteShape(model, effort, openAIRouteBodyBand(openAIInboundRequestBodyBytesFromContext(ctx))),
+		shape: shape,
 		now:   time.Now(),
 		rng:   openAIRouteRandFloat,
 	}
@@ -854,6 +935,17 @@ func (s *OpenAIGatewayService) StartOpenAIRouteAttempt(c *gin.Context, selection
 	if s == nil || c == nil {
 		return
 	}
+	startRouteAttempt(c, selection, stream, s.openAIRouteStats, func() openAIRouteABConfig {
+		cfg, _ := s.openAIRouteABRuntimeConfig(c.Request.Context())
+		return cfg
+	})
+}
+
+// startRouteAttempt 是 OpenAI / Gemini 共用的登记逻辑；stats、cfg 只在真要登记时才取。
+func startRouteAttempt(c *gin.Context, selection *AccountSelectionResult, stream bool, stats func() *openAIRouteStats, cfg func() openAIRouteABConfig) {
+	if c == nil {
+		return
+	}
 	if prev := openAIRouteTicketFromGin(c); prev != nil {
 		prev.finish(false, time.Now())
 		c.Set(openAIRouteTicketGinKey, (*openAIRouteTicket)(nil))
@@ -861,11 +953,14 @@ func (s *OpenAIGatewayService) StartOpenAIRouteAttempt(c *gin.Context, selection
 	if selection == nil || selection.Account == nil || selection.RouteDecision == nil {
 		return
 	}
+	st := stats()
+	if st == nil {
+		return
+	}
 	d := selection.RouteDecision
 	d.Picked = selection.Account.ID
-	st := s.openAIRouteStats()
-	cfg, _ := s.openAIRouteABRuntimeConfig(c.Request.Context())
-	t := st.startTicket(selection.Account.ID, d.model, d.shape, stream, d, cfg.HalfLifeSec, cfg.LongHalfLifeSec, time.Now())
+	conf := cfg()
+	t := st.startTicket(selection.Account.ID, d.model, d.shape, stream, d, conf.HalfLifeSec, conf.LongHalfLifeSec, time.Now())
 	c.Set(openAIRouteTicketGinKey, t)
 }
 

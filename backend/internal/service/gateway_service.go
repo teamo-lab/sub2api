@@ -809,6 +809,8 @@ type GatewayService struct {
 	tlsFPProfileService   *TLSFingerprintProfileService
 	balanceNotifyService  *BalanceNotifyService
 	userPlatformQuotaRepo UserPlatformQuotaRepository
+	// routeStatsState 是 Gemini 选路实验的进程内观测（route_ab_gemini.go），懒创建。
+	routeStatsState atomic.Pointer[openAIRouteStats]
 }
 
 // NewGatewayService creates a new GatewayService

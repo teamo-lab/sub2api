@@ -379,6 +379,11 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	hasBoundSession := sessionKey != "" && sessionBoundAccountID > 0
 	cleanedForUnknownBinding := false
 
+	// 选路实验 / 能力过滤用的请求特征（只看生成请求，countTokens 等不参与）。
+	if action == "generateContent" || action == "streamGenerateContent" {
+		c.Request = c.Request.WithContext(service.WithGeminiRouteRequest(c.Request.Context(), service.ParseGeminiNativeRouteRequest(body, stream)))
+	}
+
 	fs := NewFailoverState(h.maxAccountSwitchesGemini, hasBoundSession)
 	sellRange := installSellRateRange(c, apiKey)
 
@@ -534,6 +539,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		accountReleaseFunc = wrapReleaseOnDone(c.Request.Context(), accountReleaseFunc)
 
 		// 5) forward (根据平台分流)
+		h.gatewayService.StartRouteAttempt(c, selection, stream)
 		var result *service.ForwardResult
 		requestCtx := c.Request.Context()
 		if fs.SwitchCount > 0 {
@@ -558,6 +564,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		if accountReleaseFunc != nil {
 			accountReleaseFunc()
 		}
+		h.gatewayService.FinishRouteAttempt(c, stream, err == nil)
 		if err != nil {
 			var failoverErr *service.UpstreamFailoverError
 			if errors.As(err, &failoverErr) {
@@ -605,11 +612,13 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		forceCacheBilling := fs.ForceCacheBilling
 		quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
 		sessionID := service.ExtractClientSessionID(c)
+		routeDecision := service.RouteDecisionJSON(c)
 		// 长上下文阶梯由目录数据驱动，统一在计费路径内生效，入口无需声明。
 		h.submitUsageRecordTask(c.Request.Context(), func(ctx context.Context) {
 			if err := h.gatewayService.RecordUsage(ctx, &service.RecordUsageInput{
 				Result:             result,
 				QuotaPlatform:      quotaPlatform,
+				RouteDecision:      routeDecision,
 				APIKey:             apiKey,
 				User:               apiKey.User,
 				Account:            account,

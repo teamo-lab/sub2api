@@ -679,6 +679,7 @@ func (s *GeminiMessagesCompatService) handleChatCompletionsStreamingResponseFrom
 							rawBytes = innerBytes
 						}
 					}
+					markGeminiRouteFirstTokenIfAnswer(c, rawBytes)
 
 					var geminiResp map[string]any
 					if err := json.Unmarshal(rawBytes, &geminiResp); err == nil {
