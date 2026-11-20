@@ -32,6 +32,27 @@ func (h *OpsHandler) GetDashboardModels(c *gin.Context) {
 	response.Success(c, gin.H{"models": models})
 }
 
+// GetDashboardAccountBreakdown returns per-account SLA, PV, latency and tokens
+// for the active dashboard filter (raw path).
+// GET /api/v1/admin/ops/dashboard/account-breakdown
+func (h *OpsHandler) GetDashboardAccountBreakdown(c *gin.Context) {
+	if h.opsService == nil {
+		response.Error(c, http.StatusServiceUnavailable, "Ops service not available")
+		return
+	}
+	filter, err := parseOpsDashboardFilter(c, "1h")
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	data, err := h.opsService.GetDashboardAccountBreakdown(c.Request.Context(), filter)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, data)
+}
+
 // GetDashboardOverview returns vNext ops dashboard overview (raw path).
 // GET /api/v1/admin/ops/dashboard/overview
 func (h *OpsHandler) GetDashboardOverview(c *gin.Context) {

@@ -32,6 +32,24 @@ export default {
       successes: '成功 {count}', tokens: 'Token {count}', errors: '错误 {count}', samples: '样本 {count}', excluded: '排除 429/529',
       percentile: 'P95 {p95} · 平均 {avg}'
     },
+    breakdown: {
+      title: '分账号 SLA',
+      cardHint: '点击查看各账号',
+      caption: '共 {count} 个账号，点表头排序，点账号名进入该账号监控',
+      columns: { account: '账号', durationP50: '总耗时 P50', durationP90: '总耗时 P90', tokens: 'Token 使用' },
+      pvDetail: '成功 {ok} · 失败 {err}',
+      tokenDetail: '入 {input} · 出 {output} · 缓存 {cache}',
+      unassigned: '未分配账号',
+      unassignedHint: '调度到账号前就失败的请求',
+      empty: '当前时间范围内没有请求',
+      hint: 'SLA = 成功 ÷（成功 + 计入 SLA 的失败），口径与上方卡片一致；换号成功的请求只记在最后成功的账号上。',
+      latencyDegraded: '延迟分位数查询超时，本次只显示请求数和 Token。',
+      truncated: '账号过多，只显示请求量最大的 {count} 个。',
+      loadFailed: '分账号数据加载失败',
+      sorted: '已按{column}{direction}排序，共 {count} 行',
+      ascending: '升序',
+      descending: '降序'
+    },
     alertScopeHint: '仅展示符合当前账号和分组条件的告警事件（告警不区分用户）。',
     loadFailed: '账号监控数据加载失败'
   }

@@ -32,6 +32,10 @@ func (s *stubOpsRepo) ListDashboardModels(context.Context, *OpsDashboardFilter) 
 	return []string{}, nil
 }
 
+func (s *stubOpsRepo) GetDashboardAccountBreakdown(context.Context, *OpsDashboardFilter) (*OpsDashboardAccountBreakdownResponse, error) {
+	return &OpsDashboardAccountBreakdownResponse{}, nil
+}
+
 func (s *stubOpsRepo) UpsertModelMetrics5m(context.Context, time.Time, time.Time) error { return nil }
 func (s *stubOpsRepo) UpsertModelMetricsHourly(context.Context, time.Time, time.Time) error {
 	return nil

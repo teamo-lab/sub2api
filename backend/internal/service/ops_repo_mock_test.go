@@ -142,6 +142,10 @@ func (m *opsRepoMock) ListDashboardModels(ctx context.Context, filter *OpsDashbo
 	return []string{}, nil
 }
 
+func (m *opsRepoMock) GetDashboardAccountBreakdown(ctx context.Context, filter *OpsDashboardFilter) (*OpsDashboardAccountBreakdownResponse, error) {
+	return &OpsDashboardAccountBreakdownResponse{}, nil
+}
+
 func (m *opsRepoMock) GetOpenAITokenStats(ctx context.Context, filter *OpsOpenAITokenStatsFilter) (*OpsOpenAITokenStatsResponse, error) {
 	return &OpsOpenAITokenStatsResponse{}, nil
 }

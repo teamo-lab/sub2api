@@ -205,6 +205,13 @@
         @open-error-detail="openErrorDetail"
       />
       <OpsErrorDetailModal v-model:show="showErrorDetail" :error-id="selectedErrorId" :error-type="errorType" />
+      <AccountSlaBreakdownDialog
+        :show="showAccountBreakdown"
+        :params="breakdownParams"
+        :scope-label="breakdownScopeLabel"
+        @update:show="showAccountBreakdown = $event"
+        @select-account="drillIntoAccount"
+      />
       <OpsRequestDetailsModal
         v-model="showRequestDetails"
         :time-range="timeRange"
@@ -260,6 +267,7 @@ import OpsAlertEventsCard from '@/views/admin/ops/components/OpsAlertEventsCard.
 import OpsErrorDetailsModal from '@/views/admin/ops/components/OpsErrorDetailsModal.vue'
 import OpsErrorDetailModal from '@/views/admin/ops/components/OpsErrorDetailModal.vue'
 import OpsRequestDetailsModal, { type OpsRequestDetailsPreset } from '@/views/admin/ops/components/OpsRequestDetailsModal.vue'
+import AccountSlaBreakdownDialog from './components/AccountSlaBreakdownDialog.vue'
 
 type TimeRange = '5m' | '30m' | '1h' | '6h' | '24h' | 'custom'
 type GroupOption = { id: number; name: string; platform: string }
@@ -306,6 +314,8 @@ const selectedErrorId = ref<number | null>(null)
 const errorType = ref<'request' | 'upstream'>('request')
 const showRequestDetails = ref(false)
 const requestPreset = ref<OpsRequestDetailsPreset>({ title: '', kind: 'all', sort: 'created_at_desc' })
+const showAccountBreakdown = ref(false)
+const breakdownParams = ref<OpsDashboardFilterParams>({})
 
 function parsePositiveInt(value: unknown): number | null {
   const parsed = Number.parseInt(String(value ?? ''), 10)
@@ -383,7 +393,9 @@ const metrics = computed(() => {
     },
     {
       key: 'sla', label: t('admin.accountOps.metrics.sla'), value: formatPercent(overview?.sla), valueClass: (overview?.sla ?? 1) >= 0.99 ? 'text-emerald-500' : 'text-red-500',
-      detail: t('admin.accountOps.metrics.samples', { count: formatNumber(overview?.request_count_sla ?? 0) }), secondary: '', action: undefined
+      detail: t('admin.accountOps.metrics.samples', { count: formatNumber(overview?.request_count_sla ?? 0) }),
+      secondary: accountId.value ? '' : t('admin.accountOps.breakdown.cardHint'),
+      action: accountId.value ? undefined : openAccountBreakdown
     },
     {
       key: 'request-errors', label: t('admin.accountOps.metrics.requestErrors'), value: formatPercent(overview?.error_rate), valueClass: (overview?.error_rate ?? 0) > 0.01 ? 'text-red-500' : 'text-emerald-500',
@@ -651,6 +663,7 @@ async function refreshAll() {
   errorMessage.value = ''
   try {
     const params = buildParams()
+    if (showAccountBreakdown.value) breakdownParams.value = params
     const [nextSnapshot, nextDistribution, nextModels] = await Promise.all([
       opsAPI.getDashboardSnapshotV2(params, { signal: controller.signal }),
       opsAPI.getErrorDistribution(params, { signal: controller.signal }),
@@ -693,6 +706,27 @@ watch([userId, accountId, groupId, model, timeRange, customStartTime, customEndT
 function openRequestDetails(preset?: OpsRequestDetailsPreset) {
   requestPreset.value = preset ?? { title: t('admin.accountOps.metrics.requests'), kind: 'all', sort: 'created_at_desc' }
   showRequestDetails.value = true
+}
+
+// Snapshot the filter when opening so the dialog query matches the card that was clicked;
+// later filter changes and refreshes update it through refreshAll().
+function openAccountBreakdown() {
+  breakdownParams.value = buildParams()
+  showAccountBreakdown.value = true
+}
+
+const breakdownScopeLabel = computed(() => {
+  const parts: string[] = []
+  if (selectedGroup.value) parts.push(`${selectedGroup.value.name} · #${selectedGroup.value.id}`)
+  if (selectedUser.value) parts.push(selectedUser.value.email || selectedUser.value.username)
+  if (model.value) parts.push(model.value)
+  parts.push(timeRangeOptions.value.find((option) => option.value === timeRange.value)?.label ?? timeRange.value)
+  return parts.join(' · ')
+})
+
+function drillIntoAccount(id: number) {
+  showAccountBreakdown.value = false
+  onAccountChange(id)
 }
 
 function openErrorDetails(type: 'request' | 'upstream') {

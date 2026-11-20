@@ -1057,6 +1057,49 @@ export async function getDashboardModels(
   return data.models ?? []
 }
 
+export interface OpsDashboardAccountBreakdownItem {
+  /** 0 = failed before any account was scheduled */
+  account_id: number
+  account_name: string
+  platform: string
+  status: string
+  success_count: number
+  error_count_total: number
+  error_count_sla: number
+  request_count_total: number
+  request_count_sla: number
+  /** null when the account has no SLA samples */
+  sla: number | null
+  token_consumed: number
+  input_tokens: number
+  output_tokens: number
+  cache_creation_tokens: number
+  cache_read_tokens: number
+  ttft_p50_ms: number | null
+  ttft_p90_ms: number | null
+  duration_p50_ms: number | null
+  duration_p90_ms: number | null
+}
+
+export interface OpsDashboardAccountBreakdownResponse {
+  start_time: string
+  end_time: string
+  latency_degraded: boolean
+  truncated: boolean
+  items: OpsDashboardAccountBreakdownItem[]
+}
+
+export async function getDashboardAccountBreakdown(
+  params: OpsDashboardFilterParams,
+  options: OpsRequestOptions = {}
+): Promise<OpsDashboardAccountBreakdownResponse> {
+  const { data } = await apiClient.get<OpsDashboardAccountBreakdownResponse>('/admin/ops/dashboard/account-breakdown', {
+    params,
+    signal: options.signal
+  })
+  return { ...data, items: data.items ?? [] }
+}
+
 export async function getOpenAITokenStats(
   params: OpsOpenAITokenStatsParams,
   options: OpsRequestOptions = {}
@@ -1303,6 +1346,7 @@ export const opsAPI = {
   getErrorTrend,
   getErrorDistribution,
   getDashboardModels,
+  getDashboardAccountBreakdown,
   getOpenAITokenStats,
   getConcurrencyStats,
   getUserConcurrencyStats,

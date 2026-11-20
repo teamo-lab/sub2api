@@ -258,6 +258,59 @@ describe('AccountOpsDashboard', () => {
     wrapper.unmount()
   })
 
+  it('opens the per-account SLA breakdown from the SLA card and drills into a row', async () => {
+    routeQuery = { group_id: '7' }
+    const wrapper = shallowMount(AccountOpsDashboard, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' }, Select: true, Icon: true, BaseDialog: true,
+          TokenUsageTrend: true, TrendLineChartCard: true, OpsThroughputTrendChart: true,
+          OpsErrorDistributionChart: true, OpsErrorTrendChart: true, OpsAlertEventsCard: true,
+          OpsErrorDetailsModal: true, OpsErrorDetailModal: true, OpsRequestDetailsModal: true
+        }
+      }
+    })
+    await flushPromises()
+
+    const dialog = wrapper.findComponent({ name: 'AccountSlaBreakdownDialog' })
+    expect(dialog.props('show')).toBe(false)
+
+    const slaCard = wrapper.findAll('button').find((button) => button.text().includes('admin.accountOps.metrics.sla'))!
+    expect(slaCard.attributes('disabled')).toBeUndefined()
+    await slaCard.trigger('click')
+
+    expect(dialog.props('show')).toBe(true)
+    expect(dialog.props('params')).toEqual(expect.objectContaining({ group_id: 7, account_id: null, mode: 'raw', time_range: '1h' }))
+
+    getSnapshot.mockClear()
+    getAccount.mockResolvedValueOnce({ id: 1119, name: 'rootflow', platform: 'gemini', status: 'active' })
+    await dialog.vm.$emit('select-account', 1119)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    await flushPromises()
+
+    expect(dialog.props('show')).toBe(false)
+    expect(getSnapshot).toHaveBeenCalledWith(expect.objectContaining({ group_id: 7, account_id: 1119 }), expect.anything())
+    wrapper.unmount()
+  })
+
+  it('keeps the SLA card static when a single account is selected', async () => {
+    const wrapper = shallowMount(AccountOpsDashboard, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' }, Select: true, Icon: true, BaseDialog: true,
+          TokenUsageTrend: true, TrendLineChartCard: true, OpsThroughputTrendChart: true,
+          OpsErrorDistributionChart: true, OpsErrorTrendChart: true, OpsAlertEventsCard: true,
+          OpsErrorDetailsModal: true, OpsErrorDetailModal: true, OpsRequestDetailsModal: true
+        }
+      }
+    })
+    await flushPromises()
+
+    const slaCard = wrapper.findAll('button').find((button) => button.text().includes('admin.accountOps.metrics.sla'))!
+    expect(slaCard.attributes('disabled')).toBeDefined()
+    wrapper.unmount()
+  })
+
   it('lays out PV|SLA, TTFT|duration latency cards, then a full-width token trend', async () => {
     getSnapshot.mockResolvedValue({
       overview: {},
