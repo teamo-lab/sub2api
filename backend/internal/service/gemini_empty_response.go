@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -26,6 +27,12 @@ const geminiEmptyResponsePeekLimit = 1 << 20
 // geminiEmptyResponsePeekChunk 是流式预读的单次读取上限，也是超长行的分段大小。
 const geminiEmptyResponsePeekChunk = 32 << 10
 
+// GeminiErrorIn200Reason 标记上游返回 HTTP 200，但响应体（或流里第一段回答之前的帧）
+// 是一个 error 对象。RootFlow 等 NewAPI 型上游排队超时会这样回
+// {"error":{"code":429,"status":"RESOURCE_EXHAUSTED",...}}；非流式转换层把它转成一条空回答，
+// 客户端照常计费，所以和空回复一样按上游故障换号。
+const GeminiErrorIn200Reason GatewayFailureReason = "error_in_200_response"
+
 // geminiEmptyResponseClientBody 是所有账号都返回空回复时交给 handler 的错误体。
 var geminiEmptyResponseClientBody = []byte(`{"error":{"code":502,"message":"Upstream returned an empty response","status":"UNAVAILABLE"}}`)
 
@@ -42,11 +49,20 @@ type geminiEmptyResponseDetector struct {
 	finishReason   string // 最近看到的 finishReason
 	outputTokens   int64  // 观察到的最大 candidatesTokenCount
 	sawBlankText   bool   // 出现过没有可见内容的非 thought text（"" 或只有空格/换行/制表符）
+
+	upstreamError     bool   // 回答内容出现之前就收到了上游 error 对象
+	upstreamErrorCode int    // error.code（没有时为 0）
+	upstreamErrorBody []byte // 携带 error 的那个 JSON 对象，换号耗尽时交给 handler
 }
 
 // decided 表示已经可以确定「不是空回复」，后续数据不用再缓冲。
 func (d *geminiEmptyResponseDetector) decided() bool {
-	return d.hasContent || d.passthrough || d.sawUnknownData
+	return d.hasContent || d.passthrough || d.sawUnknownData || d.upstreamError
+}
+
+// errorInOK 表示上游 200 响应里只有 error、没有任何回答。只在预读结束后调用。
+func (d *geminiEmptyResponseDetector) errorInOK() bool {
+	return d.upstreamError && !d.hasContent
 }
 
 // empty 只在数据读完之后调用，判断整个回复是否为空。
@@ -70,6 +86,7 @@ func (d *geminiEmptyResponseDetector) observeJSON(raw []byte) {
 		return
 	}
 	root := gjson.ParseBytes(raw)
+	outerErr := root.Get("error")
 	if inner := root.Get("response"); inner.Exists() && inner.IsObject() {
 		root = inner
 	}
@@ -79,11 +96,22 @@ func (d *geminiEmptyResponseDetector) observeJSON(raw []byte) {
 	}
 	d.sawEvent = true
 
-	if root.Get("error").Exists() {
-		// 流内错误交给既有逻辑处理。
-		d.passthrough = true
-		return
+	// 上游把错误放在 200 响应体里（非流式整包，或流里的某一帧）。这里先记下，
+	// 等看完同一个对象里的 candidates 再决定：同时带了回答就按回答处理。
+	errVal := root.Get("error")
+	if !errVal.Exists() || errVal.Type == gjson.Null {
+		errVal = outerErr
 	}
+	errSeen := errVal.Exists() && errVal.Type != gjson.Null &&
+		!(errVal.Type == gjson.String && strings.TrimSpace(errVal.String()) == "")
+	defer func() {
+		if errSeen && !d.hasContent && !d.upstreamError {
+			d.upstreamError = true
+			d.upstreamErrorCode = int(errVal.Get("code").Int())
+			d.upstreamErrorBody = append([]byte(nil), raw...)
+		}
+	}()
+
 	if strings.TrimSpace(root.Get("promptFeedback.blockReason").String()) != "" {
 		// 提示词被拦截是真实的回答（candidates 为空也要原样返回）。
 		d.passthrough = true
@@ -292,7 +320,11 @@ func (s *GeminiMessagesCompatService) guardGeminiEmptyResponse(
 	}
 	body, det, err := peekGeminiResponseForEmpty(resp.Body, upstreamStream, geminiEmptyResponsePeekLimit)
 	resp.Body = body
-	if err != nil || !det.empty() {
+	if err != nil {
+		return nil
+	}
+	errorInOK := det.errorInOK()
+	if !errorInOK && !det.empty() {
 		return nil
 	}
 	_ = resp.Body.Close()
@@ -304,6 +336,9 @@ func (s *GeminiMessagesCompatService) guardGeminiEmptyResponse(
 		accountID = account.ID
 		accountName = account.Name
 		platform = account.Platform
+	}
+	if errorInOK {
+		return s.geminiErrorIn200Failover(c, account, accountID, accountName, platform, det, upstreamStream, upstreamRequestID, model, path)
 	}
 	logger.L().Warn("gemini.empty_response",
 		zap.Int64("account_id", accountID),
@@ -336,5 +371,64 @@ func (s *GeminiMessagesCompatService) guardGeminiEmptyResponse(
 		Stage:        GatewayFailureStageInference,
 		Scope:        GatewayFailureScopeAccount,
 		Reason:       GeminiEmptyResponseReason,
+	}
+}
+
+// geminiErrorIn200Failover 处理「HTTP 200 但响应体是 error 对象」：记 ops 上游错误，
+// 返回 UpstreamFailoverError 换下一个账号。排队超时、限流、5xx 一类按 502 处理（和空回复一致，
+// 不让 router 把它当成我们自己的限流）；其它 4xx 保留上游状态码，换号耗尽后客户端能看到原始错误。
+func (s *GeminiMessagesCompatService) geminiErrorIn200Failover(
+	c *gin.Context,
+	account *Account,
+	accountID int64,
+	accountName string,
+	platform string,
+	det *geminiEmptyResponseDetector,
+	upstreamStream bool,
+	upstreamRequestID string,
+	model string,
+	path string,
+) error {
+	code := det.upstreamErrorCode
+	status := http.StatusBadGateway
+	if code >= 400 && code < 500 && code != http.StatusTooManyRequests && code != http.StatusRequestTimeout {
+		status = code
+	}
+	upstreamMsg := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(det.upstreamErrorBody)))
+	logger.L().Warn("gemini.error_in_200_response",
+		zap.Int64("account_id", accountID),
+		zap.String("account_name", accountName),
+		zap.String("model", model),
+		zap.String("path", path),
+		zap.Bool("upstream_stream", upstreamStream),
+		zap.Int("upstream_error_code", code),
+		zap.String("upstream_error_message", upstreamMsg),
+		zap.String("upstream_request_id", upstreamRequestID),
+	)
+	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+		ProxyID:            opsUpstreamProxyID(account),
+		ProxyName:          opsUpstreamProxyName(account),
+		Platform:           platform,
+		AccountID:          accountID,
+		AccountName:        accountName,
+		UpstreamStatusCode: http.StatusOK,
+		UpstreamRequestID:  upstreamRequestID,
+		Kind:               "failover",
+		Stage:              string(GatewayFailureStageInference),
+		Scope:              string(GatewayFailureScopeAccount),
+		Reason:             string(GeminiErrorIn200Reason),
+		Message:            upstreamMsg,
+		Detail:             fmt.Sprintf("path=%s model=%s upstream_error_code=%d", path, model, code),
+	})
+	respBody := det.upstreamErrorBody
+	if len(respBody) == 0 {
+		respBody = geminiEmptyResponseClientBody
+	}
+	return &UpstreamFailoverError{
+		StatusCode:   status,
+		ResponseBody: respBody,
+		Stage:        GatewayFailureStageInference,
+		Scope:        GatewayFailureScopeAccount,
+		Reason:       GeminiErrorIn200Reason,
 	}
 }

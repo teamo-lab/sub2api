@@ -53,6 +53,7 @@ func TestGeminiEmptyResponseDetector_NonStream(t *testing.T) {
 		{"image output", `{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"iVBORw0KGgo="}}]},"finishReason":"STOP"}]}`, false},
 		{"output tokens counted", `{"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}],"usageMetadata":{"candidatesTokenCount":3}}`, false},
 		{"upstream error object", `{"error":{"code":500,"message":"internal"}}`, false},
+		{"null error with empty candidates", `{"candidates":[],"error":null,"usageMetadata":{"promptTokenCount":0}}`, true},
 		{"not json", `<html>oops</html>`, false},
 		{"json array", `[{"candidates":[]}]`, false},
 	}
@@ -101,7 +102,7 @@ func TestGeminiEmptyResponseDetector_Stream(t *testing.T) {
 		{"function call", geminiSSE(`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"f","args":{}}}]},"finishReason":"STOP"}]}`), false},
 		{"image", geminiSSE(`{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"AAAA"}}]}}]}`), false},
 		{"code assist wrapped text", geminiSSE(`{"response":{"candidates":[{"content":{"parts":[{"text":"Hi"}]}}]}}`), false},
-		{"in-stream error", geminiSSE(`{"error":{"code":429,"message":"Resource has been exhausted"}}`), false},
+		{"in-stream error", geminiSSE(`{"error":{"code":429,"message":"Resource has been exhausted"}}`), false}, // 由 errorInOK 单独判定
 		{"json array stream", "[{\"candidates\":[]}\n]\n", false},
 	}
 	for _, tc := range cases {
@@ -444,4 +445,131 @@ func TestGeminiEmptyResponseDetector_TextThenEmptyTailPassesThrough(t *testing.T
 	_, det, err := peekGeminiResponseForEmpty(io.NopCloser(strings.NewReader(stream)), true, 0)
 	require.NoError(t, err)
 	require.False(t, det.empty())
+}
+
+// RootFlow（NewAPI 263）排队超时的非流式原文：HTTP 200，响应体只有 error。
+const geminiRootFlowQueueTimeout200 = `{"error":{"code":429,"message":"模型 gemini-3.8-flash 当前可调度账户不足，排队等待 30s 已超过上限 30s，请稍后重试","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"10s"}]}}`
+
+func TestGeminiEmptyResponseDetector_ErrorIn200(t *testing.T) {
+	cases := []struct {
+		name   string
+		stream bool
+		body   string
+		isErr  bool
+		code   int
+	}{
+		{"rootflow queue timeout non-stream", false, geminiRootFlowQueueTimeout200, true, 429},
+		{"5xx error non-stream", false, `{"error":{"code":500,"message":"internal"}}`, true, 500},
+		{"error without code", false, `{"error":{"message":"boom"}}`, true, 0},
+		{"string error", false, `{"error":"upstream busy"}`, true, 0},
+		{"code assist wrapped error", false, `{"response":{"candidates":[]},"error":{"code":503,"message":"x"}}`, true, 503},
+		{"error alongside answer", false, `{"candidates":[{"content":{"parts":[{"text":"Hi"}]},"finishReason":"STOP"}],"error":{"code":500}}`, false, 0},
+		{"null error", false, `{"candidates":[],"error":null}`, false, 0},
+		{"empty string error", false, `{"candidates":[],"error":""}`, false, 0},
+		{"in-stream error first frame", true, geminiSSE(`{"error":{"code":429,"message":"Resource has been exhausted"}}`), true, 429},
+		{"in-stream error after empty frame", true, geminiSSE(`{"candidates":[{"content":{"parts":[{"text":""}]}}]}`, `{"error":{"code":503,"message":"x"}}`), true, 503},
+		{"in-stream error after text", true, geminiSSE(`{"candidates":[{"content":{"parts":[{"text":"Hi"}]}}]}`, `{"error":{"code":503,"message":"x"}}`), false, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body, det, err := peekGeminiResponseForEmpty(io.NopCloser(strings.NewReader(tc.body)), tc.stream, 0)
+			require.NoError(t, err)
+			require.Equal(t, tc.isErr, det.errorInOK())
+			if tc.isErr {
+				require.Equal(t, tc.code, det.upstreamErrorCode)
+				require.False(t, det.empty(), "error-in-200 is reported separately, not as an empty reply")
+			}
+			replayed, readErr := io.ReadAll(body)
+			require.NoError(t, readErr)
+			if !tc.stream || !tc.isErr {
+				require.Equal(t, tc.body, string(replayed), "peek must not change forwarded bytes")
+			}
+		})
+	}
+}
+
+func requireGeminiErrorIn200Failover(t *testing.T, c *gin.Context, rec *httptest.ResponseRecorder, err error, wantStatus int) *UpstreamFailoverError {
+	t.Helper()
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.Equal(t, wantStatus, failoverErr.StatusCode)
+	require.Equal(t, GeminiErrorIn200Reason, failoverErr.Reason)
+	require.False(t, failoverErr.RetryableOnSameAccount)
+	require.True(t, failoverErr.ShouldRetryNextAccount())
+	require.False(t, c.Writer.Written(), "nothing may reach the client before failover")
+	require.Zero(t, rec.Body.Len())
+
+	v, ok := c.Get(OpsUpstreamErrorsKey)
+	require.True(t, ok)
+	events, ok := v.([]*OpsUpstreamErrorEvent)
+	require.True(t, ok)
+	require.NotEmpty(t, events)
+	last := events[len(events)-1]
+	require.Equal(t, "failover", last.Kind)
+	require.Equal(t, string(GeminiErrorIn200Reason), last.Reason)
+	require.Equal(t, int64(700), last.AccountID)
+	return failoverErr
+}
+
+func TestGeminiForwardAsChatCompletions_ErrorIn200NonStreamFailsOver(t *testing.T) {
+	svc, _ := newGeminiSkippedWriteService(http.StatusOK, geminiRootFlowQueueTimeout200)
+	c, rec := newGeminiEmptyTestContext("/v1/chat/completions")
+	body := []byte(strings.Replace(geminiChatTestBody, "%s", "false", 1))
+
+	res, err := svc.ForwardAsChatCompletions(context.Background(), c, geminiPoolModeAPIKeyAccount(), body)
+	require.Nil(t, res)
+	fe := requireGeminiErrorIn200Failover(t, c, rec, err, http.StatusBadGateway)
+	require.JSONEq(t, geminiRootFlowQueueTimeout200, string(fe.ResponseBody))
+}
+
+func TestGeminiForwardAsChatCompletions_ErrorIn200StreamFailsOver(t *testing.T) {
+	svc, _ := newGeminiSkippedWriteService(http.StatusOK, geminiSSE(geminiRootFlowQueueTimeout200))
+	c, rec := newGeminiEmptyTestContext("/v1/chat/completions")
+	body := []byte(strings.Replace(geminiChatTestBody, "%s", "true", 1))
+
+	res, err := svc.ForwardAsChatCompletions(context.Background(), c, geminiPoolModeAPIKeyAccount(), body)
+	require.Nil(t, res)
+	requireGeminiErrorIn200Failover(t, c, rec, err, http.StatusBadGateway)
+}
+
+func TestGeminiForwardMessages_ErrorIn200NonStreamFailsOver(t *testing.T) {
+	svc, _ := newGeminiSkippedWriteService(http.StatusOK, geminiRootFlowQueueTimeout200)
+	c, rec := newGeminiEmptyTestContext("/v1/messages")
+	body := []byte(`{"model":"gemini-3.8-flash","max_tokens":256,"messages":[{"role":"user","content":"hello"}]}`)
+
+	res, err := svc.Forward(context.Background(), c, geminiPoolModeAPIKeyAccount(), body)
+	require.Nil(t, res)
+	requireGeminiErrorIn200Failover(t, c, rec, err, http.StatusBadGateway)
+}
+
+func TestGeminiForwardMessages_ErrorIn200StreamFailsOver(t *testing.T) {
+	svc, _ := newGeminiSkippedWriteService(http.StatusOK, geminiSSE(geminiRootFlowQueueTimeout200))
+	c, rec := newGeminiEmptyTestContext("/v1/messages")
+	body := []byte(`{"model":"gemini-3.8-flash","max_tokens":256,"stream":true,"messages":[{"role":"user","content":"hello"}]}`)
+
+	res, err := svc.Forward(context.Background(), c, geminiPoolModeAPIKeyAccount(), body)
+	require.Nil(t, res)
+	requireGeminiErrorIn200Failover(t, c, rec, err, http.StatusBadGateway)
+}
+
+func TestGeminiForwardNative_ErrorIn200NonStreamKeepsClientErrorStatus(t *testing.T) {
+	upstream := `{"error":{"code":400,"message":"Invalid argument","status":"INVALID_ARGUMENT"}}`
+	svc, _ := newGeminiSkippedWriteService(http.StatusOK, upstream)
+	c, rec := newGeminiEmptyTestContext("/v1beta/models/gemini-3.8-flash:generateContent")
+
+	res, err := svc.ForwardNative(context.Background(), c, geminiPoolModeAPIKeyAccount(), "gemini-3.8-flash", "generateContent", false, []byte(geminiUsageTestRequest))
+	require.Nil(t, res)
+	fe := requireGeminiErrorIn200Failover(t, c, rec, err, http.StatusBadRequest)
+	require.JSONEq(t, upstream, string(fe.ResponseBody))
+}
+
+func TestGeminiForwardAsChatCompletions_TextThenErrorStreamPassesThrough(t *testing.T) {
+	stream := geminiSSE(`{"candidates":[{"content":{"parts":[{"text":"Hello"}]}}]}`, `{"error":{"code":503,"message":"x"}}`)
+	svc, _ := newGeminiSkippedWriteService(http.StatusOK, stream)
+	c, rec := newGeminiEmptyTestContext("/v1/chat/completions")
+	body := []byte(strings.Replace(geminiChatTestBody, "%s", "true", 1))
+
+	_, err := svc.ForwardAsChatCompletions(context.Background(), c, geminiPoolModeAPIKeyAccount(), body)
+	require.NoError(t, err)
+	require.Contains(t, rec.Body.String(), "Hello")
 }
