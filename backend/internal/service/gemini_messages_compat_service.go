@@ -2188,6 +2188,7 @@ func (s *GeminiMessagesCompatService) handleStreamingResponse(c *gin.Context, re
 	openBlockIndex := -1
 	openBlockType := ""
 	seenText := ""
+	seenThought := ""
 	openToolIndex := -1
 	openToolID := ""
 	openToolName := ""
@@ -2236,6 +2237,60 @@ func (s *GeminiMessagesCompatService) handleStreamingResponse(c *gin.Context, re
 
 		parts := extractGeminiParts(geminiResp)
 		for _, part := range parts {
+			if text, ok := part["text"].(string); ok && text != "" && geminiPartIsThought(part) {
+				// thought 片段（思考摘要）走 thinking 块，不能混进 text 块变成正文。
+				if openToolIndex >= 0 {
+					writeSSE(c.Writer, "content_block_stop", map[string]any{
+						"type":  "content_block_stop",
+						"index": openToolIndex,
+					})
+					openToolIndex = -1
+					openToolName = ""
+					seenToolJSON = ""
+				}
+
+				delta, newSeen := computeGeminiTextDelta(seenThought, text)
+				seenThought = newSeen
+				if delta == "" {
+					continue
+				}
+
+				if openBlockType != "thinking" {
+					if openBlockIndex >= 0 {
+						writeSSE(c.Writer, "content_block_stop", map[string]any{
+							"type":  "content_block_stop",
+							"index": openBlockIndex,
+						})
+					}
+					openBlockType = "thinking"
+					openBlockIndex = nextBlockIndex
+					nextBlockIndex++
+					writeSSE(c.Writer, "content_block_start", map[string]any{
+						"type":  "content_block_start",
+						"index": openBlockIndex,
+						"content_block": map[string]any{
+							"type":     "thinking",
+							"thinking": "",
+						},
+					})
+				}
+
+				if firstTokenMs == nil {
+					ms := int(time.Since(startTime).Milliseconds())
+					firstTokenMs = &ms
+				}
+				writeSSE(c.Writer, "content_block_delta", map[string]any{
+					"type":  "content_block_delta",
+					"index": openBlockIndex,
+					"delta": map[string]any{
+						"type":     "thinking_delta",
+						"thinking": delta,
+					},
+				})
+				flusher.Flush()
+				continue
+			}
+
 			if text, ok := part["text"].(string); ok && text != "" {
 				// Close an open tool_use block before starting text, mirroring
 				// the functionCall branch (which closes open text blocks) and
@@ -2488,7 +2543,8 @@ func collectGeminiSSE(body io.Reader, isOAuth bool) (map[string]any, *ClaudeUsag
 
 	var last map[string]any
 	var lastWithParts map[string]any
-	var collectedTextParts []string // Collect all text parts for aggregation
+	var collectedTextParts []string    // Collect all answer text parts for aggregation
+	var collectedThoughtParts []string // thought（思考摘要）片段单独收集，不能并进正文
 	usage := &ClaudeUsage{}
 
 	for {
@@ -2500,7 +2556,7 @@ func collectGeminiSSE(body io.Reader, isOAuth bool) (map[string]any, *ClaudeUsag
 				switch payload {
 				case "", "[DONE]":
 					if payload == "[DONE]" {
-						return mergeCollectedTextParts(pickGeminiCollectResult(last, lastWithParts), collectedTextParts), usage, nil
+						return mergeCollectedTextParts(pickGeminiCollectResult(last, lastWithParts), collectedTextParts, collectedThoughtParts), usage, nil
 					}
 				default:
 					var parsed map[string]any
@@ -2525,7 +2581,11 @@ func collectGeminiSSE(body io.Reader, isOAuth bool) (map[string]any, *ClaudeUsag
 							// Collect text from each part for aggregation
 							for _, part := range parts {
 								if text, ok := part["text"].(string); ok && text != "" {
-									collectedTextParts = append(collectedTextParts, text)
+									if geminiPartIsThought(part) {
+										collectedThoughtParts = append(collectedThoughtParts, text)
+									} else {
+										collectedTextParts = append(collectedTextParts, text)
+									}
 								}
 							}
 						}
@@ -2542,7 +2602,7 @@ func collectGeminiSSE(body io.Reader, isOAuth bool) (map[string]any, *ClaudeUsag
 		}
 	}
 
-	return mergeCollectedTextParts(pickGeminiCollectResult(last, lastWithParts), collectedTextParts), usage, nil
+	return mergeCollectedTextParts(pickGeminiCollectResult(last, lastWithParts), collectedTextParts, collectedThoughtParts), usage, nil
 }
 
 func pickGeminiCollectResult(last map[string]any, lastWithParts map[string]any) map[string]any {
@@ -2558,13 +2618,18 @@ func pickGeminiCollectResult(last map[string]any, lastWithParts map[string]any) 
 // mergeCollectedTextParts merges all collected text chunks into the final response.
 // This fixes the issue where non-streaming responses only returned the last chunk
 // instead of the complete aggregated text.
-func mergeCollectedTextParts(response map[string]any, textParts []string) map[string]any {
-	if len(textParts) == 0 {
+//
+// thought（思考摘要）片段和正文分开合并：正文并进第一个非 thought 的 text part，
+// 思考并进第一个 thought part，没有就补一个 {"text":..., "thought": true} 放在最前。
+// 以前两者混在一起并进第一个 text part，思考摘要就成了正文（或正文被标成 thought）。
+func mergeCollectedTextParts(response map[string]any, textParts []string, thoughtParts []string) map[string]any {
+	if len(textParts) == 0 && len(thoughtParts) == 0 {
 		return response
 	}
 
 	// Join all text parts
 	mergedText := strings.Join(textParts, "")
+	mergedThought := strings.Join(thoughtParts, "")
 
 	// Deep copy response
 	result := make(map[string]any)
@@ -2598,9 +2663,10 @@ func mergeCollectedTextParts(response map[string]any, textParts []string) map[st
 		existingParts = []any{}
 	}
 
-	// Find and update first text part, or create new one
-	newParts := make([]any, 0, len(existingParts)+1)
-	textUpdated := false
+	// Find and update the first answer / thought text part, or create new ones
+	newParts := make([]any, 0, len(existingParts)+2)
+	textUpdated := len(textParts) == 0
+	thoughtUpdated := len(thoughtParts) == 0
 
 	for _, p := range existingParts {
 		pm, ok := p.(map[string]any)
@@ -2608,28 +2674,56 @@ func mergeCollectedTextParts(response map[string]any, textParts []string) map[st
 			newParts = append(newParts, p)
 			continue
 		}
-		if _, hasText := pm["text"]; hasText && !textUpdated {
-			// Replace with merged text
-			newPart := make(map[string]any)
-			for k, v := range pm {
-				newPart[k] = v
+		if _, hasText := pm["text"]; hasText {
+			isThought := geminiPartIsThought(pm)
+			if (isThought && !thoughtUpdated) || (!isThought && !textUpdated) {
+				newPart := make(map[string]any, len(pm))
+				for k, v := range pm {
+					newPart[k] = v
+				}
+				if isThought {
+					newPart["text"] = mergedThought
+					thoughtUpdated = true
+				} else {
+					newPart["text"] = mergedText
+					textUpdated = true
+				}
+				newParts = append(newParts, newPart)
+				continue
 			}
-			newPart["text"] = mergedText
-			newParts = append(newParts, newPart)
-			textUpdated = true
-		} else {
-			newParts = append(newParts, pm)
 		}
+		newParts = append(newParts, pm)
 	}
 
+	if !thoughtUpdated {
+		newParts = append([]any{map[string]any{"text": mergedThought, "thought": true}}, newParts...)
+	}
 	if !textUpdated {
-		newParts = append([]any{map[string]any{"text": mergedText}}, newParts...)
+		// 正文放在开头的 thought parts 之后，保持「思考 → 回答」的顺序。
+		insertAt := 0
+		for insertAt < len(newParts) {
+			pm, ok := newParts[insertAt].(map[string]any)
+			if !ok || !geminiPartIsThought(pm) {
+				break
+			}
+			insertAt++
+		}
+		answer := map[string]any{"text": mergedText}
+		newParts = append(newParts[:insertAt], append([]any{answer}, newParts[insertAt:]...)...)
 	}
 
 	content["parts"] = newParts
 	result["candidates"] = candidates
 
 	return result
+}
+
+// geminiPartIsThought 判断 Gemini 回包里的 part 是否是思考摘要（"thought": true）。
+// 有的上游（如 AnyRoute）不管请求有没有要 includeThoughts 都会返回这类片段，
+// 它们不能当正文输出。
+func geminiPartIsThought(part map[string]any) bool {
+	thought, _ := part["thought"].(bool)
+	return thought
 }
 
 type geminiNativeStreamResult struct {
@@ -2948,6 +3042,15 @@ func convertGeminiToClaudeMessage(geminiResp map[string]any, originalModel strin
 							continue
 						}
 						if text, ok := pm["text"].(string); ok && text != "" {
+							if geminiPartIsThought(pm) {
+								// thought 片段是思考摘要，不是回答：转成 thinking 块，
+								// chat 兼容链路会把它映射到 reasoning_content，而不是 content。
+								contentBlocks = append(contentBlocks, map[string]any{
+									"type":     "thinking",
+									"thinking": text,
+								})
+								continue
+							}
 							contentBlocks = append(contentBlocks, map[string]any{
 								"type": "text",
 								"text": text,
@@ -3413,6 +3516,7 @@ func convertClaudeMessagesToGeminiContents(messages any, toolUseIDToName map[str
 		}
 
 		parts := make([]any, 0)
+		droppedThinking := false
 		switch content := mm["content"].(type) {
 		case string:
 			// 字符串形式的 content，保留所有内容（包括空白）
@@ -3497,6 +3601,11 @@ func convertClaudeMessagesToGeminiContents(messages any, toolUseIDToName map[str
 							}
 						}
 					}
+				case "thinking", "redacted_thinking":
+					// 我们把上游 thought 片段转成了 thinking 块，客户端多轮时会原样带回来。
+					// Gemini 不需要历史里的思考文本（工具调用要的 thoughtSignature 挂在
+					// functionCall 上），按 unknown block 转成 JSON 文本塞回去反而污染上下文，直接丢掉。
+					droppedThinking = true
 				default:
 					// best-effort: preserve unknown blocks as text
 					if b, err := json.Marshal(bm); err == nil {
@@ -3506,6 +3615,12 @@ func convertClaudeMessagesToGeminiContents(messages any, toolUseIDToName map[str
 			}
 		default:
 			// ignore
+		}
+
+		if droppedThinking && len(parts) == 0 {
+			// 只有思考、没有回答的 assistant 轮：丢掉 thinking 后 parts 为空，
+			// Gemini 会对空 parts 报 400，整轮跳过。
+			continue
 		}
 
 		out = append(out, map[string]any{

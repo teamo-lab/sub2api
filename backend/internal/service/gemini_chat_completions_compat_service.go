@@ -640,6 +640,7 @@ func (s *GeminiMessagesCompatService) handleChatCompletionsStreamingResponseFrom
 	openBlockIndex := -1
 	openBlockType := ""
 	seenText := ""
+	seenThought := ""
 	openToolIndex := -1
 	openToolName := ""
 	seenToolJSON := ""
@@ -695,6 +696,49 @@ func (s *GeminiMessagesCompatService) handleChatCompletionsStreamingResponseFrom
 						}
 
 						for _, part := range extractGeminiParts(geminiResp) {
+							if text, ok := part["text"].(string); ok && text != "" && geminiPartIsThought(part) {
+								// thought 片段（思考摘要）走 thinking 块，下游转成 reasoning_content，
+								// 不能混进 text 块变成 content。
+								if openToolIndex >= 0 {
+									if closeOpenTool() {
+										return &geminiStreamResult{usage: &usage, firstTokenMs: firstTokenMs}, nil
+									}
+								}
+								delta, newSeen := computeGeminiTextDelta(seenThought, text)
+								seenThought = newSeen
+								if delta == "" {
+									continue
+								}
+								if openBlockType != "thinking" {
+									if closeOpenBlock() {
+										return &geminiStreamResult{usage: &usage, firstTokenMs: firstTokenMs}, nil
+									}
+									idx := nextBlockIndex
+									nextBlockIndex++
+									openBlockIndex = idx
+									openBlockType = "thinking"
+									if emitAnthropicEvent(&apicompat.AnthropicStreamEvent{
+										Type:  "content_block_start",
+										Index: &idx,
+										ContentBlock: &apicompat.AnthropicContentBlock{
+											Type: "thinking",
+										},
+									}) {
+										return &geminiStreamResult{usage: &usage, firstTokenMs: firstTokenMs}, nil
+									}
+								}
+								if emitAnthropicEvent(&apicompat.AnthropicStreamEvent{
+									Type: "content_block_delta",
+									Delta: &apicompat.AnthropicDelta{
+										Type:     "thinking_delta",
+										Thinking: delta,
+									},
+								}) {
+									return &geminiStreamResult{usage: &usage, firstTokenMs: firstTokenMs}, nil
+								}
+								continue
+							}
+
 							if text, ok := part["text"].(string); ok && text != "" {
 								if openToolIndex >= 0 {
 									if closeOpenTool() {
