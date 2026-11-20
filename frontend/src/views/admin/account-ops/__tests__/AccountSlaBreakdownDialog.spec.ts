@@ -24,8 +24,8 @@ function row(overrides: Record<string, unknown>) {
 }
 
 const items = [
-  row({ account_id: 1119, account_name: 'rootflow', request_count_total: 300, success_count: 30, error_count_total: 270, sla: 0.1, ttft_p50_ms: 9000, ttft_p90_ms: 64000, token_consumed: 5000, rate_multiplier: 0.16, sell_rate_multiplier: 1.1 }),
-  row({ account_id: 1128, account_name: 'vertex', request_count_total: 100, success_count: 100, sla: 1, ttft_p50_ms: 800, ttft_p90_ms: 2400, token_consumed: 9000 }),
+  row({ account_id: 1119, account_name: 'rootflow', request_count_total: 300, success_count: 30, error_count_total: 270, sla: 0.1, ttft_p50_ms: 9000, ttft_p90_ms: 64000, token_consumed: 5000, input_tokens: 1000, cache_creation_tokens: 500, cache_read_tokens: 2500, output_tokens: 1000, rate_multiplier: 0.16, sell_rate_multiplier: 1.1 }),
+  row({ account_id: 1128, account_name: 'vertex', request_count_total: 100, success_count: 100, sla: 1, ttft_p50_ms: 800, ttft_p90_ms: 2400, token_consumed: 9000, input_tokens: 9000 }),
   row({ account_id: 0, account_name: '', request_count_total: 5, error_count_total: 5, sla: 0, rate_multiplier: null }),
   row({ account_id: 77, account_name: 'limited', request_count_total: 2, error_count_total: 2, sla: null })
 ]
@@ -131,6 +131,29 @@ describe('AccountSlaBreakdownDialog', () => {
     expect(rates[1]!.text()).toContain('admin.accountOps.breakdown.sellRateGroup')
     // The unassigned row has no account, so no rates.
     expect(rates[2]!.exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('shows the token-level cache rate and sorts by it, empty last', async () => {
+    const wrapper = mount(AccountSlaBreakdownDialog, {
+      props: { show: true, params: { group_id: 80 }, scopeLabel: '' },
+      global: { stubs: { Icon: true } },
+      attachTo: document.body
+    })
+    await flushPromises()
+
+    // rootflow: 2500 cache reads / (1000 input + 500 cache writes + 2500 cache reads); output is not counted.
+    const cells = wrapper.findAll('[data-testid="account-cache-rate"]').map((cell) => cell.text())
+    expect(cells).toEqual(['62.50%', '0.00%', '-', '-'])
+
+    const header = wrapper.findAll('thead th').map((th) => th.text())
+    expect(header.indexOf('admin.accountOps.breakdown.columns.cacheRate')).toBe(header.indexOf('admin.accountOps.breakdown.columns.tokens') - 1)
+
+    const button = wrapper.findAll('thead button').find((b) => b.text().startsWith('admin.accountOps.breakdown.columns.cacheRate'))!
+    await button.trigger('click')
+    expect(names(wrapper)).toEqual(['vertex', 'rootflow', 'admin.accountOps.breakdown.unassigned', 'limited'])
+    await button.trigger('click')
+    expect(names(wrapper)).toEqual(['rootflow', 'vertex', 'admin.accountOps.breakdown.unassigned', 'limited'])
     wrapper.unmount()
   })
 

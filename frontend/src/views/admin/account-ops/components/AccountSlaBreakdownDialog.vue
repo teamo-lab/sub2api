@@ -107,6 +107,7 @@
               <td class="text-right">{{ formatMs(row.ttft_p90_ms) }}</td>
               <td class="text-right">{{ formatMs(row.duration_p50_ms) }}</td>
               <td class="text-right">{{ formatMs(row.duration_p90_ms) }}</td>
+              <td class="text-right" data-testid="account-cache-rate">{{ formatPercent(cacheRate(row)) }}</td>
               <td class="text-right">
                 <div>{{ formatNumber(row.token_consumed) }}</div>
                 <div class="text-xs text-gray-400">{{ t('admin.accountOps.breakdown.tokenDetail', { input: formatNumber(row.input_tokens), output: formatNumber(row.output_tokens), cache: formatNumber(row.cache_read_tokens + row.cache_creation_tokens) }) }}</div>
@@ -133,7 +134,7 @@ import { opsAPI, type OpsDashboardAccountBreakdownItem, type OpsDashboardAccount
 import { formatNumber } from '@/utils/format'
 import { formatMultiplier } from '@/utils/formatters'
 
-type SortKey = 'account' | 'sla' | 'pv' | 'ttft_p50' | 'ttft_p90' | 'duration_p50' | 'duration_p90' | 'tokens'
+type SortKey = 'account' | 'sla' | 'pv' | 'ttft_p50' | 'ttft_p90' | 'duration_p50' | 'duration_p90' | 'cache_rate' | 'tokens'
 type SortDirection = 'ascending' | 'descending'
 
 const props = defineProps<{
@@ -168,6 +169,7 @@ const columns = computed<{ key: SortKey; label: string }[]>(() => [
   { key: 'ttft_p90', label: 'TTFT P90' },
   { key: 'duration_p50', label: t('admin.accountOps.breakdown.columns.durationP50') },
   { key: 'duration_p90', label: t('admin.accountOps.breakdown.columns.durationP90') },
+  { key: 'cache_rate', label: t('admin.accountOps.breakdown.columns.cacheRate') },
   { key: 'tokens', label: t('admin.accountOps.breakdown.columns.tokens') }
 ])
 
@@ -184,6 +186,7 @@ function sortValue(row: OpsDashboardAccountBreakdownItem, key: SortKey): number 
     case 'ttft_p90': return row.ttft_p90_ms
     case 'duration_p50': return row.duration_p50_ms
     case 'duration_p90': return row.duration_p90_ms
+    case 'cache_rate': return cacheRate(row)
     case 'tokens': return row.token_consumed
   }
 }
@@ -211,8 +214,20 @@ function toggleSort(key: SortKey) {
   })
 }
 
-function formatSla(value: number | null): string {
+// Token-level cache rate, same formula as the channel monitor and the token trend chart:
+// cache reads / every prompt token (uncached input + cache creation + cache reads).
+// null when the account has no prompt tokens in the window.
+function cacheRate(row: OpsDashboardAccountBreakdownItem): number | null {
+  const promptTokens = row.input_tokens + row.cache_creation_tokens + row.cache_read_tokens
+  return promptTokens > 0 ? row.cache_read_tokens / promptTokens : null
+}
+
+function formatPercent(value: number | null): string {
   return value === null ? '-' : `${(value * 100).toFixed(2)}%`
+}
+
+function formatSla(value: number | null): string {
+  return formatPercent(value)
 }
 
 function slaClass(value: number | null): string {
@@ -313,7 +328,7 @@ onUnmounted(() => controller?.abort())
 }
 
 .account-sla-table {
-  min-inline-size: 60rem;
+  min-inline-size: 66rem;
   border-collapse: separate;
   border-spacing: 0;
 }
