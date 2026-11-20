@@ -243,6 +243,14 @@ func (s *GeminiMessagesCompatService) geminiStreamIdleTimeout(upstreamStream boo
 // geminiUpstreamWatchdog 给一次上游请求加首字超时和流空闲超时：超时就取消这次请求的 ctx，
 // 并记下原因。调用方据此区分「我们超时了（换号）」和「客户端断开（停止）」。
 // 所有方法对 nil 接收者都是空操作，没有配置超时时不创建。
+//
+// 两段计时互不替代：
+//   - 第一个响应体字节到来之前，只由首字超时（gateway.gemini_stream_first_byte_timeout）约束；
+//   - 第一个字节到来之后，才开始流空闲计时（gateway.stream_data_interval_timeout）。
+//
+// 空闲计时故意不从「收到响应头」开始：Gemini 中转通常立刻回响应头、思考完才发第一个字节，
+// 从响应头起算的空闲计时实际上就是首字超时。首字超时默认关闭（0）时，首字节前不设上限，
+// 和这次改动之前一样，由 router 的首包超时兜底。原因见 gateway.gemini_stream_first_byte_timeout 的说明。
 type geminiUpstreamWatchdog struct {
 	cancel context.CancelFunc
 	idle   time.Duration

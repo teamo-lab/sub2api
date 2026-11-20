@@ -280,6 +280,22 @@ func TestGeminiForwardNative_StreamIdleAfterAnswerEndsStream(t *testing.T) {
 	require.Contains(t, rec.Body.String(), "Hello")
 }
 
+func TestGeminiForwardNative_FirstByteOffDoesNotCapWaitBeforeFirstByte(t *testing.T) {
+	// 首字超时关闭（默认）时：上游回了响应头、但一个字节都没发，流空闲超时不会把它切掉
+	// （空闲计时从第一个字节开始），请求一直等到客户端放弃，和改动前一样。
+	upstream := &geminiBlockingUpstream{headersFirst: true}
+	svc := newGeminiTimeoutService(upstream, 0, 1)
+	c, _ := newGeminiNativeTestContext(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := svc.ForwardNative(ctx, c, geminiPoolModeAPIKeyAccount(), "gemini-4-carbon", "streamGenerateContent", true, []byte(geminiUsageTestRequest))
+	require.GreaterOrEqual(t, time.Since(start), 2*time.Second, "the 1s idle timeout must not fire before the first byte")
+	var failoverErr *UpstreamFailoverError
+	require.False(t, errors.As(err, &failoverErr), "no failover when only the idle timeout is configured")
+	require.Equal(t, 1, upstream.calls)
+}
+
 func TestGeminiForwardNative_PeekReadErrorFailsOver(t *testing.T) {
 	svc, stub := newGeminiSkippedWriteService(http.StatusOK, "")
 	stub.response.Body = io.NopCloser(io.MultiReader(
