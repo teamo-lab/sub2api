@@ -73,7 +73,9 @@ describe('AccountSlaBreakdownDialog', () => {
     expect(wrapper.find('th[aria-sort]').text()).toContain('PV')
     expect(wrapper.find('th[aria-sort]').attributes('aria-sort')).toBe('descending')
     expect(wrapper.text()).toContain('10.00%')
-    expect(wrapper.text()).toContain('64K ms')
+    expect(wrapper.text()).toContain('64.00s')
+    expect(wrapper.text()).toContain('9.00s')
+    expect(wrapper.text()).not.toContain(' ms')
     wrapper.unmount()
   })
 

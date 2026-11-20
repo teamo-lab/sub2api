@@ -103,10 +103,10 @@
                 <div>{{ formatNumber(row.request_count_total) }}</div>
                 <div class="text-xs text-gray-400">{{ t('admin.accountOps.breakdown.pvDetail', { ok: formatNumber(row.success_count), err: formatNumber(row.error_count_total) }) }}</div>
               </td>
-              <td class="text-right">{{ formatMs(row.ttft_p50_ms) }}</td>
-              <td class="text-right">{{ formatMs(row.ttft_p90_ms) }}</td>
-              <td class="text-right">{{ formatMs(row.duration_p50_ms) }}</td>
-              <td class="text-right">{{ formatMs(row.duration_p90_ms) }}</td>
+              <td class="text-right">{{ formatSeconds(row.ttft_p50_ms) }}</td>
+              <td class="text-right">{{ formatSeconds(row.ttft_p90_ms) }}</td>
+              <td class="text-right">{{ formatSeconds(row.duration_p50_ms) }}</td>
+              <td class="text-right">{{ formatSeconds(row.duration_p90_ms) }}</td>
               <td class="text-right" data-testid="account-cache-rate">{{ formatPercent(cacheRate(row)) }}</td>
               <td class="text-right">
                 <div>{{ formatNumber(row.token_consumed) }}</div>
@@ -235,8 +235,18 @@ function slaClass(value: number | null): string {
   return value >= 0.99 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'
 }
 
-function formatMs(value: number | null): string {
-  return typeof value === 'number' ? `${formatNumber(value)} ms` : '-'
+// Latencies come from the API in ms; show seconds with a fixed two decimals so a column
+// lines up. The unit style lets the locale render it ("64.00s", "64.00秒").
+const secondsFormat = new Intl.NumberFormat(undefined, {
+  style: 'unit',
+  unit: 'second',
+  unitDisplay: 'narrow',
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2
+})
+
+function formatSeconds(ms: number | null): string {
+  return typeof ms === 'number' ? secondsFormat.format(ms / 1000) : '-'
 }
 
 async function load() {
