@@ -4,10 +4,12 @@ import AccountSlaBreakdownDialog from '../components/AccountSlaBreakdownDialog.v
 
 const getBreakdown = vi.fn()
 
+const i18nLocale = vi.hoisted(() => ({ value: 'en' }))
+
 vi.mock('vue-i18n', async (importOriginal) => ({
   ...(await importOriginal<typeof import('vue-i18n')>()),
   // Rate labels keep their value so the test can check the formatted multiplier.
-  useI18n: () => ({ t: (key: string, params?: Record<string, unknown>) => (params && 'rate' in params ? `${key}(${params.rate})` : key) })
+  useI18n: () => ({ t: (key: string, params?: Record<string, unknown>) => (params && 'rate' in params ? `${key}(${params.rate})` : key), locale: i18nLocale })
 }))
 vi.mock('@/api/admin/ops', () => ({
   opsAPI: { getDashboardAccountBreakdown: (...args: unknown[]) => getBreakdown(...args) }
@@ -51,6 +53,7 @@ describe('AccountSlaBreakdownDialog', () => {
 
   afterEach(() => {
     document.body.innerHTML = ''
+    i18nLocale.value = 'en'
   })
 
   it('opens as a modal, loads with the given filter and sorts by PV first', async () => {
@@ -156,6 +159,19 @@ describe('AccountSlaBreakdownDialog', () => {
     expect(names(wrapper)).toEqual(['vertex', 'rootflow', 'admin.accountOps.breakdown.unassigned', 'limited'])
     await button.trigger('click')
     expect(names(wrapper)).toEqual(['rootflow', 'vertex', 'admin.accountOps.breakdown.unassigned', 'limited'])
+    wrapper.unmount()
+  })
+
+  it('formats seconds in the app language, not the browser locale', async () => {
+    i18nLocale.value = 'zh'
+    const wrapper = mount(AccountSlaBreakdownDialog, {
+      props: { show: true, params: { group_id: 80 }, scopeLabel: '' },
+      global: { stubs: { Icon: true } },
+      attachTo: document.body
+    })
+    await flushPromises()
+    expect(wrapper.text()).toContain('64.00秒')
+    expect(wrapper.text()).not.toContain('64.00s')
     wrapper.unmount()
   })
 

@@ -147,7 +147,7 @@ const emit = defineEmits<{
   (e: 'select-account', accountId: number): void
 }>()
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const uid = `account-sla-${useId()}`
 const titleId = `${uid}-title`
 const captionId = `${uid}-caption`
@@ -236,17 +236,18 @@ function slaClass(value: number | null): string {
 }
 
 // Latencies come from the API in ms; show seconds with a fixed two decimals so a column
-// lines up. The unit style lets the locale render it ("64.00s", "64.00秒").
-const secondsFormat = new Intl.NumberFormat(undefined, {
+// lines up. The unit style renders it in the app's selected language ("64.00s", "64.00秒")
+// and follows a runtime language switch.
+const secondsFormat = computed(() => new Intl.NumberFormat(locale.value, {
   style: 'unit',
   unit: 'second',
   unitDisplay: 'narrow',
   minimumFractionDigits: 2,
   maximumFractionDigits: 2
-})
+}))
 
 function formatSeconds(ms: number | null): string {
-  return typeof ms === 'number' ? secondsFormat.format(ms / 1000) : '-'
+  return typeof ms === 'number' ? secondsFormat.value.format(ms / 1000) : '-'
 }
 
 async function load() {
