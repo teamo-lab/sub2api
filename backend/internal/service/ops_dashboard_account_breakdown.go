@@ -21,6 +21,12 @@ type OpsDashboardAccountBreakdownItem struct {
 	Platform    string `json:"platform"`
 	Status      string `json:"status"`
 
+	// RateMultiplier is the account's current cost rate (accounts.rate_multiplier).
+	// SellRateMultiplier is its current sell rate; nil means the group price applies.
+	// Both are nil for the unassigned row and for deleted accounts.
+	RateMultiplier     *float64 `json:"rate_multiplier"`
+	SellRateMultiplier *float64 `json:"sell_rate_multiplier"`
+
 	SuccessCount      int64 `json:"success_count"`
 	ErrorCountTotal   int64 `json:"error_count_total"`
 	ErrorCountSLA     int64 `json:"error_count_sla"`

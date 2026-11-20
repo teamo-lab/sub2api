@@ -1063,6 +1063,10 @@ export interface OpsDashboardAccountBreakdownItem {
   account_name: string
   platform: string
   status: string
+  /** Current cost rate; null for the unassigned row and deleted accounts */
+  rate_multiplier: number | null
+  /** Current sell rate; null means the group price applies */
+  sell_rate_multiplier: number | null
   success_count: number
   error_count_total: number
   error_count_sla: number

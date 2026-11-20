@@ -94,6 +94,8 @@ SELECT
   COALESCE(a.name, '') AS account_name,
   COALESCE(a.platform, '') AS platform,
   COALESCE(a.status, '') AS status,
+  a.rate_multiplier::float8 AS rate_multiplier,
+  a.sell_rate_multiplier::float8 AS sell_rate_multiplier,
   COALESCE(u.success_count, 0) AS success_count,
   COALESCE(e.error_total, 0) AS error_total,
   COALESCE(e.error_sla, 0) AS error_sla,
@@ -117,13 +119,15 @@ LIMIT ` + fmt.Sprint(service.OpsAccountBreakdownLimit+1)
 	items := make([]*service.OpsDashboardAccountBreakdownItem, 0, 32)
 	for rows.Next() {
 		item := &service.OpsDashboardAccountBreakdownItem{}
+		var costRate, sellRate sql.NullFloat64
 		if err := rows.Scan(
-			&item.AccountID, &item.AccountName, &item.Platform, &item.Status,
+			&item.AccountID, &item.AccountName, &item.Platform, &item.Status, &costRate, &sellRate,
 			&item.SuccessCount, &item.ErrorCountTotal, &item.ErrorCountSLA,
 			&item.InputTokens, &item.OutputTokens, &item.CacheCreationTokens, &item.CacheReadTokens,
 		); err != nil {
 			return nil, false, err
 		}
+		item.RateMultiplier, item.SellRateMultiplier = accountBreakdownRates(costRate, sellRate)
 		item.RequestCountTotal = item.SuccessCount + item.ErrorCountTotal
 		item.RequestCountSLA = item.SuccessCount + item.ErrorCountSLA
 		item.TokenConsumed = item.InputTokens + item.OutputTokens + item.CacheCreationTokens + item.CacheReadTokens
@@ -142,6 +146,27 @@ LIMIT ` + fmt.Sprint(service.OpsAccountBreakdownLimit+1)
 		items = items[:service.OpsAccountBreakdownLimit]
 	}
 	return items, truncated, nil
+}
+
+// accountBreakdownRates normalizes the account's current rates with the same rules
+// billing uses (Account.BillingRateMultiplier / SellRateOverride), so the table shows
+// what the account is actually charged and sold at. Both stay nil when the row has no
+// account (unassigned, or the account was deleted); the sell rate also stays nil when
+// it is unset, meaning the group price applies.
+func accountBreakdownRates(costRate, sellRate sql.NullFloat64) (*float64, *float64) {
+	if !costRate.Valid {
+		return nil, nil
+	}
+	account := &service.Account{RateMultiplier: &costRate.Float64}
+	if sellRate.Valid {
+		account.SellRateMultiplier = &sellRate.Float64
+	}
+	cost := account.BillingRateMultiplier()
+	sell, ok := account.SellRateOverride()
+	if !ok {
+		return &cost, nil
+	}
+	return &cost, &sell
 }
 
 type opsAccountLatency struct {

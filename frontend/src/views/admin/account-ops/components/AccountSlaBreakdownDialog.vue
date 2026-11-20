@@ -89,6 +89,13 @@
                     <template v-if="row.account_id > 0">#{{ row.account_id }}<template v-if="row.status"> · {{ row.status }}</template></template>
                     <template v-else>{{ t('admin.accountOps.breakdown.unassignedHint') }}</template>
                   </span>
+                  <span v-if="row.rate_multiplier !== null" class="font-mono text-xs text-gray-500 dark:text-gray-400" data-testid="account-rates">
+                    {{ t('admin.accountOps.breakdown.costRate', { rate: formatMultiplier(row.rate_multiplier) }) }}
+                    ·
+                    {{ row.sell_rate_multiplier !== null
+                      ? t('admin.accountOps.breakdown.sellRate', { rate: formatMultiplier(row.sell_rate_multiplier) })
+                      : t('admin.accountOps.breakdown.sellRateGroup') }}
+                  </span>
                 </div>
               </th>
               <td class="text-right font-semibold" :class="slaClass(row.sla)">{{ formatSla(row.sla) }}</td>
@@ -124,6 +131,7 @@ import { useI18n } from 'vue-i18n'
 import Icon from '@/components/icons/Icon.vue'
 import { opsAPI, type OpsDashboardAccountBreakdownItem, type OpsDashboardAccountBreakdownResponse, type OpsDashboardFilterParams } from '@/api/admin/ops'
 import { formatNumber } from '@/utils/format'
+import { formatMultiplier } from '@/utils/formatters'
 
 type SortKey = 'account' | 'sla' | 'pv' | 'ttft_p50' | 'ttft_p90' | 'duration_p50' | 'duration_p90' | 'tokens'
 type SortDirection = 'ascending' | 'descending'

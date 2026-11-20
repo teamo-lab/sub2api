@@ -6,7 +6,8 @@ const getBreakdown = vi.fn()
 
 vi.mock('vue-i18n', async (importOriginal) => ({
   ...(await importOriginal<typeof import('vue-i18n')>()),
-  useI18n: () => ({ t: (key: string) => key })
+  // Rate labels keep their value so the test can check the formatted multiplier.
+  useI18n: () => ({ t: (key: string, params?: Record<string, unknown>) => (params && 'rate' in params ? `${key}(${params.rate})` : key) })
 }))
 vi.mock('@/api/admin/ops', () => ({
   opsAPI: { getDashboardAccountBreakdown: (...args: unknown[]) => getBreakdown(...args) }
@@ -14,7 +15,7 @@ vi.mock('@/api/admin/ops', () => ({
 
 function row(overrides: Record<string, unknown>) {
   return {
-    account_id: 1, account_name: 'acct', platform: 'gemini', status: 'active',
+    account_id: 1, account_name: 'acct', platform: 'gemini', status: 'active', rate_multiplier: 1, sell_rate_multiplier: null,
     success_count: 0, error_count_total: 0, error_count_sla: 0, request_count_total: 0, request_count_sla: 0,
     sla: null, token_consumed: 0, input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0,
     ttft_p50_ms: null, ttft_p90_ms: null, duration_p50_ms: null, duration_p90_ms: null,
@@ -23,9 +24,9 @@ function row(overrides: Record<string, unknown>) {
 }
 
 const items = [
-  row({ account_id: 1119, account_name: 'rootflow', request_count_total: 300, success_count: 30, error_count_total: 270, sla: 0.1, ttft_p50_ms: 9000, ttft_p90_ms: 64000, token_consumed: 5000 }),
+  row({ account_id: 1119, account_name: 'rootflow', request_count_total: 300, success_count: 30, error_count_total: 270, sla: 0.1, ttft_p50_ms: 9000, ttft_p90_ms: 64000, token_consumed: 5000, rate_multiplier: 0.16, sell_rate_multiplier: 1.1 }),
   row({ account_id: 1128, account_name: 'vertex', request_count_total: 100, success_count: 100, sla: 1, ttft_p50_ms: 800, ttft_p90_ms: 2400, token_consumed: 9000 }),
-  row({ account_id: 0, account_name: '', request_count_total: 5, error_count_total: 5, sla: 0 }),
+  row({ account_id: 0, account_name: '', request_count_total: 5, error_count_total: 5, sla: 0, rate_multiplier: null }),
   row({ account_id: 77, account_name: 'limited', request_count_total: 2, error_count_total: 2, sla: null })
 ]
 
@@ -112,6 +113,24 @@ describe('AccountSlaBreakdownDialog', () => {
 
     ;(wrapper.find('dialog').element as HTMLDialogElement).close()
     expect(wrapper.emitted('update:show')).toEqual([[false]])
+    wrapper.unmount()
+  })
+
+  it('shows each account\'s cost and sell rate under its name, group price when no sell rate is set', async () => {
+    const wrapper = mount(AccountSlaBreakdownDialog, {
+      props: { show: true, params: { group_id: 80 }, scopeLabel: '' },
+      global: { stubs: { Icon: true } },
+      attachTo: document.body
+    })
+    await flushPromises()
+
+    const rates = wrapper.findAll('tbody th[scope="row"]').map((cell) => cell.find('[data-testid="account-rates"]'))
+    expect(rates[0]!.text()).toContain('admin.accountOps.breakdown.costRate(0.16)')
+    expect(rates[0]!.text()).toContain('admin.accountOps.breakdown.sellRate(1.10)')
+    expect(rates[1]!.text()).toContain('admin.accountOps.breakdown.costRate(1.00)')
+    expect(rates[1]!.text()).toContain('admin.accountOps.breakdown.sellRateGroup')
+    // The unassigned row has no account, so no rates.
+    expect(rates[2]!.exists()).toBe(false)
     wrapper.unmount()
   })
 
