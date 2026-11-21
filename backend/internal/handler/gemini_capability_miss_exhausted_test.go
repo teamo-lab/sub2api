@@ -199,3 +199,39 @@ func TestFailoverState_SelectionExhaustedWithoutPoolCheckIsNotProof(t *testing.T
 	last := exhaustWithPoolCheck(t, 3, nil, capabilityMissErr(), capabilityMissErr())
 	requireMappedToUpstreamFailure(t, last)
 }
+
+func TestFailoverState_ProfitVetoedAccountIsNotProof(t *testing.T) {
+	// 账号 A 被利润门否决（没发请求），账号 B 返回 capability_miss，随后选号耗尽：
+	// A 可能支持这个请求，不能透传 B 的 4xx。证明函数只能看到真正返回 capability_miss 的账号。
+	pool := map[int64]struct{}{1: {}, 2: {}}
+	fs := NewFailoverState(3, false)
+	fs.SetCapabilityMissPoolCheck(func(_ context.Context, tried map[int64]struct{}) bool {
+		for id := range pool {
+			if _, ok := tried[id]; !ok {
+				return false
+			}
+		}
+		return true
+	})
+	require.Equal(t, FailoverContinue, fs.RecordProfitVeto(1))
+	require.Equal(t, FailoverContinue, fs.HandleFailoverError(context.Background(), nil, 2, service.PlatformGemini, 0, capabilityMissErr()))
+	require.Contains(t, fs.FailedAccountIDs, int64(1), "the vetoed account is excluded from selection")
+	require.Equal(t, FailoverExhausted, fs.HandleSelectionExhausted(context.Background()))
+	require.Equal(t, service.GeminiCapabilityMissUnverifiedReason, fs.LastFailoverErr.Reason)
+	requireMappedToUpstreamFailure(t, fs.LastFailoverErr)
+}
+
+func TestFailoverState_PoolCheckSeesOnlyCapabilityMissAccounts(t *testing.T) {
+	var gotTried map[int64]struct{}
+	fs := NewFailoverState(3, false)
+	fs.SetCapabilityMissPoolCheck(func(_ context.Context, tried map[int64]struct{}) bool {
+		gotTried = tried
+		return true
+	})
+	require.Equal(t, FailoverContinue, fs.RecordProfitVeto(7))
+	require.Equal(t, FailoverContinue, fs.HandleFailoverError(context.Background(), nil, 1, service.PlatformGemini, 0, capabilityMissErr()))
+	require.Equal(t, FailoverContinue, fs.HandleFailoverError(context.Background(), nil, 2, service.PlatformGemini, 0, capabilityMissErr()))
+	require.Equal(t, FailoverExhausted, fs.HandleSelectionExhausted(context.Background()))
+	require.Equal(t, map[int64]struct{}{1: {}, 2: {}}, gotTried)
+	require.True(t, service.IsGeminiCapabilityMissExhausted(fs.LastFailoverErr))
+}

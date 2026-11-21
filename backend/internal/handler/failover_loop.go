@@ -154,6 +154,9 @@ type FailoverState struct {
 	capabilityMissSwitches int
 	// capabilityMissPoolCheck 证明「分组里每个支持该模型的账号都试过且都是 capability_miss」。
 	capabilityMissPoolCheck func(ctx context.Context, tried map[int64]struct{}) bool
+	// capabilityMissAccountIDs 只记录实际请求过上游、并且返回 capability_miss 的账号。
+	// 不能用 FailedAccountIDs：利润门否决等没发请求的账号也会进那个集合。
+	capabilityMissAccountIDs map[int64]struct{}
 }
 
 // NewFailoverState 创建 failover 状态
@@ -289,6 +292,12 @@ func (s *FailoverState) HandleFailoverError(
 	// Gemini 能力类拒绝（capability_miss）是秒回的 4xx，不消耗普通换号预算，另设上限。
 	// 「所有账号都不支持」只能由选号耗尽（候选池里确实没有账号了）来证明；
 	// 只是用完了换号次数时，池里可能还有能接的账号，必须按上游故障（可重试）处理。
+	if failoverErr.Reason == service.GeminiCapabilityMissReason {
+		if s.capabilityMissAccountIDs == nil {
+			s.capabilityMissAccountIDs = make(map[int64]struct{})
+		}
+		s.capabilityMissAccountIDs[accountID] = struct{}{}
+	}
 	if failoverErr.Reason == service.GeminiCapabilityMissReason && s.MaxSwitches > 0 {
 		if s.capabilityMissSwitches >= maxGeminiCapabilityMissSwitches {
 			s.LastFailoverErr = inconclusiveCapabilityMiss(s.LastFailoverErr)
@@ -354,12 +363,13 @@ func (s *FailoverState) SetCapabilityMissPoolCheck(check func(ctx context.Contex
 
 // verifyCapabilityMissPool 在选号耗尽时确认最后的 capability_miss 能否作为「所有账号都不支持」：
 // 选号失败可能只是剩下的账号暂时不可调度（限流、额度、RPM 等），它们没有被验证过。
-// 只有证明函数确认分组里每个支持该模型的账号都试过了，才保留 capability_miss；否则降级，按上游故障返回。
+// 只有证明函数确认分组里每个支持该模型的账号都实际返回过 capability_miss（只看 capabilityMissAccountIDs，
+// 不看 FailedAccountIDs），才保留 capability_miss；否则降级，按上游故障返回。
 func (s *FailoverState) verifyCapabilityMissPool(ctx context.Context) {
 	if s.LastFailoverErr == nil || s.LastFailoverErr.Reason != service.GeminiCapabilityMissReason {
 		return
 	}
-	if s.capabilityMissPoolCheck != nil && s.capabilityMissPoolCheck(ctx, s.FailedAccountIDs) {
+	if s.capabilityMissPoolCheck != nil && s.capabilityMissPoolCheck(ctx, s.capabilityMissAccountIDs) {
 		return
 	}
 	unverified := *s.LastFailoverErr
