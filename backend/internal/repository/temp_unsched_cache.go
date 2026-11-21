@@ -14,6 +14,8 @@ const tempUnschedPrefix = "temp_unsched:account:"
 
 const openAIAPIKeyHealthFailurePrefix = "openai_apikey_health:"
 
+const poolModelFailurePrefix = "pool_model_failure:"
+
 var openAIAPIKeyHealthFailureScript = redis.NewScript(`
 	local key = KEYS[1]
 	local sequence_key = key .. ':sequence'
@@ -118,6 +120,35 @@ func (c *tempUnschedCache) openAIAPIKeyHealthKey(accountID int64) string {
 	// The hash tag keeps the rolling window and sequence key in one Redis
 	// Cluster slot even though the Lua script derives the latter dynamically.
 	return fmt.Sprintf("%s{%d}:failures", openAIAPIKeyHealthFailurePrefix, accountID)
+}
+
+func (c *tempUnschedCache) poolModelFailureKey(accountID int64, modelKey string) string {
+	return fmt.Sprintf("%s{%d}:%s:failures", poolModelFailurePrefix, accountID, modelKey)
+}
+
+// RecordPoolModelFailure adds one failure to the rolling (account, model) window
+// and reports whether the threshold was reached. It reuses the OpenAI health
+// window script: same semantics, different key.
+func (c *tempUnschedCache) RecordPoolModelFailure(ctx context.Context, accountID int64, modelKey string, windowMinutes, threshold int) (int64, bool, error) {
+	if windowMinutes < 1 {
+		windowMinutes = 1
+	}
+	if threshold < 1 {
+		threshold = 1
+	}
+	result, err := openAIAPIKeyHealthFailureScript.Run(ctx, c.rdb, []string{c.poolModelFailureKey(accountID, modelKey)}, windowMinutes, threshold).Slice()
+	if err != nil {
+		return 0, false, fmt.Errorf("record pool model failure: %w", err)
+	}
+	if len(result) != 2 {
+		return 0, false, fmt.Errorf("record pool model failure: unexpected result length %d", len(result))
+	}
+	count, countOK := result[0].(int64)
+	tripped, trippedOK := result[1].(int64)
+	if !countOK || !trippedOK {
+		return 0, false, fmt.Errorf("record pool model failure: unexpected result types %T/%T", result[0], result[1])
+	}
+	return count, tripped == 1, nil
 }
 
 func (c *tempUnschedCache) RecordOpenAIAPIKeyHealthFailure(ctx context.Context, accountID int64, windowMinutes, threshold int) (int64, bool, error) {

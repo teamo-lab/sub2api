@@ -166,6 +166,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		fs.SetCapabilityMissPoolCheck(func(ctx context.Context, tried map[int64]struct{}) bool {
 			return h.gatewayService.GeminiCapabilityMissCoversPool(ctx, apiKey.GroupID, reqModel, tried)
 		})
+		fs.RequestedModel = reqModel
 		// 选路实验 / 能力过滤用的请求特征（只对 Gemini 分组）。
 		c.Request = c.Request.WithContext(service.WithGeminiRouteRequest(c.Request.Context(), service.ParseChatCompletionsRouteRequest(body, reqStream)))
 	}
