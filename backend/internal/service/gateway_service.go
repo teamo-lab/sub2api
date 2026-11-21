@@ -761,6 +761,10 @@ func (s *GatewayService) TempUnscheduleRetryableError(ctx context.Context, accou
 	if failoverErr.RequestScopedTransient {
 		return
 	}
+	// Gemini 池模式账号按（账号, 模型）滑动窗口计数，聚集失败才冷却该模型，不整号封禁。
+	if s.observePoolModelFailure(ctx, accountID, failoverErr) {
+		return
+	}
 	// 根据状态码选择封禁策略
 	switch failoverErr.StatusCode {
 	case http.StatusBadRequest:

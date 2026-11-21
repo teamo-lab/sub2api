@@ -1040,3 +1040,26 @@ func TestFailoverClientGone(t *testing.T) {
 		require.False(t, failoverClientGone(nil))
 	})
 }
+
+type modelCapturingTempUnscheduler struct {
+	models []string
+}
+
+func (m *modelCapturingTempUnscheduler) TempUnscheduleRetryableError(ctx context.Context, _ int64, _ *service.UpstreamFailoverError) {
+	m.models = append(m.models, service.TempUnschedulableModelFromContext(ctx))
+}
+
+// 同账号重试用尽时，请求模型要随 ctx 带给封禁逻辑，才能只冷却（账号, 模型）。
+func TestHandleFailoverErrorPassesRequestedModelToTempUnscheduler(t *testing.T) {
+	retryable := &service.UpstreamFailoverError{StatusCode: http.StatusBadGateway, RetryableOnSameAccount: true}
+
+	withModel := NewFailoverState(3, false)
+	withModel.RequestedModel = "gemini-3.8-flash"
+	mock := &modelCapturingTempUnscheduler{}
+	require.Equal(t, FailoverContinue, withModel.HandleFailoverError(context.Background(), mock, 1133, service.PlatformGemini, 0, retryable))
+
+	withoutModel := NewFailoverState(3, false)
+	require.Equal(t, FailoverContinue, withoutModel.HandleFailoverError(context.Background(), mock, 1133, service.PlatformGemini, 0, retryable))
+
+	require.Equal(t, []string{"gemini-3.8-flash", ""}, mock.models)
+}
