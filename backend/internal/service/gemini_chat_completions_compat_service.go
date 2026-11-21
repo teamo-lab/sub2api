@@ -282,6 +282,9 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 
 	if resp.StatusCode >= 400 {
 		respBody := s.readUpstreamErrorBody(resp)
+		if failover := s.modelNotSupportedFailover(c, account, resp.StatusCode, respBody, resp.Header.Get(requestIDHeader)); failover != nil {
+			return nil, failover
+		}
 		policy := ErrorPolicyNone
 		if s.rateLimitService != nil {
 			policy = s.rateLimitService.CheckErrorPolicy(ctx, account, resp.StatusCode, respBody, mappedModel)
