@@ -152,15 +152,21 @@ const GeminiCapabilityMissMixedReason GatewayFailureReason = "capability_miss_af
 // 池里可能还有没试过、能接的账号。同样按上游故障映射，不透传 4xx。
 const GeminiCapabilityMissSwitchLimitReason GatewayFailureReason = "capability_miss_switch_limit"
 
+// GeminiCapabilityMissUnverifiedReason：选号耗尽了，但没能证明分组里每个支持该模型的账号都试过
+// （剩下的可能只是暂时限流、额度不够等）。同样按上游故障映射，不透传 4xx。
+const GeminiCapabilityMissUnverifiedReason GatewayFailureReason = "capability_miss_pool_unverified"
+
 // IsGeminiCapabilityMissInconclusive 判断换号耗尽时最后一个错误是不是「没能证明所有账号都不支持」的
 // capability_miss（前面有别的失败，或换号次数用完）。handler 用它把状态码改成 502。
 func IsGeminiCapabilityMissInconclusive(err *UpstreamFailoverError) bool {
-	return err != nil && (err.Reason == GeminiCapabilityMissMixedReason || err.Reason == GeminiCapabilityMissSwitchLimitReason)
+	return err != nil && (err.Reason == GeminiCapabilityMissMixedReason ||
+		err.Reason == GeminiCapabilityMissSwitchLimitReason ||
+		err.Reason == GeminiCapabilityMissUnverifiedReason)
 }
 
 // IsGeminiCapabilityMissExhausted 判断换号耗尽时的最后一个错误是否是「账号接不了」的 4xx。
-// FailoverState 只在每个尝试过的账号都是 capability_miss、且是选号耗尽（候选池里没有账号了）
-// 而不是换号次数用完时保留这个 reason（否则降级成 GeminiCapabilityMissMixedReason /
+// FailoverState 只在每个尝试过的账号都是 capability_miss、选号耗尽、并且 GeminiCapabilityMissCoversPool
+// 证明分组里每个支持该模型的账号都试过了时保留这个 reason（否则降级成 GeminiCapabilityMissMixedReason /
 // GeminiCapabilityMissSwitchLimitReason），所以返回 true 意味着所有账号都拒绝了同一个请求，
 // handler 应把上游真实的 4xx 交给客户端。
 func IsGeminiCapabilityMissExhausted(err *UpstreamFailoverError) bool {

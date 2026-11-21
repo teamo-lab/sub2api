@@ -385,6 +385,9 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	}
 
 	fs := NewFailoverState(h.maxAccountSwitchesGemini, hasBoundSession)
+	fs.SetCapabilityMissPoolCheck(func(ctx context.Context, tried map[int64]struct{}) bool {
+		return h.gatewayService.GeminiCapabilityMissCoversPool(ctx, apiKey.GroupID, modelName, tried)
+	})
 	sellRange := installSellRateRange(c, apiKey)
 
 	// 单账号分组提前设置 SingleAccountRetry 标记，让 Service 层首次 503 就不设模型限流标记。

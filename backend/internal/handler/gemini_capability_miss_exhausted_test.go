@@ -68,7 +68,16 @@ func TestMessagesFailoverExhausted_CapabilityMissKeepsUpstream4xx(t *testing.T) 
 // 然后模拟候选池里没有账号了（选号耗尽），返回此时的 LastFailoverErr。
 func exhaustThroughFailoverState(t *testing.T, maxSwitches int, errs ...*service.UpstreamFailoverError) *service.UpstreamFailoverError {
 	t.Helper()
+	return exhaustWithPoolCheck(t, maxSwitches, func(context.Context, map[int64]struct{}) bool { return true }, errs...)
+}
+
+// exhaustWithPoolCheck 同上，但用给定的「全池都试过」证明函数（nil 表示没有设置）。
+func exhaustWithPoolCheck(t *testing.T, maxSwitches int, check func(context.Context, map[int64]struct{}) bool, errs ...*service.UpstreamFailoverError) *service.UpstreamFailoverError {
+	t.Helper()
 	fs := NewFailoverState(maxSwitches, false)
+	if check != nil {
+		fs.SetCapabilityMissPoolCheck(check)
+	}
 	for i, fe := range errs {
 		action := fs.HandleFailoverError(context.Background(), nil, int64(i+1), service.PlatformGemini, 0, fe)
 		require.Equal(t, FailoverContinue, action, "failure %d should switch to the next account", i+1)
@@ -172,4 +181,21 @@ func TestFailoverState_NormalSwitchBudgetUnchangedAfterCapabilityMisses(t *testi
 		require.Equal(t, FailoverContinue, fs.HandleFailoverError(context.Background(), nil, int64(10+i), service.PlatformGemini, 0, upstream500Err()))
 	}
 	require.Equal(t, FailoverExhausted, fs.HandleFailoverError(context.Background(), nil, 20, service.PlatformGemini, 0, upstream500Err()))
+}
+
+func TestFailoverState_SelectionExhaustedWithUntriedAccountIsNotProof(t *testing.T) {
+	// A 不支持；B 还在池里但暂时限流/额度不够，选号失败。B 没验证过：不能透传 4xx。
+	var gotTried map[int64]struct{}
+	last := exhaustWithPoolCheck(t, 3, func(_ context.Context, tried map[int64]struct{}) bool {
+		gotTried = tried
+		return false
+	}, capabilityMissErr())
+	require.Contains(t, gotTried, int64(1))
+	require.Equal(t, service.GeminiCapabilityMissUnverifiedReason, last.Reason)
+	requireMappedToUpstreamFailure(t, last)
+}
+
+func TestFailoverState_SelectionExhaustedWithoutPoolCheckIsNotProof(t *testing.T) {
+	last := exhaustWithPoolCheck(t, 3, nil, capabilityMissErr(), capabilityMissErr())
+	requireMappedToUpstreamFailure(t, last)
 }

@@ -152,6 +152,8 @@ type FailoverState struct {
 	// capabilityMissSwitches 本次请求因 capability_miss 换号的次数，上限 maxGeminiCapabilityMissSwitches，
 	// 不计入 SwitchCount。
 	capabilityMissSwitches int
+	// capabilityMissPoolCheck 证明「分组里每个支持该模型的账号都试过且都是 capability_miss」。
+	capabilityMissPoolCheck func(ctx context.Context, tried map[int64]struct{}) bool
 }
 
 // NewFailoverState 创建 failover 状态
@@ -337,6 +339,35 @@ func (s *FailoverState) HandleFailoverError(
 // 返回 FailoverExhausted 时，调用方应返回错误响应。
 // 返回 FailoverCanceled 时，调用方应直接 return。
 func (s *FailoverState) HandleSelectionExhausted(ctx context.Context) FailoverAction {
+	action := s.handleSelectionExhausted(ctx)
+	if action == FailoverExhausted {
+		s.verifyCapabilityMissPool(ctx)
+	}
+	return action
+}
+
+// SetCapabilityMissPoolCheck 设置「所有账号都不支持」的证明函数（Gemini 入口用
+// GatewayService.GeminiCapabilityMissCoversPool）。没设置时，选号耗尽也不透传 capability 4xx。
+func (s *FailoverState) SetCapabilityMissPoolCheck(check func(ctx context.Context, tried map[int64]struct{}) bool) {
+	s.capabilityMissPoolCheck = check
+}
+
+// verifyCapabilityMissPool 在选号耗尽时确认最后的 capability_miss 能否作为「所有账号都不支持」：
+// 选号失败可能只是剩下的账号暂时不可调度（限流、额度、RPM 等），它们没有被验证过。
+// 只有证明函数确认分组里每个支持该模型的账号都试过了，才保留 capability_miss；否则降级，按上游故障返回。
+func (s *FailoverState) verifyCapabilityMissPool(ctx context.Context) {
+	if s.LastFailoverErr == nil || s.LastFailoverErr.Reason != service.GeminiCapabilityMissReason {
+		return
+	}
+	if s.capabilityMissPoolCheck != nil && s.capabilityMissPoolCheck(ctx, s.FailedAccountIDs) {
+		return
+	}
+	unverified := *s.LastFailoverErr
+	unverified.Reason = service.GeminiCapabilityMissUnverifiedReason
+	s.LastFailoverErr = &unverified
+}
+
+func (s *FailoverState) handleSelectionExhausted(ctx context.Context) FailoverAction {
 	// 客户端已断开时选号失败是 context canceled 的必然结果，
 	// 不代表账号耗尽，直接按取消终止。
 	if ctx.Err() != nil {
