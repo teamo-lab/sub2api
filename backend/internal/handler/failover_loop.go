@@ -50,6 +50,10 @@ const (
 	// 取值与 maxAccountSwitches 默认值一致：混合定价的大分组仍有充分重选机会，
 	// 同时把整池越线时的无谓选号开销限制在常数级。
 	maxProfitVetoAttempts = 10
+	// maxGeminiCapabilityMissSwitches 单次请求内因 Gemini capability_miss（模型不存在、字段不支持等，
+	// 上游秒回 4xx）换号的次数上限。这类失败不产生生成成本，所以不占普通换号预算，
+	// 让「所有账号都不支持」能在常规大小的号池里由选号耗尽来证明；超过上限按上游故障返回。
+	maxGeminiCapabilityMissSwitches = 10
 )
 
 // profitVetoExhaustedMessage 是利润否决次数耗尽时返回给客户端的文案。
@@ -145,6 +149,9 @@ type FailoverState struct {
 	// 只有每个尝试过的账号都是 capability_miss，才能证明「所有账号都接不了这个请求」，
 	// 换号耗尽时才把上游 4xx 原样交给客户端；混合失败时按上游故障处理，客户端可以重试。
 	nonCapabilityMissSeen bool
+	// capabilityMissSwitches 本次请求因 capability_miss 换号的次数，上限 maxGeminiCapabilityMissSwitches，
+	// 不计入 SwitchCount。
+	capabilityMissSwitches int
 }
 
 // NewFailoverState 创建 failover 状态
@@ -213,6 +220,17 @@ func (s *FailoverState) trackGeminiCapabilityMiss(failoverErr *service.UpstreamF
 	return &mixed
 }
 
+// inconclusiveCapabilityMiss 在「没有证明所有账号都不支持」就结束换号时（换号次数用完），
+// 把 capability_miss 降级成 GeminiCapabilityMissSwitchLimitReason 的副本，handler 不再透传 4xx。
+func inconclusiveCapabilityMiss(err *service.UpstreamFailoverError) *service.UpstreamFailoverError {
+	if err == nil || err.Reason != service.GeminiCapabilityMissReason {
+		return err
+	}
+	limited := *err
+	limited.Reason = service.GeminiCapabilityMissSwitchLimitReason
+	return &limited
+}
+
 // HandleFailoverError 处理 UpstreamFailoverError，返回下一步动作。
 // 包含：缓存计费判断、同账号重试、临时封禁、切换计数、Antigravity 延时。
 func (s *FailoverState) HandleFailoverError(
@@ -266,8 +284,28 @@ func (s *FailoverState) HandleFailoverError(
 	// 加入失败列表
 	s.FailedAccountIDs[accountID] = struct{}{}
 
+	// Gemini 能力类拒绝（capability_miss）是秒回的 4xx，不消耗普通换号预算，另设上限。
+	// 「所有账号都不支持」只能由选号耗尽（候选池里确实没有账号了）来证明；
+	// 只是用完了换号次数时，池里可能还有能接的账号，必须按上游故障（可重试）处理。
+	if failoverErr.Reason == service.GeminiCapabilityMissReason && s.MaxSwitches > 0 {
+		if s.capabilityMissSwitches >= maxGeminiCapabilityMissSwitches {
+			s.LastFailoverErr = inconclusiveCapabilityMiss(s.LastFailoverErr)
+			return FailoverExhausted
+		}
+		s.capabilityMissSwitches++
+		logger.FromContext(ctx).Warn("gateway.failover_switch_account",
+			zap.Int64("account_id", accountID),
+			zap.Int("upstream_status", failoverErr.StatusCode),
+			zap.String("reason", string(failoverErr.Reason)),
+			zap.Int("capability_miss_switches", s.capabilityMissSwitches),
+			zap.Int("max_capability_miss_switches", maxGeminiCapabilityMissSwitches),
+		)
+		return FailoverContinue
+	}
+
 	// 检查是否耗尽
 	if s.SwitchCount >= s.MaxSwitches {
+		s.LastFailoverErr = inconclusiveCapabilityMiss(s.LastFailoverErr)
 		return FailoverExhausted
 	}
 
