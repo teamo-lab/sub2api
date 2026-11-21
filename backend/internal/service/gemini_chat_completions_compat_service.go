@@ -130,9 +130,9 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 	transientRetries := 0
 	for attempt := 1; attempt <= geminiMaxRetries; attempt++ {
 		watchdog.release()
-		var attemptCtx context.Context
-		attemptCtx, watchdog = newGeminiUpstreamWatchdog(ctx, s.geminiStreamFirstByteTimeout(useUpstreamStream), s.geminiStreamIdleTimeout(useUpstreamStream))
-		upstreamReq, idHeader, err := buildReq(attemptCtx)
+		watchdog = nil
+		// 构建请求（含 OAuth/Service Account 取 token）用请求 ctx，不计入首字超时。
+		upstreamReq, idHeader, err := buildReq(ctx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return nil, err
@@ -140,6 +140,11 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 			return nil, s.writeChatCompletionsError(c, http.StatusBadGateway, "upstream_error", err.Error())
 		}
 		requestIDHeader = idHeader
+
+		// 首字/空闲计时从请求构建完成、即将发给上游时开始，只量上游的耗时。
+		var attemptCtx context.Context
+		attemptCtx, watchdog = newGeminiUpstreamWatchdog(upstreamReq.Context(), s.geminiStreamFirstByteTimeout(useUpstreamStream), s.geminiStreamIdleTimeout(useUpstreamStream))
+		upstreamReq = upstreamReq.WithContext(attemptCtx)
 
 		resp, err = s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
 		if err != nil {

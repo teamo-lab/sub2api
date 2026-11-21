@@ -441,3 +441,95 @@ func TestSleepGeminiBackoffCtx_Cancelled(t *testing.T) {
 	cancel()
 	require.ErrorIs(t, sleepGeminiBackoffCtx(ctx, 3), context.Canceled)
 }
+
+// geminiSlowTokenCache 模拟取 token 很慢（OAuth 刷新、Service Account 签名）：每次取 token 等 delay。
+type geminiSlowTokenCache struct{ delay time.Duration }
+
+func (s *geminiSlowTokenCache) GetAccessToken(ctx context.Context, _ string) (string, error) {
+	select {
+	case <-time.After(s.delay):
+		return "ya29.slow-token", nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+func (s *geminiSlowTokenCache) SetAccessToken(context.Context, string, string, time.Duration) error {
+	return nil
+}
+func (s *geminiSlowTokenCache) DeleteAccessToken(context.Context, string) error { return nil }
+func (s *geminiSlowTokenCache) AcquireRefreshLock(context.Context, string, time.Duration) (bool, error) {
+	return false, nil
+}
+func (s *geminiSlowTokenCache) ReleaseRefreshLock(context.Context, string) error { return nil }
+
+func geminiSlowTokenOAuthAccount() *Account {
+	return &Account{
+		ID:          702,
+		Platform:    PlatformGemini,
+		Type:        AccountTypeOAuth,
+		Credentials: map[string]any{"pool_mode": true},
+		Concurrency: 1,
+	}
+}
+
+const geminiFinishedStreamBody = "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hello\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":11,\"candidatesTokenCount\":7,\"totalTokenCount\":18}}\n\n"
+
+func newGeminiSlowTokenService(upstream HTTPUpstream, tokenDelay time.Duration) *GeminiMessagesCompatService {
+	svc := newGeminiTimeoutService(upstream, 1, 0)
+	svc.tokenProvider = &GeminiTokenProvider{tokenCache: &geminiSlowTokenCache{delay: tokenDelay}}
+	return svc
+}
+
+func geminiFinishedStreamUpstream() *geminiCompatHTTPUpstreamStub {
+	return &geminiCompatHTTPUpstreamStub{response: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(geminiFinishedStreamBody)),
+	}}
+}
+
+func TestGeminiForwardNative_SlowTokenDoesNotCountTowardFirstByteTimeout(t *testing.T) {
+	// 取 token 花了 1.5s，首字超时 1s：请求还没发出去，不能算上游首字超时。
+	upstream := geminiFinishedStreamUpstream()
+	svc := newGeminiSlowTokenService(upstream, 1500*time.Millisecond)
+	c, rec := newGeminiNativeTestContext(t)
+	result, err := svc.ForwardNative(context.Background(), c, geminiSlowTokenOAuthAccount(), "gemini-3.8-flash", "streamGenerateContent", true, []byte(geminiUsageTestRequest))
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, 7, result.Usage.OutputTokens)
+	require.Contains(t, rec.Body.String(), "Hello")
+	require.Equal(t, 1, upstream.calls)
+}
+
+func TestGeminiForwardNative_SlowTokenThenUpstreamSilentStillFailsOver(t *testing.T) {
+	// 取 token 慢，发出去之后上游一直不出字：首字超时从发出请求开始算，照常换号。
+	upstream := &geminiBlockingUpstream{headersFirst: true}
+	svc := newGeminiSlowTokenService(upstream, 1500*time.Millisecond)
+	c, _ := newGeminiNativeTestContext(t)
+	start := time.Now()
+	_, err := svc.ForwardNative(context.Background(), c, geminiSlowTokenOAuthAccount(), "gemini-3.8-flash", "streamGenerateContent", true, []byte(geminiUsageTestRequest))
+	_ = requireGeminiImmediateFailover(t, c, err, http.StatusGatewayTimeout, GeminiFirstByteTimeoutReason)
+	require.GreaterOrEqual(t, time.Since(start), 2400*time.Millisecond, "the timer starts after the token is ready")
+	require.Equal(t, 1, upstream.calls)
+}
+
+func TestGeminiForwardAsChatCompletions_SlowTokenDoesNotCountTowardFirstByteTimeout(t *testing.T) {
+	upstream := geminiFinishedStreamUpstream()
+	svc := newGeminiSlowTokenService(upstream, 1500*time.Millisecond)
+	c, rec := newGeminiEmptyTestContext("/v1/chat/completions")
+	result, err := svc.ForwardAsChatCompletions(context.Background(), c, geminiSlowTokenOAuthAccount(), []byte(fmt.Sprintf(geminiChatTestBody, "true")))
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Contains(t, rec.Body.String(), "Hello")
+}
+
+func TestGeminiForwardMessages_SlowTokenDoesNotCountTowardFirstByteTimeout(t *testing.T) {
+	upstream := geminiFinishedStreamUpstream()
+	svc := newGeminiSlowTokenService(upstream, 1500*time.Millisecond)
+	c, rec := newGeminiEmptyTestContext("/v1/messages")
+	body := []byte(`{"model":"gemini-3.8-flash","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"hello"}]}`)
+	result, err := svc.Forward(context.Background(), c, geminiSlowTokenOAuthAccount(), body)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Contains(t, rec.Body.String(), "Hello")
+}
