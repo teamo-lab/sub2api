@@ -415,7 +415,7 @@ func TestGeminiForwardMessages_404FailsOver(t *testing.T) {
 	c, _ := newGeminiEmptyTestContext("/v1/messages")
 	body := []byte(`{"model":"gemini-4-carbon","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"hello"}]}`)
 	_, err := svc.Forward(context.Background(), c, geminiPoolModeAPIKeyAccount(), body)
-	_ = requireGeminiImmediateFailover(t, c, err, http.StatusNotFound, GeminiCapabilityMissReason)
+	_ = requireGeminiImmediateFailover(t, c, err, http.StatusNotFound, GeminiModelNotSupportedReason)
 }
 
 func TestGeminiUpstreamWatchdog_NilAndRelease(t *testing.T) {
