@@ -189,6 +189,7 @@ func TestGeminiForwardNative_ClientCancelStopsRetrying(t *testing.T) {
 type geminiBlockingUpstream struct {
 	headersFirst bool
 	prefix       string
+	status       int // 0 表示 200
 	mu           sync.Mutex
 	calls        int
 }
@@ -202,8 +203,12 @@ func (u *geminiBlockingUpstream) Do(req *http.Request, _ string, _ int64, _ int)
 		<-ctx.Done()
 		return nil, fmt.Errorf("Post %q: %w", req.URL.String(), ctx.Err())
 	}
+	status := u.status
+	if status == 0 {
+		status = http.StatusOK
+	}
 	return &http.Response{
-		StatusCode: http.StatusOK,
+		StatusCode: status,
 		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
 		Body:       io.NopCloser(io.MultiReader(strings.NewReader(u.prefix), &geminiCtxBlockedReader{ctx: ctx})),
 	}, nil
@@ -601,4 +606,126 @@ func TestGeminiNonPoolPlain429StillRateLimitsAccount(t *testing.T) {
 	c, _ := newGeminiEmptyTestContext("/v1beta/models/gemini-3.8-flash:generateContent")
 	_, _ = svc.ForwardNative(context.Background(), c, geminiNonPoolAPIKeyAccount(), "gemini-3.8-flash", "generateContent", false, []byte(geminiUsageTestRequest))
 	require.Positive(t, recorder.calls())
+}
+
+// geminiStalledErrorBodyCases：三个入口各发一个流式请求，上游先回非 2xx 响应头和半截错误体，然后挂住。
+func geminiStalledErrorBodyCases() []struct {
+	name string
+	path string
+	run  func(svc *GeminiMessagesCompatService, c *gin.Context, account *Account) error
+} {
+	return []struct {
+		name string
+		path string
+		run  func(svc *GeminiMessagesCompatService, c *gin.Context, account *Account) error
+	}{
+		{"native", "/v1beta/models/gemini-3.8-flash:streamGenerateContent", func(svc *GeminiMessagesCompatService, c *gin.Context, account *Account) error {
+			_, err := svc.ForwardNative(context.Background(), c, account, "gemini-3.8-flash", "streamGenerateContent", true, []byte(geminiUsageTestRequest))
+			return err
+		}},
+		{"messages", "/v1/messages", func(svc *GeminiMessagesCompatService, c *gin.Context, account *Account) error {
+			_, err := svc.Forward(context.Background(), c, account, []byte(`{"model":"gemini-3.8-flash","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"hello"}]}`))
+			return err
+		}},
+		{"chat", "/v1/chat/completions", func(svc *GeminiMessagesCompatService, c *gin.Context, account *Account) error {
+			_, err := svc.ForwardAsChatCompletions(context.Background(), c, account, []byte(fmt.Sprintf(geminiChatTestBody, "true")))
+			return err
+		}},
+	}
+}
+
+func TestGemini429ErrorBodyStallsFailsOverWithoutRateLimit(t *testing.T) {
+	// 429 响应头已到，错误体只来了半截（还看不到「负载已饱和」）就挂住：
+	// 空闲超时后按传输层失败换号，不能落到普通 429 路径把账号冷却掉。
+	for _, tc := range geminiStalledErrorBodyCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := &geminiBlockingUpstream{headersFirst: true, status: http.StatusTooManyRequests, prefix: `{"error":{"code":429,"mess`}
+			svc := newGeminiTimeoutService(upstream, 0, 1)
+			recorder := &geminiRateLimitRecorder{}
+			svc.accountRepo = recorder
+			c, rec := newGeminiEmptyTestContext(tc.path)
+			err := tc.run(svc, c, geminiNonPoolAPIKeyAccount())
+			_ = requireGeminiImmediateFailover(t, c, err, http.StatusGatewayTimeout, GeminiStreamIdleTimeoutReason)
+			require.Zero(t, recorder.calls(), "a stalled error body must not rate-limit the account")
+			require.Equal(t, 1, upstream.calls)
+			require.Empty(t, rec.Body.String(), "nothing is written to the client before failover")
+		})
+	}
+}
+
+func TestGemini400ErrorBodyStallsFailsOverInsteadOfBlankPassthrough(t *testing.T) {
+	for _, tc := range geminiStalledErrorBodyCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := &geminiBlockingUpstream{headersFirst: true, status: http.StatusBadRequest, prefix: `{"error":{"code":400,`}
+			svc := newGeminiTimeoutService(upstream, 0, 1)
+			c, rec := newGeminiEmptyTestContext(tc.path)
+			err := tc.run(svc, c, geminiPoolModeAPIKeyAccount())
+			_ = requireGeminiImmediateFailover(t, c, err, http.StatusGatewayTimeout, GeminiStreamIdleTimeoutReason)
+			require.Empty(t, rec.Body.String(), "no blank 400 is passed through to the client")
+		})
+	}
+}
+
+func TestGeminiErrorBodyBeforeFirstByteHitsFirstByteTimeout(t *testing.T) {
+	// 错误响应头到了、body 一个字节都没有：首字超时打开时按 first_byte_timeout 换号。
+	upstream := &geminiBlockingUpstream{headersFirst: true, status: http.StatusTooManyRequests}
+	svc := newGeminiTimeoutService(upstream, 1, 0)
+	c, _ := newGeminiEmptyTestContext("/v1beta/models/gemini-3.8-flash:streamGenerateContent")
+	_, err := svc.ForwardNative(context.Background(), c, geminiNonPoolAPIKeyAccount(), "gemini-3.8-flash", "streamGenerateContent", true, []byte(geminiUsageTestRequest))
+	_ = requireGeminiImmediateFailover(t, c, err, http.StatusGatewayTimeout, GeminiFirstByteTimeoutReason)
+}
+
+func TestGeminiErrorBodyClientCancelStops(t *testing.T) {
+	upstream := &geminiBlockingUpstream{headersFirst: true, status: http.StatusTooManyRequests, prefix: `{"error":`}
+	svc := newGeminiTimeoutService(upstream, 0, 0)
+	c, _ := newGeminiEmptyTestContext("/v1beta/models/gemini-3.8-flash:streamGenerateContent")
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	_, err := svc.ForwardNative(ctx, c, geminiNonPoolAPIKeyAccount(), "gemini-3.8-flash", "streamGenerateContent", true, []byte(geminiUsageTestRequest))
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	var failoverErr *UpstreamFailoverError
+	require.False(t, errors.As(err, &failoverErr), "client gone: stop, do not fail over")
+}
+
+func TestGeminiNonStreamClientUpstreamStreamStallFailsOver(t *testing.T) {
+	// Code Assist 账号：客户端非流式，上游走流式再聚合。上游吐了一段回答后挂住：
+	// 客户端还没收到任何东西，空闲超时后换号，而不是直接回 502。
+	prefix := "data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hello\"}]}}]}}\n\n"
+	account := &Account{
+		ID:          703,
+		Platform:    PlatformGemini,
+		Type:        AccountTypeOAuth,
+		Credentials: map[string]any{"project_id": "project-1", "pool_mode": true},
+		Concurrency: 1,
+	}
+	cases := []struct {
+		name string
+		path string
+		run  func(svc *GeminiMessagesCompatService, c *gin.Context) error
+	}{
+		{"native", "/v1beta/models/gemini-3.8-flash:generateContent", func(svc *GeminiMessagesCompatService, c *gin.Context) error {
+			_, err := svc.ForwardNative(context.Background(), c, account, "gemini-3.8-flash", "generateContent", false, []byte(geminiUsageTestRequest))
+			return err
+		}},
+		{"messages", "/v1/messages", func(svc *GeminiMessagesCompatService, c *gin.Context) error {
+			_, err := svc.Forward(context.Background(), c, account, []byte(`{"model":"gemini-3.8-flash","max_tokens":64,"messages":[{"role":"user","content":"hello"}]}`))
+			return err
+		}},
+		{"chat", "/v1/chat/completions", func(svc *GeminiMessagesCompatService, c *gin.Context) error {
+			_, err := svc.ForwardAsChatCompletions(context.Background(), c, account, []byte(fmt.Sprintf(geminiChatTestBody, "false")))
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := &geminiBlockingUpstream{headersFirst: true, prefix: prefix}
+			svc := newGeminiSlowTokenService(upstream, 0)
+			svc.cfg.Gateway.GeminiStreamFirstByteTimeout = 0
+			svc.cfg.Gateway.StreamDataIntervalTimeout = 1
+			c, rec := newGeminiEmptyTestContext(tc.path)
+			err := tc.run(svc, c)
+			_ = requireGeminiImmediateFailover(t, c, err, http.StatusGatewayTimeout, GeminiStreamIdleTimeoutReason)
+			require.Empty(t, rec.Body.String())
+		})
+	}
 }

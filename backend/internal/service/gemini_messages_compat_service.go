@@ -832,6 +832,10 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 			return nil, geminiTransportFailover(c, account, reason, safeErr)
 		}
 		resp.Body = watchdog.wrapBody(resp.Body)
+		// 非 2xx：先把错误体完整读出来，读失败（超时、断连）按传输层失败换号，再做分类和冷却。
+		if err := s.bufferGeminiErrorBody(ctx, c, account, resp, watchdog); err != nil {
+			return nil, err
+		}
 
 		// 上游拉不到 fileData 里的图片链接：由我们下载成 base64 重试一次。
 		if resp.StatusCode == http.StatusBadRequest && imageURLFallbackPending {
@@ -1166,7 +1170,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 		if useUpstreamStream {
 			collected, usageObj, err := collectGeminiSSE(resp.Body, true)
 			if err != nil {
-				return nil, s.writeClaudeError(c, http.StatusBadGateway, "upstream_error", "Failed to read upstream stream")
+				return nil, geminiCollectReadFailure(ctx, c, account, watchdog, err)
 			}
 			collectedBytes, _ := json.Marshal(collected)
 			upstreamResponseModelObserverFromContext(c).ObserveGemini(collectedBytes)
@@ -1464,6 +1468,10 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 			return nil, geminiTransportFailover(c, account, reason, safeErr)
 		}
 		resp.Body = watchdog.wrapBody(resp.Body)
+		// 非 2xx：先把错误体完整读出来，读失败（超时、断连）按传输层失败换号，再做分类和冷却。
+		if err := s.bufferGeminiErrorBody(ctx, c, account, resp, watchdog); err != nil {
+			return nil, err
+		}
 
 		// 错误策略优先：匹配则跳过重试直接处理。
 		if matched, rebuilt := s.checkErrorPolicyInLoop(ctx, account, resp, mappedModel); matched {
@@ -1718,7 +1726,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 		if useUpstreamStream {
 			collected, usageObj, err := collectGeminiSSE(resp.Body, isOAuth)
 			if err != nil {
-				return nil, s.writeGoogleError(c, http.StatusBadGateway, "Failed to read upstream stream")
+				return nil, geminiCollectReadFailure(ctx, c, account, watchdog, err)
 			}
 			b, _ := json.Marshal(collected)
 			upstreamResponseModelObserverFromContext(c).ObserveGemini(b)

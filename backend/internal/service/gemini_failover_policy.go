@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -457,4 +458,46 @@ func logGeminiStreamCut(account *Account, path string, usage *ClaudeUsage) {
 		"path", path,
 		"input_tokens", inputTokens,
 		"output_tokens", outputTokens)
+}
+
+// bufferGeminiErrorBody 在上游返回非 2xx 时，先把错误体完整读进内存，再交给后面的分类、
+// 冷却和错误策略。
+//
+// readUpstreamErrorBody 会吞掉读错误：响应头已到、错误体读到一半被 watchdog 取消（或连接断开）时，
+// 调用方只拿到空的或截断的 body。no-capacity 的 429 因此认不出来，会落到普通 429 路径把健康账号冷却掉；
+// 能力类 400 认不出来时不换号，客户端拿到一个空错误。所以读错误必须在这里处理：
+//   - 客户端断开：返回 ctx 错误，调用方直接停止；
+//   - watchdog 超时或其它读错误：按传输层失败换号，不做任何账号状态写入。
+//
+// 成功时 resp.Body 被换成内存里的副本，后面多次读取都能拿到同样的内容。
+func (s *GeminiMessagesCompatService) bufferGeminiErrorBody(ctx context.Context, c *gin.Context, account *Account, resp *http.Response, watchdog *geminiUpstreamWatchdog) error {
+	if resp == nil || resp.Body == nil || resp.StatusCode < 400 {
+		return nil
+	}
+	limit := gatewayUpstreamErrorBodyReadLimit
+	if s != nil && s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody && s.cfg.Gateway.LogUpstreamErrorBodyMaxBytes > int(limit) {
+		limit = int64(s.cfg.Gateway.LogUpstreamErrorBodyMaxBytes)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit))
+	_ = resp.Body.Close()
+	if err != nil {
+		reason, ok := geminiTransportFailureReason(ctx, watchdog, GeminiStreamReadErrorReason)
+		if !ok {
+			return ctx.Err()
+		}
+		return geminiTransportFailover(c, account, reason, sanitizeUpstreamErrorMessage(err.Error()))
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	return nil
+}
+
+// geminiCollectReadFailure 处理「非流式客户端、上游走流式」时收集上游流途中的读错误
+// （空闲超时、连接断开）。这时客户端还没收到任何内容，换下一个账号是安全的，
+// 比直接回 502 更可能拿到回答。客户端已断开则直接停止。
+func geminiCollectReadFailure(ctx context.Context, c *gin.Context, account *Account, watchdog *geminiUpstreamWatchdog, err error) error {
+	reason, ok := geminiTransportFailureReason(ctx, watchdog, GeminiStreamReadErrorReason)
+	if !ok {
+		return ctx.Err()
+	}
+	return geminiTransportFailover(c, account, reason, sanitizeUpstreamErrorMessage(err.Error()))
 }

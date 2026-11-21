@@ -175,6 +175,10 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 			return nil, geminiTransportFailover(c, account, reason, safeErr)
 		}
 		resp.Body = watchdog.wrapBody(resp.Body)
+		// 非 2xx：先把错误体完整读出来，读失败（超时、断连）按传输层失败换号，再做分类和冷却。
+		if err := s.bufferGeminiErrorBody(ctx, c, account, resp, watchdog); err != nil {
+			return nil, err
+		}
 
 		// 上游拉不到 fileData 里的图片链接：由我们下载成 base64 重试一次。
 		if resp.StatusCode == http.StatusBadRequest && imageURLFallbackPending {
@@ -344,7 +348,7 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 	} else if useUpstreamStream {
 		collected, usageObj, err := collectGeminiSSE(resp.Body, account.Type == AccountTypeOAuth)
 		if err != nil {
-			return nil, s.writeChatCompletionsError(c, http.StatusBadGateway, "upstream_error", "Failed to read upstream stream")
+			return nil, geminiCollectReadFailure(ctx, c, account, watchdog, err)
 		}
 		collectedBytes, _ := json.Marshal(collected)
 		chatResp, usageObj2, err := geminiResponseToChatCompletions(collected, originalModel, collectedBytes, usageObj)
