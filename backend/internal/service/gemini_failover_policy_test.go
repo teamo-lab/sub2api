@@ -729,3 +729,76 @@ func TestGeminiNonStreamClientUpstreamStreamStallFailsOver(t *testing.T) {
 		})
 	}
 }
+
+// geminiWatchdogStaleCallback 模拟「旧计时器的回调已经开始执行、但在 observeRead 换上新计时器之后才拿到锁」：
+// 先记下当前代数（回调捕获的那一代），再喂数据重置计时，最后用旧代数触发回调。
+func geminiWatchdogStaleCallback(t *testing.T, firstByte, idle time.Duration, reason GatewayFailureReason) {
+	t.Helper()
+	ctx, w := newGeminiUpstreamWatchdog(context.Background(), firstByte, idle)
+	defer w.release()
+	w.mu.Lock()
+	staleGen := w.gen
+	w.mu.Unlock()
+
+	w.observeRead(1) // 数据恰好在阈值附近到达，计时被重置
+	w.fire(reason, staleGen)
+
+	_, timedOut := w.timedOut()
+	require.False(t, timedOut, "a stale callback must not time out a stream that just received data")
+	require.NoError(t, ctx.Err(), "a stale callback must not cancel the request")
+}
+
+func TestGeminiUpstreamWatchdog_StaleFirstByteCallbackIgnoredAfterFirstByte(t *testing.T) {
+	geminiWatchdogStaleCallback(t, time.Hour, time.Hour, GeminiFirstByteTimeoutReason)
+}
+
+func TestGeminiUpstreamWatchdog_StaleFirstByteCallbackIgnoredWithoutIdle(t *testing.T) {
+	// 只开首字超时：首字节到了以后计时停掉，旧回调同样无效。
+	geminiWatchdogStaleCallback(t, time.Hour, 0, GeminiFirstByteTimeoutReason)
+}
+
+func TestGeminiUpstreamWatchdog_StaleIdleCallbackIgnoredAfterNextChunk(t *testing.T) {
+	ctx, w := newGeminiUpstreamWatchdog(context.Background(), 0, time.Hour)
+	defer w.release()
+	w.observeRead(1) // 第一块数据：开始空闲计时
+	w.mu.Lock()
+	staleGen := w.gen
+	w.mu.Unlock()
+	w.observeRead(1) // 下一块数据恰好在空闲阈值附近到达
+	w.fire(GeminiStreamIdleTimeoutReason, staleGen)
+	_, timedOut := w.timedOut()
+	require.False(t, timedOut)
+	require.NoError(t, ctx.Err())
+}
+
+func TestGeminiUpstreamWatchdog_CurrentCallbackStillFires(t *testing.T) {
+	ctx, w := newGeminiUpstreamWatchdog(context.Background(), 0, time.Hour)
+	defer w.release()
+	w.observeRead(1)
+	w.mu.Lock()
+	currentGen := w.gen
+	w.mu.Unlock()
+	w.fire(GeminiStreamIdleTimeoutReason, currentGen)
+	reason, timedOut := w.timedOut()
+	require.True(t, timedOut)
+	require.Equal(t, GeminiStreamIdleTimeoutReason, reason)
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+}
+
+func TestGeminiUpstreamWatchdog_ConcurrentResetAndFire(t *testing.T) {
+	// -race 覆盖：极短的空闲阈值下持续喂数据，计时器回调和重置并发进行。
+	_, w := newGeminiUpstreamWatchdog(context.Background(), time.Microsecond, time.Microsecond)
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 2000; j++ {
+				w.observeRead(1)
+			}
+		}()
+	}
+	wg.Wait()
+	_, _ = w.timedOut()
+	w.release()
+}

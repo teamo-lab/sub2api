@@ -284,6 +284,10 @@ type geminiUpstreamWatchdog struct {
 	timer  *time.Timer
 	reason GatewayFailureReason
 	done   bool
+	// gen 是当前计时器的代数。每次重新计时（或停掉计时）都加一，回调只在代数仍是自己那一代时才生效。
+	// time.Timer.Stop 撤销不了已经开始执行、正在等锁的回调：首字或下一块数据恰好在阈值附近到达时，
+	// 旧回调会在 observeRead 换上新计时器之后才拿到锁，没有代数校验就会把刚收到数据的流取消掉。
+	gen uint64
 }
 
 func newGeminiUpstreamWatchdog(parent context.Context, firstByte, idle time.Duration) (context.Context, *geminiUpstreamWatchdog) {
@@ -293,14 +297,32 @@ func newGeminiUpstreamWatchdog(parent context.Context, firstByte, idle time.Dura
 	ctx, cancel := context.WithCancel(parent)
 	w := &geminiUpstreamWatchdog{cancel: cancel, idle: idle}
 	if firstByte > 0 {
-		w.timer = time.AfterFunc(firstByte, func() { w.fire(GeminiFirstByteTimeoutReason) })
+		w.mu.Lock()
+		w.armLocked(firstByte, GeminiFirstByteTimeoutReason)
+		w.mu.Unlock()
 	}
 	return ctx, w
 }
 
-func (w *geminiUpstreamWatchdog) fire(reason GatewayFailureReason) {
+// armLocked 停掉当前计时器、作废它的回调，并按 d 启动新一代计时器。调用方持有 w.mu。
+func (w *geminiUpstreamWatchdog) armLocked(d time.Duration, reason GatewayFailureReason) {
+	w.stopLocked()
+	gen := w.gen
+	w.timer = time.AfterFunc(d, func() { w.fire(reason, gen) })
+}
+
+// stopLocked 停掉当前计时器并作废它的回调（包括已经开始执行、正在等锁的）。调用方持有 w.mu。
+func (w *geminiUpstreamWatchdog) stopLocked() {
+	if w.timer != nil {
+		w.timer.Stop()
+		w.timer = nil
+	}
+	w.gen++
+}
+
+func (w *geminiUpstreamWatchdog) fire(reason GatewayFailureReason, gen uint64) {
 	w.mu.Lock()
-	if w.done || w.reason != "" {
+	if w.done || w.reason != "" || gen != w.gen {
 		w.mu.Unlock()
 		return
 	}
@@ -320,18 +342,10 @@ func (w *geminiUpstreamWatchdog) observeRead(n int) {
 		return
 	}
 	if w.idle <= 0 {
-		if w.timer != nil {
-			w.timer.Stop()
-			w.timer = nil
-		}
+		w.stopLocked()
 		return
 	}
-	if w.timer == nil {
-		w.timer = time.AfterFunc(w.idle, func() { w.fire(GeminiStreamIdleTimeoutReason) })
-		return
-	}
-	w.timer.Stop()
-	w.timer = time.AfterFunc(w.idle, func() { w.fire(GeminiStreamIdleTimeoutReason) })
+	w.armLocked(w.idle, GeminiStreamIdleTimeoutReason)
 }
 
 // timedOut 返回超时原因；没有超时时 ok 为 false。
@@ -351,10 +365,7 @@ func (w *geminiUpstreamWatchdog) release() {
 	}
 	w.mu.Lock()
 	w.done = true
-	if w.timer != nil {
-		w.timer.Stop()
-		w.timer = nil
-	}
+	w.stopLocked()
 	w.mu.Unlock()
 	w.cancel()
 }
