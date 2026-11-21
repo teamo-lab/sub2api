@@ -533,3 +533,72 @@ func TestGeminiForwardMessages_SlowTokenDoesNotCountTowardFirstByteTimeout(t *te
 	require.NotNil(t, result)
 	require.Contains(t, rec.Body.String(), "Hello")
 }
+
+// geminiRateLimitRecorder 记录 SetRateLimited 调用；其它 AccountRepository 方法在这些测试里不会被调用。
+type geminiRateLimitRecorder struct {
+	AccountRepository
+	mu          sync.Mutex
+	rateLimited []int64
+}
+
+func (r *geminiRateLimitRecorder) SetRateLimited(_ context.Context, id int64, _ time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rateLimited = append(r.rateLimited, id)
+	return nil
+}
+
+func (r *geminiRateLimitRecorder) calls() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.rateLimited)
+}
+
+const geminiNoCapacity429Body = `{"error":{"code":429,"message":"当前分组上游负载已饱和，请稍后再试","status":"RESOURCE_EXHAUSTED"}}`
+
+func newGeminiRateLimitRecordingService(status int, body string) (*GeminiMessagesCompatService, *geminiCompatHTTPUpstreamStub, *geminiRateLimitRecorder) {
+	svc, stub := newGeminiSkippedWriteService(status, body)
+	recorder := &geminiRateLimitRecorder{}
+	svc.accountRepo = recorder
+	return svc, stub, recorder
+}
+
+func TestGeminiNonPoolNoCapacity429DoesNotRateLimitAccount(t *testing.T) {
+	// 非 pool 账号收到中转「分组负载已饱和」的 429：换号，但不能把这个健康账号写成限流。
+	cases := []struct {
+		name string
+		run  func(svc *GeminiMessagesCompatService, c *gin.Context) error
+		path string
+	}{
+		{"native", func(svc *GeminiMessagesCompatService, c *gin.Context) error {
+			_, err := svc.ForwardNative(context.Background(), c, geminiNonPoolAPIKeyAccount(), "gemini-3.8-flash", "generateContent", false, []byte(geminiUsageTestRequest))
+			return err
+		}, "/v1beta/models/gemini-3.8-flash:generateContent"},
+		{"messages", func(svc *GeminiMessagesCompatService, c *gin.Context) error {
+			_, err := svc.Forward(context.Background(), c, geminiNonPoolAPIKeyAccount(), []byte(`{"model":"gemini-3.8-flash","max_tokens":64,"messages":[{"role":"user","content":"hello"}]}`))
+			return err
+		}, "/v1/messages"},
+		{"chat", func(svc *GeminiMessagesCompatService, c *gin.Context) error {
+			_, err := svc.ForwardAsChatCompletions(context.Background(), c, geminiNonPoolAPIKeyAccount(), []byte(fmt.Sprintf(geminiChatTestBody, "false")))
+			return err
+		}, "/v1/chat/completions"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, stub, recorder := newGeminiRateLimitRecordingService(http.StatusTooManyRequests, geminiNoCapacity429Body)
+			c, _ := newGeminiEmptyTestContext(tc.path)
+			err := tc.run(svc, c)
+			_ = requireGeminiImmediateFailover(t, c, err, http.StatusTooManyRequests, GeminiUpstreamNoCapacityReason)
+			require.Equal(t, 1, stub.calls, "no same-account retry for relay no-capacity")
+			require.Zero(t, recorder.calls(), "relay no-capacity must not rate-limit the account")
+		})
+	}
+}
+
+func TestGeminiNonPoolPlain429StillRateLimitsAccount(t *testing.T) {
+	// 对照：普通 429（账号自己的配额）仍照旧写限流。
+	svc, _, recorder := newGeminiRateLimitRecordingService(http.StatusTooManyRequests, `{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`)
+	c, _ := newGeminiEmptyTestContext("/v1beta/models/gemini-3.8-flash:generateContent")
+	_, _ = svc.ForwardNative(context.Background(), c, geminiNonPoolAPIKeyAccount(), "gemini-3.8-flash", "generateContent", false, []byte(geminiUsageTestRequest))
+	require.Positive(t, recorder.calls())
+}

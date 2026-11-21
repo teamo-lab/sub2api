@@ -3267,6 +3267,12 @@ func asInt(v any) (int, bool) {
 }
 
 func (s *GeminiMessagesCompatService) handleGeminiUpstreamError(ctx context.Context, account *Account, statusCode int, headers http.Header, body []byte) {
+	// 中转报「没有可用账号 / 分组负载已饱和」（429/529/5xx）是中转自己的资源问题，账号本身是好的：
+	// 只换号，不写限流 / 过载状态，否则持续出现时会把健康账号一个个冷却掉、缩小可调度池。
+	// 所有调用点都经过这里，所以在入口统一跳过。
+	if classifyGeminiUpstreamError(statusCode, body) == geminiErrorNoCapacity {
+		return
+	}
 	// 遵守自定义错误码策略：未命中则跳过所有限流处理
 	if !account.ShouldHandleErrorCode(statusCode) {
 		return
