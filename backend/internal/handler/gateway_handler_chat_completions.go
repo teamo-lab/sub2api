@@ -313,6 +313,9 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		h.gatewayService.FinishRouteAttempt(c, reqStream, err == nil)
 
 		if err != nil {
+			if c.Request.Context().Err() != nil {
+				return
+			}
 			var failoverErr *service.UpstreamFailoverError
 			if errors.As(err, &failoverErr) {
 				if c.Writer.Size() != writerSizeBeforeForward {
@@ -398,6 +401,28 @@ func (h *GatewayHandler) chatCompletionsErrorResponse(c *gin.Context, status int
 // handleCCFailoverExhausted writes a failover-exhausted error in CC format.
 func (h *GatewayHandler) handleCCFailoverExhausted(c *gin.Context, lastErr *service.UpstreamFailoverError, streamStarted bool) {
 	if streamStarted {
+		if service.IsResponseCommitted(c) {
+			return
+		}
+		contentType := strings.ToLower(c.Writer.Header().Get("Content-Type"))
+		if c.Writer.Written() && contentType != "" && !strings.Contains(contentType, "text/event-stream") {
+			return // Preserve an error JSON already written by a Forward path.
+		}
+		// Headers/body have already been committed: HTTP status and account
+		// cannot be changed. Report a CC error event, never a successful finish
+		// or [DONE], and leave the retry loop stopped to avoid splicing answers.
+		status := http.StatusBadGateway
+		if lastErr != nil && lastErr.StatusCode > 0 {
+			status = lastErr.StatusCode
+		}
+		service.SetOpsUpstreamError(c, status, "Upstream response stream failed", "")
+		service.MarkOpsStreamFailure(c, "upstream_error", "upstream_stream_error", "Upstream response stream failed", status)
+		service.MarkResponseCommitted(c)
+		if !c.Writer.Written() {
+			c.Writer.Header().Set("Content-Type", "text/event-stream")
+		}
+		_, _ = c.Writer.WriteString("data: {\"error\":{\"type\":\"upstream_error\",\"code\":\"upstream_stream_error\",\"message\":\"Upstream response stream failed\"}}\n\n")
+		c.Writer.Flush()
 		return
 	}
 	if lastErr != nil {
