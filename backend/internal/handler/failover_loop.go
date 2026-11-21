@@ -136,6 +136,10 @@ type FailoverState struct {
 	ForceCacheBilling     bool
 	hasBoundSession       bool
 
+	// RequestedModel 是本次请求的模型名。设置后，同账号重试用尽时的封禁可以只作用于
+	// （账号, 模型），见 service.ObservePoolModelFailure。
+	RequestedModel string
+
 	// profitVetoedAccountIDs 记录被分组利润门终检否决的账号，是 FailedAccountIDs
 	// 的子集。之所以单独维护：HandleSelectionExhausted 的 503 退避分支会清空
 	// FailedAccountIDs，而利润否决在同一请求内的判定不会改变（下游倍率 D 已在
@@ -283,7 +287,11 @@ func (s *FailoverState) HandleFailoverError(
 
 	// 同账号重试用尽，执行临时封禁
 	if failoverErr.RetryableOnSameAccount {
-		gatewayService.TempUnscheduleRetryableError(ctx, accountID, failoverErr)
+		unschedCtx := ctx
+		if s.RequestedModel != "" {
+			unschedCtx = service.WithTempUnschedulableModel(ctx, s.RequestedModel)
+		}
+		gatewayService.TempUnscheduleRetryableError(unschedCtx, accountID, failoverErr)
 	}
 
 	// 加入失败列表
