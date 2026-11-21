@@ -416,6 +416,10 @@ func (h *GatewayHandler) handleCCFailoverExhausted(c *gin.Context, lastErr *serv
 	if lastErr != nil && lastErr.StatusCode > 0 {
 		statusCode = lastErr.StatusCode
 	}
+	if lastErr != nil && lastErr.Reason == service.GeminiCapabilityMissMixedReason {
+		// 最后一个账号不支持，但前面有账号是上游故障：按上游故障返回，不让客户端误以为请求本身不合法。
+		statusCode = http.StatusBadGateway
+	}
 	if service.IsGeminiCapabilityMissExhausted(lastErr) {
 		msg := service.ExtractUpstreamErrorMessage(lastErr.ResponseBody)
 		service.SetOpsUpstreamError(c, statusCode, msg, "")

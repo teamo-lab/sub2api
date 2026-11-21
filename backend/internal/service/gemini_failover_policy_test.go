@@ -261,23 +261,90 @@ func TestGeminiForwardNative_StreamIdleBeforeAnswerFailsOver(t *testing.T) {
 	_ = requireGeminiImmediateFailover(t, c, err, http.StatusGatewayTimeout, GeminiStreamIdleTimeoutReason)
 }
 
-func TestGeminiForwardNative_StreamIdleAfterAnswerEndsStream(t *testing.T) {
-	// 回答已经开始转发后挂住：不能换号了，但请求要在空闲超时后结束，而不是一直挂着。
-	prefix := "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello\"}]}}]}\n\n"
-	upstream := &geminiBlockingUpstream{headersFirst: true, prefix: prefix}
-	svc := newGeminiTimeoutService(upstream, 0, 1)
-	c, rec := newGeminiNativeTestContext(t)
-	done := make(chan struct{})
+// geminiAnswerThenHangPrefix 是一个已经带回答和 usage 的流式帧，之后上游挂住。
+const geminiAnswerThenHangPrefix = "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hello\"}]}}],\"usageMetadata\":{\"promptTokenCount\":11,\"candidatesTokenCount\":7,\"totalTokenCount\":18}}\n\n"
+
+// runGeminiStreamCut 在 5 秒内跑完 fn，超时说明空闲超时没有结束请求。
+func runGeminiStreamCut(t *testing.T, fn func() (*ForwardResult, error)) (*ForwardResult, error) {
+	t.Helper()
+	type out struct {
+		result *ForwardResult
+		err    error
+	}
+	done := make(chan out, 1)
 	go func() {
-		defer close(done)
-		_, _ = svc.ForwardNative(context.Background(), c, geminiPoolModeAPIKeyAccount(), "gemini-3.8-flash", "streamGenerateContent", true, []byte(geminiUsageTestRequest))
+		result, err := fn()
+		done <- out{result, err}
 	}()
 	select {
-	case <-done:
+	case o := <-done:
+		return o.result, o.err
 	case <-time.After(5 * time.Second):
 		t.Fatal("stream did not end after the idle timeout")
+		return nil, nil
 	}
-	require.Contains(t, rec.Body.String(), "Hello")
+}
+
+func TestGeminiForwardNative_StreamIdleAfterAnswerEndsStreamAndBills(t *testing.T) {
+	// 回答已经开始转发后挂住：不能换号了，请求在空闲超时后结束，写终止错误帧，
+	// 并带着截断前的 usage 正常返回，handler 照常计费。
+	upstream := &geminiBlockingUpstream{headersFirst: true, prefix: geminiAnswerThenHangPrefix}
+	svc := newGeminiTimeoutService(upstream, 0, 1)
+	c, rec := newGeminiNativeTestContext(t)
+	result, err := runGeminiStreamCut(t, func() (*ForwardResult, error) {
+		return svc.ForwardNative(context.Background(), c, geminiPoolModeAPIKeyAccount(), "gemini-3.8-flash", "streamGenerateContent", true, []byte(geminiUsageTestRequest))
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, 11, result.Usage.InputTokens)
+	require.Equal(t, 7, result.Usage.OutputTokens)
+	body := rec.Body.String()
+	require.Contains(t, body, "Hello")
+	require.Contains(t, body, `"status":"DEADLINE_EXCEEDED"`)
+	require.Contains(t, body, geminiStreamCutMessage)
+	require.Equal(t, 1, upstream.calls)
+}
+
+func TestGeminiForwardMessages_StreamIdleAfterAnswerEndsStreamAndBills(t *testing.T) {
+	upstream := &geminiBlockingUpstream{headersFirst: true, prefix: geminiAnswerThenHangPrefix}
+	svc := newGeminiTimeoutService(upstream, 0, 1)
+	c, rec := newGeminiEmptyTestContext("/v1/messages")
+	body := []byte(`{"model":"gemini-3.8-flash","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"hello"}]}`)
+	result, err := runGeminiStreamCut(t, func() (*ForwardResult, error) {
+		return svc.Forward(context.Background(), c, geminiPoolModeAPIKeyAccount(), body)
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, 11, result.Usage.InputTokens)
+	require.Equal(t, 7, result.Usage.OutputTokens)
+	out := rec.Body.String()
+	require.Contains(t, out, "Hello")
+	require.Contains(t, out, "event: error")
+	require.Contains(t, out, geminiStreamCutMessage)
+	require.NotContains(t, out, "message_stop", "a cut stream must not look like a completed message")
+}
+
+func TestGeminiForwardAsChatCompletions_StreamIdleAfterAnswerEndsStreamAndBills(t *testing.T) {
+	upstream := &geminiBlockingUpstream{headersFirst: true, prefix: geminiAnswerThenHangPrefix}
+	svc := newGeminiTimeoutService(upstream, 0, 1)
+	c, rec := newGeminiEmptyTestContext("/v1/chat/completions")
+	result, err := runGeminiStreamCut(t, func() (*ForwardResult, error) {
+		return svc.ForwardAsChatCompletions(context.Background(), c, geminiPoolModeAPIKeyAccount(), []byte(fmt.Sprintf(geminiChatTestBody, "true")))
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, 11, result.Usage.InputTokens)
+	require.Equal(t, 7, result.Usage.OutputTokens)
+	out := rec.Body.String()
+	require.Contains(t, out, "Hello")
+	require.Contains(t, out, string(GeminiStreamIdleTimeoutReason))
+	require.NotContains(t, out, "[DONE]", "a cut stream must not look like a completed response")
+}
+
+func TestEndGeminiStreamOnWatchdogCut_IgnoresOtherReadErrors(t *testing.T) {
+	c, rec := newGeminiEmptyTestContext("/v1/messages")
+	require.False(t, endGeminiStreamOnWatchdogCut(c, errors.New("connection reset by peer"), geminiStreamCutFrameMessages))
+	require.Empty(t, rec.Body.String())
 }
 
 func TestGeminiForwardNative_FirstByteOffDoesNotCapWaitBeforeFirstByte(t *testing.T) {

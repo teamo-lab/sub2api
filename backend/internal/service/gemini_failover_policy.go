@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -142,8 +143,14 @@ func (s *GeminiMessagesCompatService) geminiImmediateFailover(c *gin.Context, ac
 	}
 }
 
+// GeminiCapabilityMissMixedReason：最后一个账号是 capability_miss，但本次请求前面有账号因为别的原因失败
+// （503、超时等）。由 handler 的 FailoverState 打上，换号耗尽时按上游故障映射，不透传 4xx。
+const GeminiCapabilityMissMixedReason GatewayFailureReason = "capability_miss_after_other_failures"
+
 // IsGeminiCapabilityMissExhausted 判断换号耗尽时的最后一个错误是否是「账号接不了」的 4xx。
-// 这种情况下每个账号都拒绝了同一个请求，handler 应把上游真实的 4xx 交给客户端。
+// FailoverState 只在每个尝试过的账号都是 capability_miss 时保留这个 reason（否则降级成
+// GeminiCapabilityMissMixedReason），所以返回 true 意味着所有账号都拒绝了同一个请求，
+// handler 应把上游真实的 4xx 交给客户端。
 func IsGeminiCapabilityMissExhausted(err *UpstreamFailoverError) bool {
 	return err != nil &&
 		err.Reason == GeminiCapabilityMissReason &&
@@ -382,4 +389,72 @@ func geminiTransportFailureReason(parent context.Context, w *geminiUpstreamWatch
 		return reason, true
 	}
 	return fallback, true
+}
+
+// geminiStreamCutMessage 是流已经开始转发后被 watchdog 截断时，写给客户端的终止错误文案。
+const geminiStreamCutMessage = "Upstream stream idle timeout"
+
+// geminiStreamCutByWatchdog 判断流式转发途中的读错误是不是 watchdog 超时造成的。
+func geminiStreamCutByWatchdog(err error) bool {
+	var watchdogErr *geminiWatchdogError
+	return errors.As(err, &watchdogErr)
+}
+
+// 三种客户端协议各自的终止错误帧。
+const (
+	geminiStreamCutFrameNative   = "native"
+	geminiStreamCutFrameMessages = "messages"
+	geminiStreamCutFrameChat     = "chat"
+)
+
+// endGeminiStreamOnWatchdogCut 处理「内容已经转发给客户端之后，上游停了超过空闲超时」：
+// 这时不能换号（会拼接两个账号的输出），也不能当成普通错误返回——那样 handler 不走 RecordUsage，
+// 上游已经产生、客户端已经收到的用量就漏计了。
+//
+// 做法：按客户端协议写一个终止错误帧、记到 ops 流内错误，返回 true 让流处理器带着已累计的
+// usage 正常返回，Forward 照常产出 ForwardResult 计费。不是 watchdog 超时的读错误返回 false，
+// 保持原来的报错路径。
+func endGeminiStreamOnWatchdogCut(c *gin.Context, err error, frame string) bool {
+	if !geminiStreamCutByWatchdog(err) {
+		return false
+	}
+	var payload string
+	switch frame {
+	case geminiStreamCutFrameMessages:
+		b, _ := json.Marshal(map[string]any{
+			"type":  "error",
+			"error": map[string]any{"type": "api_error", "message": geminiStreamCutMessage},
+		})
+		payload = "event: error\ndata: " + string(b) + "\n\n"
+	case geminiStreamCutFrameChat:
+		b, _ := json.Marshal(map[string]any{
+			"error": map[string]any{"type": "upstream_error", "code": string(GeminiStreamIdleTimeoutReason), "message": geminiStreamCutMessage},
+		})
+		payload = "data: " + string(b) + "\n\n"
+	default:
+		payload = "data: " + string(geminiSyntheticErrorBody(http.StatusGatewayTimeout, "DEADLINE_EXCEEDED", geminiStreamCutMessage)) + "\n\n"
+	}
+	_, _ = io.WriteString(c.Writer, payload)
+	if flusher, ok := c.Writer.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	MarkOpsStreamError(c, "upstream_error", geminiStreamCutMessage, http.StatusGatewayTimeout)
+	return true
+}
+
+// logGeminiStreamCut 记一条「流转发途中被空闲超时截断、按已产生用量计费」的日志。
+func logGeminiStreamCut(account *Account, path string, usage *ClaudeUsage) {
+	var accountID int64
+	if account != nil {
+		accountID = account.ID
+	}
+	var inputTokens, outputTokens int
+	if usage != nil {
+		inputTokens, outputTokens = usage.InputTokens, usage.OutputTokens
+	}
+	slog.Warn("gemini_stream_cut_after_output",
+		"account_id", accountID,
+		"path", path,
+		"input_tokens", inputTokens,
+		"output_tokens", outputTokens)
 }

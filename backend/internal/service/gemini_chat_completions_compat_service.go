@@ -333,6 +333,9 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 		}
 		usage = applyGeminiMissingUsageEstimate(account, streamRes.usage, sniffer, geminiReq, "chat_stream")
 		firstTokenMs = streamRes.firstTokenMs
+		if streamRes.cut {
+			logGeminiStreamCut(account, "chat", usage)
+		}
 	} else if useUpstreamStream {
 		collected, usageObj, err := collectGeminiSSE(resp.Body, account.Type == AccountTypeOAuth)
 		if err != nil {
@@ -874,6 +877,9 @@ func (s *GeminiMessagesCompatService) handleChatCompletionsStreamingResponseFrom
 			break
 		}
 		if err != nil {
+			if endGeminiStreamOnWatchdogCut(c, err, geminiStreamCutFrameChat) {
+				return &geminiStreamResult{usage: &usage, firstTokenMs: firstTokenMs, cut: true}, nil
+			}
 			return nil, fmt.Errorf("stream read error: %w", err)
 		}
 	}

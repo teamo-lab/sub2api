@@ -140,6 +140,11 @@ type FailoverState struct {
 	profitVetoedAccountIDs map[int64]struct{}
 	// profitVetoCount 本次请求累计的利润否决次数，用于 maxProfitVetoAttempts 上限。
 	profitVetoCount int
+
+	// nonCapabilityMissSeen 记录本次请求里出现过不是 capability_miss 的失败（503、超时、402 等）。
+	// 只有每个尝试过的账号都是 capability_miss，才能证明「所有账号都接不了这个请求」，
+	// 换号耗尽时才把上游 4xx 原样交给客户端；混合失败时按上游故障处理，客户端可以重试。
+	nonCapabilityMissSeen bool
 }
 
 // NewFailoverState 创建 failover 状态
@@ -189,6 +194,25 @@ func (s *FailoverState) allExclusionsAreProfitVetoed() bool {
 	return true
 }
 
+// trackGeminiCapabilityMiss 返回要记为 LastFailoverErr 的错误。前面已经有账号因为别的原因失败时，
+// 把这次的 capability_miss 降级成 GeminiCapabilityMissMixedReason 的副本：
+// 耗尽时 handler 看到的就不是「所有账号都不支持」，不会把 4xx 透传给客户端。
+func (s *FailoverState) trackGeminiCapabilityMiss(failoverErr *service.UpstreamFailoverError) *service.UpstreamFailoverError {
+	if failoverErr == nil {
+		return nil
+	}
+	if failoverErr.Reason != service.GeminiCapabilityMissReason {
+		s.nonCapabilityMissSeen = true
+		return failoverErr
+	}
+	if !s.nonCapabilityMissSeen {
+		return failoverErr
+	}
+	mixed := *failoverErr
+	mixed.Reason = service.GeminiCapabilityMissMixedReason
+	return &mixed
+}
+
 // HandleFailoverError 处理 UpstreamFailoverError，返回下一步动作。
 // 包含：缓存计费判断、同账号重试、临时封禁、切换计数、Antigravity 延时。
 func (s *FailoverState) HandleFailoverError(
@@ -204,7 +228,7 @@ func (s *FailoverState) HandleFailoverError(
 	if ctx != nil && ctx.Err() != nil {
 		return FailoverCanceled
 	}
-	s.LastFailoverErr = failoverErr
+	s.LastFailoverErr = s.trackGeminiCapabilityMiss(failoverErr)
 	if failoverErr == nil || !failoverErr.ShouldRetryNextAccount() {
 		return FailoverExhausted
 	}

@@ -1145,12 +1145,18 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 	var usage *ClaudeUsage
 	var firstTokenMs *int
 	if req.Stream {
+		sniffer := newGeminiUsageSniffer(resp.Body, account.Type == AccountTypeOAuth)
+		resp.Body = sniffer
 		streamRes, err := s.handleStreamingResponse(c, resp, startTime, originalModel)
 		if err != nil {
 			return nil, err
 		}
 		usage = streamRes.usage
 		firstTokenMs = streamRes.firstTokenMs
+		if streamRes.cut {
+			usage = applyGeminiMissingUsageEstimate(account, usage, sniffer, geminiReq, "messages_stream_cut")
+			logGeminiStreamCut(account, "messages", usage)
+		}
 	} else {
 		if useUpstreamStream {
 			collected, usageObj, err := collectGeminiSSE(resp.Body, true)
@@ -1695,6 +1701,9 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 		}
 		usage = applyGeminiMissingUsageEstimate(account, streamRes.usage, sniffer, body, "native_stream")
 		firstTokenMs = streamRes.firstTokenMs
+		if streamRes.cut {
+			logGeminiStreamCut(account, "native", usage)
+		}
 	} else {
 		if useUpstreamStream {
 			collected, usageObj, err := collectGeminiSSE(resp.Body, isOAuth)
@@ -2177,6 +2186,8 @@ func mapGeminiStatusToClaudeErrorType(status string) string {
 type geminiStreamResult struct {
 	usage        *ClaudeUsage
 	firstTokenMs *int
+	// cut 为 true 表示内容转发途中被空闲超时截断（已给客户端写了终止错误帧），usage 是截断前的累计值。
+	cut bool
 }
 
 func (s *GeminiMessagesCompatService) handleNonStreamingResponse(c *gin.Context, resp *http.Response, originalModel string) (*ClaudeUsage, error) {
@@ -2258,6 +2269,9 @@ func (s *GeminiMessagesCompatService) handleStreamingResponse(c *gin.Context, re
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil && !errors.Is(err, io.EOF) {
+			if endGeminiStreamOnWatchdogCut(c, err, geminiStreamCutFrameMessages) {
+				return &geminiStreamResult{usage: &usage, firstTokenMs: firstTokenMs, cut: true}, nil
+			}
 			return nil, fmt.Errorf("stream read error: %w", err)
 		}
 
@@ -2789,6 +2803,8 @@ func geminiPartIsThought(part map[string]any) bool {
 type geminiNativeStreamResult struct {
 	usage        *ClaudeUsage
 	firstTokenMs *int
+	// cut 同 geminiStreamResult.cut。
+	cut bool
 }
 
 func isGeminiInsufficientScope(headers http.Header, body []byte) bool {
@@ -2995,6 +3011,9 @@ func (s *GeminiMessagesCompatService) handleNativeStreamingResponse(c *gin.Conte
 			break
 		}
 		if err != nil {
+			if endGeminiStreamOnWatchdogCut(c, err, geminiStreamCutFrameNative) {
+				return &geminiNativeStreamResult{usage: usage, firstTokenMs: firstTokenMs, cut: true}, nil
+			}
 			return nil, err
 		}
 	}
