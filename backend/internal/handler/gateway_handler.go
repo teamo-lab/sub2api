@@ -1918,6 +1918,14 @@ func (h *GatewayHandler) handleFailoverExhausted(c *gin.Context, failoverErr *se
 		return
 	}
 
+	// 没能证明所有账号都不支持的 capability_miss：按上游故障返回，并且要在透传规则之前判断，
+	// 否则匹配 4xx 的透传规则会把它当成客户端错误原样交出去（见 handleGeminiFailoverExhausted）。
+	if service.IsGeminiCapabilityMissInconclusive(failoverErr) {
+		service.SetOpsUpstreamError(c, statusCode, service.ExtractUpstreamErrorMessage(responseBody), "")
+		h.handleStreamingAwareError(c, http.StatusBadGateway, "upstream_error", "Upstream request failed", streamStarted)
+		return
+	}
+
 	// 先检查透传规则
 	if h.errorPassthroughService != nil && len(responseBody) > 0 {
 		if rule := h.errorPassthroughService.MatchRule(platform, statusCode, responseBody); rule != nil {

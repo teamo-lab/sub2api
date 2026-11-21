@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/model"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -234,4 +235,54 @@ func TestFailoverState_PoolCheckSeesOnlyCapabilityMissAccounts(t *testing.T) {
 	require.Equal(t, FailoverExhausted, fs.HandleSelectionExhausted(context.Background()))
 	require.Equal(t, map[int64]struct{}{1: {}, 2: {}}, gotTried)
 	require.True(t, service.IsGeminiCapabilityMissExhausted(fs.LastFailoverErr))
+}
+
+// gemini400PassthroughHandler 返回一个带「Gemini 400 原样透传」规则的 handler，模拟线上配置了透传规则。
+func gemini400PassthroughHandler() *GatewayHandler {
+	rule := &model.ErrorPassthroughRule{ID: 21, Enabled: true, Name: "gemini 400 passthrough", MatchMode: "all", Platforms: []string{service.PlatformGemini}, ErrorCodes: []int{http.StatusBadRequest}, PassthroughCode: true, PassthroughBody: true}
+	return &GatewayHandler{errorPassthroughService: service.NewErrorPassthroughService(recoveryRuleRepo{rule: rule}, nil)}
+}
+
+func TestGeminiFailoverExhausted_InconclusiveSkipsPassthroughRules(t *testing.T) {
+	// 透传规则匹配 Gemini 400，但最后的 capability_miss 没有被证明（三种原因都试）：
+	// native / messages / chat 都必须按上游故障 502 返回，不能被透传规则原样交出 400。
+	reasons := []service.GatewayFailureReason{
+		service.GeminiCapabilityMissMixedReason,
+		service.GeminiCapabilityMissSwitchLimitReason,
+		service.GeminiCapabilityMissUnverifiedReason,
+	}
+	for _, reason := range reasons {
+		t.Run(string(reason), func(t *testing.T) {
+			last := capabilityMissErr()
+			last.Reason = reason
+			h := gemini400PassthroughHandler()
+
+			c, rec := newExhaustedTestContext("/v1beta/models/gemini-4-carbon:generateContent")
+			h.handleGeminiFailoverExhausted(c, last)
+			require.Equal(t, http.StatusBadGateway, rec.Code)
+			require.NotContains(t, rec.Body.String(), "model turn")
+
+			c, rec = newExhaustedTestContext("/v1/messages")
+			h.handleFailoverExhausted(c, last, service.PlatformGemini, false)
+			require.Equal(t, http.StatusBadGateway, rec.Code)
+			require.NotContains(t, rec.Body.String(), "model turn")
+
+			c, rec = newExhaustedTestContext("/v1/chat/completions")
+			h.handleCCFailoverExhausted(c, last, false)
+			require.Equal(t, http.StatusBadGateway, rec.Code)
+			require.NotContains(t, rec.Body.String(), "invalid_request_error")
+		})
+	}
+}
+
+func TestGeminiFailoverExhausted_ProvenCapabilityMissStillHonorsPassthroughRules(t *testing.T) {
+	// 对照：已证明全池都不支持时，透传规则照常生效（返回 400）。
+	h := gemini400PassthroughHandler()
+	c, rec := newExhaustedTestContext("/v1beta/models/gemini-4-carbon:generateContent")
+	h.handleGeminiFailoverExhausted(c, capabilityMissErr())
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	c, rec = newExhaustedTestContext("/v1/messages")
+	h.handleFailoverExhausted(c, capabilityMissErr(), service.PlatformGemini, false)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
 }

@@ -683,6 +683,15 @@ func (h *GatewayHandler) handleGeminiFailoverExhausted(c *gin.Context, failoverE
 	statusCode := failoverErr.StatusCode
 	responseBody := failoverErr.ResponseBody
 
+	// 没能证明所有账号都不支持的 capability_miss（前面有上游故障、换号次数用完、或池里还有没验证的账号）：
+	// 最后一个 4xx 不代表请求本身有问题，按上游故障返回。必须在透传规则之前判断，
+	// 否则匹配 Gemini 4xx 的透传规则会把它当成客户端错误原样交出去。
+	if service.IsGeminiCapabilityMissInconclusive(failoverErr) {
+		service.SetOpsUpstreamError(c, statusCode, service.ExtractUpstreamErrorMessage(responseBody), "")
+		googleError(c, http.StatusBadGateway, "Upstream request failed")
+		return
+	}
+
 	// 先检查透传规则
 	if h.errorPassthroughService != nil && len(responseBody) > 0 {
 		if rule := h.errorPassthroughService.MatchRule(service.PlatformGemini, statusCode, responseBody); rule != nil {
