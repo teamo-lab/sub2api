@@ -1106,6 +1106,11 @@ type GatewayConfig struct {
 	// GrokResponseHeaderTimeout bounds the pre-first-byte wait for xAI/Grok.
 	// A zero value uses the provider-safe default instead of the generic gateway timeout.
 	GrokResponseHeaderTimeout int `mapstructure:"grok_response_header_timeout"`
+	// GeminiStreamFirstByteTimeout: Gemini 流式上游从发出请求到收到响应体第一个字节的最长等待（秒），
+	// 超时就换下一个账号。0 表示不限（仍受 response_header_timeout 约束）。非流式请求不受影响。
+	// 默认 0（关闭）：按 11-20 的 72 小时数据，120 秒会切掉 carbon 15%、neon 18% 本来能成功的流式请求，
+	// 这两个模型在所有号上都慢，换号救不回来；要按模型分别设置后再打开。
+	GeminiStreamFirstByteTimeout int `mapstructure:"gemini_stream_first_byte_timeout"`
 	// TeamoRelayEnabled enables the in-process commit gate for authenticated groups.
 	// Disabled by default; it changes neither account policy nor protocol mode.
 	TeamoRelayEnabled bool `mapstructure:"teamo_relay_enabled"`
@@ -2597,6 +2602,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.response_header_timeout", 600) // 600秒(10分钟)等待上游响应头，LLM高负载时可能排队较久
 	viper.SetDefault("gateway.openai_response_header_timeout", 0)
 	viper.SetDefault("gateway.grok_response_header_timeout", 120)
+	viper.SetDefault("gateway.gemini_stream_first_byte_timeout", 0)
 	viper.SetDefault("gateway.teamo_relay_enabled", false)
 	viper.SetDefault("gateway.teamo_relay_group_ids", []int64{})
 	viper.SetDefault("gateway.openai_strip_schema_ref_siblings_group_ids", []int64{})
@@ -3591,6 +3597,10 @@ func (c *Config) Validate() error {
 	}
 	if c.Gateway.GrokResponseHeaderTimeout < 0 || c.Gateway.GrokResponseHeaderTimeout > 1800 {
 		return fmt.Errorf("gateway.grok_response_header_timeout must be between 0-1800 seconds")
+	}
+	if c.Gateway.GeminiStreamFirstByteTimeout != 0 &&
+		(c.Gateway.GeminiStreamFirstByteTimeout < 10 || c.Gateway.GeminiStreamFirstByteTimeout > 1800) {
+		return fmt.Errorf("gateway.gemini_stream_first_byte_timeout must be 0 or between 10-1800 seconds")
 	}
 	for _, groupID := range c.Gateway.TeamoRelayGroupIDs {
 		if groupID <= 0 {

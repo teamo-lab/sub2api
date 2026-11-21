@@ -243,6 +243,10 @@ gateway:
   # Grok text Responses first-byte timeout (seconds, 0=disabled; default 120)
   # Grok 文本 Responses 首字节超时时间（秒，0=禁用；默认 120）
   grok_response_header_timeout: 120
+  # Gemini streaming first-byte timeout (seconds): if no response body byte arrives in time,
+  # switch to the next account. 0 disables it (default). Non-streaming requests are not affected.
+  # Gemini 流式首字超时（秒）：超时换下一个账号；0 表示不限（默认）；非流式不受影响。
+  gemini_stream_first_byte_timeout: 0
   # Native OpenAI HTTP Responses first semantic output timeout (seconds, 0=disabled)
   # Includes response-header wait; does not apply to passthrough or WebSocket transports.
   # A timed-out request may already have incurred upstream usage; account failover can therefore duplicate upstream billing.

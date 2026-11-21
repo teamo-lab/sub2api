@@ -1926,6 +1926,11 @@ func TestValidateConfigErrors(t *testing.T) {
 			wantErr: "gateway.stream_data_interval_timeout",
 		},
 		{
+			name:    "gateway gemini stream first byte timeout range",
+			mutate:  func(c *Config) { c.Gateway.GeminiStreamFirstByteTimeout = 5 },
+			wantErr: "gateway.gemini_stream_first_byte_timeout",
+		},
+		{
 			name:    "gateway stream data interval negative",
 			mutate:  func(c *Config) { c.Gateway.StreamDataIntervalTimeout = -1 },
 			wantErr: "gateway.stream_data_interval_timeout must be non-negative",
@@ -2578,6 +2583,9 @@ func TestLoad_DefaultGatewayImageStreamConfig(t *testing.T) {
 	}
 	if cfg.Gateway.StreamDataIntervalTimeout != 180 {
 		t.Fatalf("stream_data_interval_timeout = %d, want 180", cfg.Gateway.StreamDataIntervalTimeout)
+	}
+	if cfg.Gateway.GeminiStreamFirstByteTimeout != 0 {
+		t.Fatalf("gemini_stream_first_byte_timeout = %d, want 0 (off by default)", cfg.Gateway.GeminiStreamFirstByteTimeout)
 	}
 	if cfg.Gateway.StreamKeepaliveInterval != 10 {
 		t.Fatalf("stream_keepalive_interval = %d, want 10", cfg.Gateway.StreamKeepaliveInterval)

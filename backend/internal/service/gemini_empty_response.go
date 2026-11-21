@@ -3,6 +3,7 @@ package service
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -305,11 +306,14 @@ func geminiSSEMetaLine(line []byte) bool {
 
 // guardGeminiEmptyResponse 在上游 200 响应写给客户端之前检查是否为空回复。
 // 是空回复时记录 ops 上游错误，并返回 UpstreamFailoverError 让 handler 换下一个账号；
+// 预读时读出错（首字超时、流空闲超时、连接中断）也换号，因为此时还没有任何字节交给客户端；
 // 否则把预读数据放回 resp.Body，调用方照常处理。
 func (s *GeminiMessagesCompatService) guardGeminiEmptyResponse(
+	ctx context.Context,
 	c *gin.Context,
 	account *Account,
 	resp *http.Response,
+	watchdog *geminiUpstreamWatchdog,
 	upstreamStream bool,
 	upstreamRequestID string,
 	model string,
@@ -321,7 +325,14 @@ func (s *GeminiMessagesCompatService) guardGeminiEmptyResponse(
 	body, det, err := peekGeminiResponseForEmpty(resp.Body, upstreamStream, geminiEmptyResponsePeekLimit)
 	resp.Body = body
 	if err != nil {
-		return nil
+		reason, ok := geminiTransportFailureReason(ctx, watchdog, GeminiStreamReadErrorReason)
+		if !ok {
+			// 客户端已断开：按原样把错误交给下游处理。
+			return nil
+		}
+		_ = resp.Body.Close()
+		resp.Body = io.NopCloser(bytes.NewReader(nil))
+		return geminiTransportFailover(c, account, reason, err.Error())
 	}
 	errorInOK := det.errorInOK()
 	if !errorInOK && !det.empty() {

@@ -386,6 +386,9 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 
 	fs := NewFailoverState(h.maxAccountSwitchesGemini, hasBoundSession)
 	installGeminiAccountExclusions(c, apiKey, fs)
+	fs.SetCapabilityMissPoolCheck(func(ctx context.Context, tried map[int64]struct{}) bool {
+		return h.gatewayService.GeminiCapabilityMissCoversPool(ctx, apiKey.GroupID, modelName, tried)
+	})
 	sellRange := installSellRateRange(c, apiKey)
 
 	// 单账号分组提前设置 SingleAccountRetry 标记，让 Service 层首次 503 就不设模型限流标记。
@@ -681,6 +684,15 @@ func (h *GatewayHandler) handleGeminiFailoverExhausted(c *gin.Context, failoverE
 	statusCode := failoverErr.StatusCode
 	responseBody := failoverErr.ResponseBody
 
+	// 没能证明所有账号都不支持的 capability_miss（前面有上游故障、换号次数用完、或池里还有没验证的账号）：
+	// 最后一个 4xx 不代表请求本身有问题，按上游故障返回。必须在透传规则之前判断，
+	// 否则匹配 Gemini 4xx 的透传规则会把它当成客户端错误原样交出去。
+	if service.IsGeminiCapabilityMissInconclusive(failoverErr) {
+		service.SetOpsUpstreamError(c, statusCode, service.ExtractUpstreamErrorMessage(responseBody), "")
+		googleError(c, http.StatusBadGateway, "Upstream request failed")
+		return
+	}
+
 	// 先检查透传规则
 	if h.errorPassthroughService != nil && len(responseBody) > 0 {
 		if rule := h.errorPassthroughService.MatchRule(service.PlatformGemini, statusCode, responseBody); rule != nil {
@@ -708,6 +720,13 @@ func (h *GatewayHandler) handleGeminiFailoverExhausted(c *gin.Context, failoverE
 	// 记录原始上游状态码，以便 ops 错误日志捕获真实的上游错误
 	upstreamMsg := service.ExtractUpstreamErrorMessage(responseBody)
 	service.SetOpsUpstreamError(c, statusCode, upstreamMsg, "")
+
+	// 所有账号都接不了这个请求（能力缺失的 4xx）：原样交回上游错误，客户端能看到真实原因，
+	// 和换号前直接透传的行为一致，而不是统一变成 502。
+	if service.IsGeminiCapabilityMissExhausted(failoverErr) {
+		c.Data(statusCode, "application/json", responseBody)
+		return
+	}
 
 	// 使用默认的错误映射
 	status, message := mapGeminiUpstreamError(statusCode)

@@ -164,6 +164,9 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 	if groupPlatform == service.PlatformGemini {
 		fs = NewFailoverState(h.maxAccountSwitchesGemini, false)
 		installGeminiAccountExclusions(c, apiKey, fs)
+		fs.SetCapabilityMissPoolCheck(func(ctx context.Context, tried map[int64]struct{}) bool {
+			return h.gatewayService.GeminiCapabilityMissCoversPool(ctx, apiKey.GroupID, reqModel, tried)
+		})
 		// 选路实验 / 能力过滤用的请求特征（只对 Gemini 分组）。
 		c.Request = c.Request.WithContext(service.WithGeminiRouteRequest(c.Request.Context(), service.ParseChatCompletionsRouteRequest(body, reqStream)))
 	}
@@ -416,6 +419,17 @@ func (h *GatewayHandler) handleCCFailoverExhausted(c *gin.Context, lastErr *serv
 	statusCode := http.StatusBadGateway
 	if lastErr != nil && lastErr.StatusCode > 0 {
 		statusCode = lastErr.StatusCode
+	}
+	if service.IsGeminiCapabilityMissInconclusive(lastErr) {
+		// 最后一个账号不支持，但前面有账号是上游故障、或换号次数用完了：按上游故障返回，
+		// 不让客户端误以为请求本身不合法。
+		statusCode = http.StatusBadGateway
+	}
+	if service.IsGeminiCapabilityMissExhausted(lastErr) {
+		msg := service.ExtractUpstreamErrorMessage(lastErr.ResponseBody)
+		service.SetOpsUpstreamError(c, statusCode, msg, "")
+		h.chatCompletionsErrorResponse(c, statusCode, "invalid_request_error", msg)
+		return
 	}
 	if lastErr != nil && service.IsOpenAISilentRefusalErrorBody(lastErr.ResponseBody) {
 		service.SetOpsUpstreamError(c, statusCode, service.OpenAISilentRefusalClientMessage(), "")
