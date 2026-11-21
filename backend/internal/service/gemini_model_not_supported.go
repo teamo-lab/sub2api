@@ -17,7 +17,8 @@ func isGeminiModelNotSupported404(status int, body []byte) bool {
 	message := string(body)
 	if gjson.ValidBytes(body) {
 		for _, path := range []string{"error.code", "error.type", "response.error.code", "response.error.type", "code"} {
-			if strings.EqualFold(gjson.GetBytes(body, path).String(), "model_not_found") {
+			switch strings.ToLower(gjson.GetBytes(body, path).String()) {
+			case "model_not_found", "model_not_supported", "unsupported_model":
 				return true
 			}
 		}
@@ -36,7 +37,7 @@ func isGeminiModelNotSupported404(status int, body []byte) bool {
 	if !strings.Contains(message, "model") {
 		return false
 	}
-	for _, phrase := range []string{"model not found", "unknown model", "does not exist", "is not supported", "not available"} {
+	for _, phrase := range []string{"model not found", "model not supported", "unknown model", "does not exist", "is not supported", "not available"} {
 		if strings.Contains(message, phrase) {
 			return true
 		}

@@ -18,6 +18,8 @@ func TestGeminiModelNotSupported404(t *testing.T) {
 	}{
 		{"rootflow", 404, `{"error":{"message":"所请求的模型暂不受支持，请更换模型后重试 (request id: test)"}}`, true},
 		{"google", 404, `{"error":{"code":404,"message":"models/gemini-4-carbon is not found for API version v1beta, or is not supported for generateContent"}}`, true},
+		{"unsupported_code", 404, `{"error":{"code":"model_not_supported"}}`, true},
+		{"unsupported_plain", 404, `model not supported`, true},
 		{"code", 404, `{"error":{"code":"model_not_found"}}`, true},
 		{"wrapped", 404, `{"response":{"error":{"message":"unknown model gemini-4-carbon"}}}`, true},
 		{"plain", 404, `Model gemini-4-carbon does not exist`, true},
