@@ -8,6 +8,8 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+const GeminiModelNotSupportedReason GatewayFailureReason = "model_not_supported"
+
 // Inspect error fields, never an echoed prompt. Only model-capability 404s
 // qualify: content refusals (400) and missing HTTP routes keep their policy.
 func isGeminiModelNotSupported404(status int, body []byte) bool {
@@ -53,10 +55,10 @@ func (s *GeminiMessagesCompatService) modelNotSupportedFailover(c *gin.Context, 
 		ProxyID: opsUpstreamProxyID(account), ProxyName: opsUpstreamProxyName(account),
 		Platform: account.Platform, AccountID: account.ID, AccountName: account.Name,
 		UpstreamStatusCode: status, UpstreamRequestID: requestID,
-		Kind: "failover", Reason: "model_not_supported",
+		Kind: "failover", Reason: string(GeminiModelNotSupportedReason),
 		Message: extractUpstreamErrorMessage(body),
 	})
 	// Capability cannot improve by retrying the same account. Do not mutate
 	// account health or pricing; the exclusion lives only in this request.
-	return &UpstreamFailoverError{StatusCode: status, ResponseBody: body}
+	return &UpstreamFailoverError{StatusCode: status, ResponseBody: body, Reason: GeminiModelNotSupportedReason}
 }

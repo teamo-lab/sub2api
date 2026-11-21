@@ -37,7 +37,7 @@ func TestGeminiAccountExclusionsTrustAndBounds(t *testing.T) {
 func TestGeminiCapabilityExclusionSurvives503Backoff(t *testing.T) {
 	fs := NewFailoverState(3, false)
 	fs.excludeForRequest(1119)
-	require.Equal(t, FailoverContinue, fs.HandleFailoverError(context.Background(), nil, 1133, service.PlatformGemini, 1, &service.UpstreamFailoverError{StatusCode: 404}))
+	require.Equal(t, FailoverContinue, fs.HandleFailoverError(context.Background(), nil, 1133, service.PlatformGemini, 1, &service.UpstreamFailoverError{StatusCode: 404, Reason: service.GeminiModelNotSupportedReason}))
 	fs.RecordProfitVeto(1127)
 	fs.LastFailoverErr = &service.UpstreamFailoverError{StatusCode: 503}
 	require.Equal(t, FailoverExhausted, fs.HandleSelectionExhausted(context.Background()))

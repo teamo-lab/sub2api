@@ -253,7 +253,7 @@ func (s *FailoverState) HandleFailoverError(
 
 	// 加入失败列表
 	s.FailedAccountIDs[accountID] = struct{}{}
-	if platform == service.PlatformGemini && failoverErr.StatusCode == http.StatusNotFound {
+	if platform == service.PlatformGemini && failoverErr.Reason == service.GeminiModelNotSupportedReason {
 		s.excludeForRequest(accountID)
 	}
 
