@@ -359,6 +359,10 @@ func (s *GatewayService) buildUpstreamRequestAnthropicAPIKeyPassthrough(
 
 	// 账号级请求头覆写（最终生效，覆盖上面所有来源的同名头）
 	account.ApplyHeaderOverrides(req.Header)
+	if gjson.GetBytes(body, "stream").Bool() {
+		deleteHeaderAllForms(req.Header, "accept-encoding")
+		setHeaderRaw(req.Header, "accept-encoding", "identity")
+	}
 
 	return req, body, nil
 }
