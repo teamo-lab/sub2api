@@ -975,6 +975,9 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 
 	if resp.StatusCode >= 400 {
 		respBody := s.readUpstreamErrorBody(resp)
+		if failover := s.modelNotSupportedFailover(c, account, resp.StatusCode, respBody, resp.Header.Get(requestIDHeader)); failover != nil {
+			return nil, failover
+		}
 		// 统一错误策略：自定义错误码 + 临时不可调度
 		if s.rateLimitService != nil {
 			policy := s.rateLimitService.CheckErrorPolicy(ctx, account, resp.StatusCode, respBody, mappedModel)
@@ -1498,6 +1501,9 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 
 	if resp.StatusCode >= 400 {
 		respBody := s.readUpstreamErrorBody(resp)
+		if failover := s.modelNotSupportedFailover(c, account, resp.StatusCode, respBody, resp.Header.Get(requestIDHeader)); failover != nil {
+			return nil, failover
+		}
 		// Best-effort fallback for OAuth tokens missing AI Studio scopes when calling countTokens.
 		// This avoids Gemini SDKs failing hard during preflight token counting.
 		// Checked before error policy so it always works regardless of custom error codes.
@@ -1704,6 +1710,9 @@ func (s *GeminiMessagesCompatService) checkErrorPolicyInLoop(
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header.Clone(),
 		Body:       io.NopCloser(bytes.NewReader(body)),
+	}
+	if isGeminiModelNotSupported404(resp.StatusCode, body) {
+		return true, rebuilt
 	}
 	policy := s.rateLimitService.CheckErrorPolicy(ctx, account, resp.StatusCode, body, mappedModel)
 	return policy != ErrorPolicyNone, rebuilt
