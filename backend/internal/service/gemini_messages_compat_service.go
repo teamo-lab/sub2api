@@ -602,6 +602,11 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 		mappedModel = account.GetMappedModel(req.Model)
 	}
 
+	// 流式响应期间不再引用下面转换 / 内联出来的请求体副本（见 ForwardNative 的说明）：图片尺寸在发请求前读好，
+	// 缺用量时的估算从 handler 持有的原始请求体重新转换。
+	clientBody := body
+	imageInputSize := s.extractImageInputSize(body)
+
 	// 有的上游收下 fileData 链接却不去拉（返回 200、模型看不到图），这类账号先下载成 base64。
 	if accountRequiresInlineImageURLs(account) && claudeBodyHasImageURL(body) {
 		inlinedBody, inlineErr := inlineClaudeImageURLs(ctx, c, body)
@@ -656,7 +661,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 			}
 
 			restGeminiReq := normalizeGeminiRequestForAIStudio(geminiReq)
-			upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, bytes.NewReader(restGeminiReq))
+			upstreamReq, err := newGeminiUpstreamRequest(ctx, http.MethodPost, fullURL, restGeminiReq)
 			if err != nil {
 				return nil, "", err
 			}
@@ -709,7 +714,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 				wrapped["request"] = inner
 				wrappedBytes, _ := json.Marshal(wrapped)
 
-				upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, bytes.NewReader(wrappedBytes))
+				upstreamReq, err := newGeminiUpstreamRequest(ctx, http.MethodPost, fullURL, wrappedBytes)
 				if err != nil {
 					return nil, "", err
 				}
@@ -731,7 +736,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 				}
 
 				restGeminiReq := normalizeGeminiRequestForAIStudio(geminiReq)
-				upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, bytes.NewReader(restGeminiReq))
+				upstreamReq, err := newGeminiUpstreamRequest(ctx, http.MethodPost, fullURL, restGeminiReq)
 				if err != nil {
 					return nil, "", err
 				}
@@ -762,7 +767,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 			}
 
 			restGeminiReq := normalizeGeminiRequestForAIStudio(geminiReq)
-			upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, bytes.NewReader(restGeminiReq))
+			upstreamReq, err := newGeminiUpstreamRequest(ctx, http.MethodPost, fullURL, restGeminiReq)
 			if err != nil {
 				return nil, "", err
 			}
@@ -1141,7 +1146,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 		usage = streamRes.usage
 		firstTokenMs = streamRes.firstTokenMs
 		if streamRes.cut {
-			usage = applyGeminiMissingUsageEstimate(account, usage, sniffer, geminiReq, "messages_stream_cut")
+			usage = applyGeminiMissingUsageEstimate(account, usage, sniffer, func() []byte { return geminiRequestForEstimateFromClaude(clientBody) }, "messages_stream_cut")
 			logGeminiStreamCut(account, "messages", usage)
 		}
 	} else {
@@ -1167,8 +1172,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 		}
 	}
 
-	// 图片生成计费
-	imageInputSize := s.extractImageInputSize(body)
+	// 图片生成计费（imageInputSize 在发请求前已读好）
 	imageSize := normalizeOpenAIImageSizeTier(imageInputSize)
 	imageCount := resolveGeminiImageCount(c, originalModel, mappedModel)
 
@@ -1211,6 +1215,11 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 	if len(body) == 0 {
 		return nil, s.writeGoogleError(c, http.StatusBadRequest, "Request body is empty")
 	}
+
+	// 流式响应期间（可能好几分钟）不能再引用下面改写出来的请求体副本：调用方（handler）为了换号
+	// 本来就一直持有原始请求体，响应之后的用量估算、图片计费都读这一份，改写出的副本发完就能回收。
+	// 改写只去掉空 parts、给 functionCall 补占位签名，不影响 token 估算和图片尺寸。
+	clientBody := body
 
 	// 过滤掉 parts 为空的消息（Gemini API 不接受空 parts）
 	if filteredBody, err := filterEmptyPartsFromGeminiRequest(body); err == nil {
@@ -1269,7 +1278,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 				return nil, "", err
 			}
 
-			upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, bytes.NewReader(body))
+			upstreamReq, err := newGeminiUpstreamRequest(ctx, http.MethodPost, fullURL, body)
 			if err != nil {
 				return nil, "", err
 			}
@@ -1317,7 +1326,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 				wrapped["request"] = inner
 				wrappedBytes, _ := json.Marshal(wrapped)
 
-				upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, bytes.NewReader(wrappedBytes))
+				upstreamReq, err := newGeminiUpstreamRequest(ctx, http.MethodPost, fullURL, wrappedBytes)
 				if err != nil {
 					return nil, "", err
 				}
@@ -1338,7 +1347,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 					return nil, "", err
 				}
 
-				upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, bytes.NewReader(body))
+				upstreamReq, err := newGeminiUpstreamRequest(ctx, http.MethodPost, fullURL, body)
 				if err != nil {
 					return nil, "", err
 				}
@@ -1364,7 +1373,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 				return nil, "", err
 			}
 
-			upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, bytes.NewReader(body))
+			upstreamReq, err := newGeminiUpstreamRequest(ctx, http.MethodPost, fullURL, body)
 			if err != nil {
 				return nil, "", err
 			}
@@ -1694,7 +1703,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 		if err != nil {
 			return nil, err
 		}
-		usage = applyGeminiMissingUsageEstimate(account, streamRes.usage, sniffer, body, "native_stream")
+		usage = applyGeminiMissingUsageEstimate(account, streamRes.usage, sniffer, func() []byte { return clientBody }, "native_stream")
 		firstTokenMs = streamRes.firstTokenMs
 		if streamRes.cut {
 			logGeminiStreamCut(account, "native", usage)
@@ -1724,7 +1733,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 	}
 
 	// 图片生成计费
-	imageInputSize := s.extractImageInputSize(body)
+	imageInputSize := s.extractImageInputSize(clientBody)
 	imageSize := normalizeOpenAIImageSizeTier(imageInputSize)
 	imageCount := resolveGeminiImageCount(c, originalModel, mappedModel)
 

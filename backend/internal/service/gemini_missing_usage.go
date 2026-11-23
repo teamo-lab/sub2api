@@ -2,9 +2,11 @@ package service
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"log/slog"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/tidwall/gjson"
 )
 
@@ -116,7 +118,7 @@ func (s *geminiUsageSniffer) observeLine(line []byte) {
 }
 
 // estimate 在整条流没有任何有效 usageMetadata、但生成了内容时返回估算用量；否则返回 nil。
-func (s *geminiUsageSniffer) estimate(reqBody []byte) *ClaudeUsage {
+func (s *geminiUsageSniffer) estimate(reqBody func() []byte) *ClaudeUsage {
 	if s == nil || s.sawUsage || !s.sawCandidate {
 		return nil
 	}
@@ -124,7 +126,11 @@ func (s *geminiUsageSniffer) estimate(reqBody []byte) *ClaudeUsage {
 	if out == 0 {
 		return nil
 	}
-	return &ClaudeUsage{InputTokens: estimateGeminiRequestTokens(reqBody), OutputTokens: out}
+	var body []byte
+	if reqBody != nil {
+		body = reqBody()
+	}
+	return &ClaudeUsage{InputTokens: estimateGeminiRequestTokens(body), OutputTokens: out}
 }
 
 // estimateGeminiRequestTokens 估算 generateContent 请求体的输入 token：在 estimateGeminiCountTokens
@@ -156,7 +162,10 @@ func geminiUsageIsEmpty(u *ClaudeUsage) bool {
 }
 
 // applyGeminiMissingUsageEstimate 只在解析出的用量为空、且旁路观察确认上游没给用量时替换成估算值。
-func applyGeminiMissingUsageEstimate(account *Account, usage *ClaudeUsage, sniffer *geminiUsageSniffer, reqBody []byte, path string) *ClaudeUsage {
+//
+// reqBody 只在真要估算时才调用：流式响应可能持续好几分钟，调用方不应为了这个很少走到的兜底一直持有
+// 一份几 MB 的改写后请求体，而是传一个从 handler 本来就持有的原始请求体重新生成的函数。
+func applyGeminiMissingUsageEstimate(account *Account, usage *ClaudeUsage, sniffer *geminiUsageSniffer, reqBody func() []byte, path string) *ClaudeUsage {
 	if !geminiUsageIsEmpty(usage) {
 		return usage
 	}
@@ -174,4 +183,36 @@ func applyGeminiMissingUsageEstimate(account *Account, usage *ClaudeUsage, sniff
 		"input_tokens", est.InputTokens,
 		"output_tokens", est.OutputTokens)
 	return est
+}
+
+// geminiRequestForEstimateFromClaude 从 Claude Messages 请求体重新转换出 generateContent 请求体，
+// 只给缺用量时的输入 token 估算用；转换失败返回 nil（估算按 0 处理）。
+func geminiRequestForEstimateFromClaude(claudeBody []byte) []byte {
+	req, err := convertClaudeMessagesToGeminiGenerateContent(claudeBody)
+	if err != nil {
+		return nil
+	}
+	return req
+}
+
+// geminiRequestForEstimateFromChat 从 Chat Completions 请求体走和 ForwardAsChatCompletions 相同的转换链，
+// 得到 generateContent 请求体，只给缺用量时的输入 token 估算用。
+func geminiRequestForEstimateFromChat(chatBody []byte) []byte {
+	var ccReq apicompat.ChatCompletionsRequest
+	if err := json.Unmarshal(chatBody, &ccReq); err != nil {
+		return nil
+	}
+	responsesReq, err := apicompat.ChatCompletionsToResponses(&ccReq)
+	if err != nil {
+		return nil
+	}
+	anthropicReq, err := apicompat.ResponsesToAnthropicRequest(responsesReq)
+	if err != nil {
+		return nil
+	}
+	claudeBody, err := json.Marshal(anthropicReq)
+	if err != nil {
+		return nil
+	}
+	return geminiRequestForEstimateFromClaude(claudeBody)
 }
