@@ -285,8 +285,8 @@ func (s *FailoverState) HandleFailoverError(
 		return FailoverContinue
 	}
 
-	// 同账号重试用尽，执行临时封禁
-	if failoverErr.RetryableOnSameAccount {
+	// 同账号重试用尽，执行临时封禁；Gemini 空回复 / 200 里带错误不重试，直接计入（账号, 模型）冷却窗口
+	if failoverErr.RetryableOnSameAccount || failoverErr.CoolsDownAccountModel() {
 		unschedCtx := ctx
 		if s.RequestedModel != "" {
 			unschedCtx = service.WithTempUnschedulableModel(ctx, s.RequestedModel)
