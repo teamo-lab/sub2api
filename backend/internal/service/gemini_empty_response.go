@@ -335,8 +335,17 @@ func (s *GeminiMessagesCompatService) guardGeminiEmptyResponse(
 		return geminiTransportFailover(c, account, reason, err.Error())
 	}
 	errorInOK := det.errorInOK()
+	var healthAccountID int64
+	if account != nil {
+		healthAccountID = account.ID
+	}
 	if !errorInOK && !det.empty() {
+		geminiReplyHealth.observe(healthAccountID, model, true)
 		return nil
+	}
+	if !errorInOK || !geminiErrorIn200IsRequestScoped(det.upstreamErrorCode) {
+		// 200 里带的请求级 4xx（参数、内容策略）是请求的问题，不算这个号的坏回复。
+		geminiReplyHealth.observe(healthAccountID, model, false)
 	}
 	_ = resp.Body.Close()
 	resp.Body = io.NopCloser(bytes.NewReader(nil))
@@ -402,7 +411,7 @@ func (s *GeminiMessagesCompatService) geminiErrorIn200Failover(
 ) error {
 	code := det.upstreamErrorCode
 	status := http.StatusBadGateway
-	if code >= 400 && code < 500 && code != http.StatusTooManyRequests && code != http.StatusRequestTimeout {
+	if geminiErrorIn200IsRequestScoped(code) {
 		status = code
 	}
 	upstreamMsg := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(det.upstreamErrorBody)))
@@ -442,4 +451,10 @@ func (s *GeminiMessagesCompatService) geminiErrorIn200Failover(
 		Scope:        GatewayFailureScopeAccount,
 		Reason:       GeminiErrorIn200Reason,
 	}
+}
+
+// geminiErrorIn200IsRequestScoped 判断 200 里带的 error.code 是不是请求本身的问题（参数、内容策略等 4xx），
+// 这类保留上游状态码给客户端，不按账号故障处理。429 / 408 是上游容量问题，按 502 换号。
+func geminiErrorIn200IsRequestScoped(code int) bool {
+	return code >= 400 && code < 500 && code != http.StatusTooManyRequests && code != http.StatusRequestTimeout
 }
