@@ -27,6 +27,15 @@ type geminiCompatHTTPUpstreamStub struct {
 
 func (s *geminiCompatHTTPUpstreamStub) Do(req *http.Request, proxyURL string, accountID int64, accountConcurrency int) (*http.Response, error) {
 	s.calls++
+	// 和真实 Transport 一样在 Do 返回前把请求体读完：调用方在 Do 返回后会放掉请求体字节
+	// （releaseGeminiUpstreamRequestBody），测试里事后再读的是这里留下的副本。
+	if req != nil && req.Body != nil {
+		sent, _ := io.ReadAll(req.Body)
+		_ = req.Body.Close()
+		captured := req.Clone(req.Context())
+		captured.Body = io.NopCloser(bytes.NewReader(sent))
+		req = captured
+	}
 	s.lastReq = req
 	if s.err != nil {
 		return nil, s.err

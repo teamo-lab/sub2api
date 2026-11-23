@@ -15,8 +15,10 @@ import (
 // 上游的那份请求体（通常是改写过的副本，编程 Agent 动辄 2–4MB）一直不能回收。HK 生产上每条在途 Gemini
 // 流约 10–15MB，满载 500–700 条流时单个槽位 10GB 以上，蓝绿切换时两个槽位叠加就被内核 OOM 杀掉。
 //
-// geminiReleasingBody 读到 EOF 或被关闭后就丢掉对字节的引用。GetBody 在请求体第一次完整发出之前仍然
-// 可用（Transport 在没写出任何东西时的重试照常工作）；发完之后再要重放就返回错误，由上层按普通上游失败换号。
+// 请求体字节由一个共享源持有，Body 和 GetBody 生成的 reader 都从它取。调用方在 httpUpstream.Do 返回之后
+// （收到响应头或者出错，Transport 已经不会再重放这个请求）调 releaseGeminiUpstreamRequestBody 放掉共享源，
+// 之后流式响应期间 Transport 手里的 Request 只剩空壳。发完请求体之后、收到响应头之前的重放
+// （HTTP/2 REFUSED_STREAM / GOAWAY、307/308 重定向）照常可用。
 
 var errGeminiUpstreamBodyReleased = errors.New("gemini upstream request body already sent and released")
 
@@ -43,7 +45,7 @@ type geminiReleasingBody struct {
 	b   []byte
 }
 
-// Read 读完最后一个字节时（请求体已经完整发出）同时丢掉共享源，之后 GetBody 不能再重放。
+// Read 读完最后一个字节就丢掉本 reader 的引用；共享源要等 releaseGeminiUpstreamRequestBody。
 func (r *geminiReleasingBody) Read(p []byte) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -55,15 +57,11 @@ func (r *geminiReleasingBody) Read(p []byte) (int, error) {
 	r.b = r.b[n:]
 	if len(r.b) == 0 {
 		r.b = nil
-		if r.src != nil {
-			r.src.release()
-		}
 	}
 	return n, nil
 }
 
-// Close 只丢掉本 reader 的引用，不动共享源：Transport 重试前会先关掉旧请求体再调 GetBody，
-// 这时请求体还没发完，必须还能重放。
+// Close 只丢掉本 reader 的引用，不动共享源：Transport 重放前会先关掉旧请求体再调 GetBody。
 func (r *geminiReleasingBody) Close() error {
 	r.mu.Lock()
 	r.b = nil
@@ -72,7 +70,7 @@ func (r *geminiReleasingBody) Close() error {
 }
 
 // newGeminiUpstreamRequest 和 http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body)) 等价
-// （ContentLength、GetBody 都有），区别是请求体发完之后不再引用 body。
+// （ContentLength、GetBody 都有）。Do 返回后调 releaseGeminiUpstreamRequestBody，流式响应期间就不再引用 body。
 func newGeminiUpstreamRequest(ctx context.Context, method, url string, body []byte) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, method, url, nil)
 	if err != nil {
@@ -95,4 +93,18 @@ func newGeminiUpstreamRequest(ctx context.Context, method, url string, body []by
 		return &geminiReleasingBody{src: src, b: b}, nil
 	}
 	return req, nil
+}
+
+// releaseGeminiUpstreamRequestBody 在 httpUpstream.Do 返回之后调用：放掉请求体字节，之后 GetBody 返回错误。
+// 不是 newGeminiUpstreamRequest 建的请求什么也不做。
+func releaseGeminiUpstreamRequestBody(req *http.Request) {
+	if req == nil {
+		return
+	}
+	if rb, ok := req.Body.(*geminiReleasingBody); ok {
+		if rb.src != nil {
+			rb.src.release()
+		}
+		_ = rb.Close()
+	}
 }
