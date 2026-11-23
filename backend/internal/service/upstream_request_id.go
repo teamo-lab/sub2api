@@ -41,6 +41,25 @@ func UpstreamRequestIDFromHeaders(account *Account, h http.Header) string {
 	return strings.TrimSpace(h.Get(name))
 }
 
+// geminiOpsUpstreamRequestID 给 Gemini 的 ops 上游错误事件（换号失败的每一跳、上游 200 空回复）取直接上游的请求标识：
+// 优先账户指定的头（extra.upstream_request_id_header），再退回本路径的默认头（通常是 x-request-id）和 x-goog-request-id。
+// 原来这些地方只读默认头，NewAPI 一类上游（请求号在 X-Oneapi-Request-Id）失败时一跳都记不到号，供应商没法查（11-23）。
+// 只用于 ops 记录和换号判定；回给客户端的 x-request-id 和 ForwardResult.RequestID 不变。
+func geminiOpsUpstreamRequestID(account *Account, h http.Header, defaultHeader string) string {
+	if len(h) == 0 {
+		return ""
+	}
+	if id := UpstreamRequestIDFromHeaders(account, h); id != "" {
+		return id
+	}
+	if defaultHeader != "" {
+		if id := strings.TrimSpace(h.Get(defaultHeader)); id != "" {
+			return id
+		}
+	}
+	return strings.TrimSpace(h.Get("x-goog-request-id"))
+}
+
 // opsUpstreamRequestID 给 ops 上游错误事件（含换号失败的每一跳）取直接上游的请求标识：
 // 优先账户指定的头；没配或拿不到时退回 x-request-id，再依次尝试 fallbackHeaders。
 func opsUpstreamRequestID(account *Account, h http.Header, fallbackHeaders ...string) string {

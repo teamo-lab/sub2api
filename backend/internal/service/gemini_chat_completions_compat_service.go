@@ -232,10 +232,7 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 			retryable := classifyGeminiUpstreamError(resp.StatusCode, respBody) != geminiErrorNoCapacity
 			if retryable && transientRetries < geminiMaxTransientRetries && attempt < geminiMaxRetries {
 				transientRetries++
-				upstreamReqID := resp.Header.Get(requestIDHeader)
-				if upstreamReqID == "" {
-					upstreamReqID = resp.Header.Get("x-goog-request-id")
-				}
+				upstreamReqID := geminiOpsUpstreamRequestID(account, resp.Header, requestIDHeader)
 				upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
 				upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 				appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
@@ -271,6 +268,8 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 	if requestID == "" {
 		requestID = resp.Header.Get("x-goog-request-id")
 	}
+	// ops 记录 / 换号判定用的上游请求号：优先账户配置的头（见 geminiOpsUpstreamRequestID）
+	opsRequestID := geminiOpsUpstreamRequestID(account, resp.Header, requestIDHeader)
 	if requestID != "" {
 		c.Header("x-request-id", requestID)
 	}
@@ -294,7 +293,7 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 		evBody := unwrapIfNeeded(account.Type == AccountTypeOAuth, respBody)
 
 		// 能力缺失 / 402 / 中转无资源：直接换号，不在同一个账号上重试。
-		if failoverErr := s.geminiImmediateFailover(c, account, resp.StatusCode, evBody, requestID); failoverErr != nil {
+		if failoverErr := s.geminiImmediateFailover(c, account, resp.StatusCode, evBody, opsRequestID); failoverErr != nil {
 			return nil, failoverErr
 		}
 
@@ -307,7 +306,7 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 				AccountID:          account.ID,
 				AccountName:        account.Name,
 				UpstreamStatusCode: resp.StatusCode,
-				UpstreamRequestID:  requestID,
+				UpstreamRequestID:  opsRequestID,
 				Kind:               "failover",
 				Message:            upstreamMsg,
 			})
@@ -319,15 +318,15 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 		}
 
 		if policy == ErrorPolicySkipped && account.IsCustomErrorCodesEnabled() {
-			return nil, s.writeGeminiCustomCodeSkippedError(c, account, resp.StatusCode, requestID, evBody, func() {
+			return nil, s.writeGeminiCustomCodeSkippedError(c, account, resp.StatusCode, opsRequestID, evBody, func() {
 				_ = s.writeChatCompletionsError(c, http.StatusInternalServerError, "api_error", geminiCustomCodeSkippedClientMessage)
 			})
 		}
-		return nil, s.writeGeminiChatCompletionsMappedError(c, account, resp.StatusCode, requestID, evBody)
+		return nil, s.writeGeminiChatCompletionsMappedError(c, account, resp.StatusCode, opsRequestID, evBody)
 	}
 
 	// 上游 200 但没有任何回答：按上游故障换号，不把空回复交给客户端计费。
-	if err := s.guardGeminiEmptyResponse(ctx, c, account, resp, watchdog, useUpstreamStream, requestID, mappedModel, "chat_completions"); err != nil {
+	if err := s.guardGeminiEmptyResponse(ctx, c, account, resp, watchdog, useUpstreamStream, opsRequestID, mappedModel, "chat_completions"); err != nil {
 		return nil, err
 	}
 
