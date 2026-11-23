@@ -573,3 +573,25 @@ func TestGeminiForwardAsChatCompletions_TextThenErrorStreamPassesThrough(t *test
 	require.NoError(t, err)
 	require.Contains(t, rec.Body.String(), "Hello")
 }
+
+// 每个经过空回复守卫的 200 都要记进进程内回复计数：有回答记好，空回复记坏。
+func TestGeminiForwardNative_RecordsReplyHealth(t *testing.T) {
+	prev := geminiReplyHealth
+	geminiReplyHealth = newGeminiReplyHealthTracker()
+	t.Cleanup(func() { geminiReplyHealth = prev })
+	account := geminiPoolModeAPIKeyAccount()
+
+	okSvc, _ := newGeminiSkippedWriteService(http.StatusOK, geminiStreamWithUsage)
+	c, _ := newGeminiEmptyTestContext("/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse")
+	_, err := okSvc.ForwardNative(context.Background(), c, account, "gemini-3.8-flash", "streamGenerateContent", true, []byte(geminiUsageTestRequest))
+	require.NoError(t, err)
+
+	emptySvc, _ := newGeminiSkippedWriteService(http.StatusOK, geminiSSE(`{"candidates":[]}`, `{"usageMetadata":{"promptTokenCount":812}}`))
+	c, _ = newGeminiEmptyTestContext("/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse")
+	_, err = emptySvc.ForwardNative(context.Background(), c, account, "gemini-3.8-flash", "streamGenerateContent", true, []byte(geminiUsageTestRequest))
+	require.Error(t, err)
+
+	usable, broken := geminiReplyHealth.counts(account.ID, account.GetMappedModel("gemini-3.8-flash"))
+	require.Equal(t, int64(1), usable)
+	require.Equal(t, int64(1), broken)
+}

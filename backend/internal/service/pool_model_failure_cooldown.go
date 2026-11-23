@@ -124,6 +124,11 @@ func (s *RateLimitService) ObservePoolModelFailure(ctx context.Context, account 
 	if modelKey == "" {
 		return false
 	}
+	// 空回复 / 200 里带错误：只有这个（账号, 模型）最近的 200 回复大多是坏的才计入冷却窗口；
+	// 大部分时间能用的号偶尔回几次空，换号已经处理，冷掉它反而把能接的号摘了。
+	if failoverErr.CoolsDownAccountModel() && !geminiReplyHealth.mostlyUnusable(account.ID, modelKey) {
+		return true
+	}
 	if s == nil || s.accountRepo == nil {
 		return true
 	}
