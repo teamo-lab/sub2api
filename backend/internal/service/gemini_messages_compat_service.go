@@ -864,10 +864,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 			_ = resp.Body.Close()
 
 			if isGeminiSignatureRelatedError(respBody) {
-				upstreamReqID := resp.Header.Get(requestIDHeader)
-				if upstreamReqID == "" {
-					upstreamReqID = resp.Header.Get("x-goog-request-id")
-				}
+				upstreamReqID := geminiOpsUpstreamRequestID(account, resp.Header, requestIDHeader)
 				upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
 				upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 				upstreamDetail := ""
@@ -957,10 +954,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 			retryable := classifyGeminiUpstreamError(resp.StatusCode, respBody) != geminiErrorNoCapacity
 			if retryable && transientRetries < geminiMaxTransientRetries && attempt < geminiMaxRetries {
 				transientRetries++
-				upstreamReqID := resp.Header.Get(requestIDHeader)
-				if upstreamReqID == "" {
-					upstreamReqID = resp.Header.Get("x-goog-request-id")
-				}
+				upstreamReqID := geminiOpsUpstreamRequestID(account, resp.Header, requestIDHeader)
 				upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
 				upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 				upstreamDetail := ""
@@ -1010,10 +1004,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 			policy := s.rateLimitService.CheckErrorPolicy(ctx, account, resp.StatusCode, respBody, mappedModel)
 			switch policy {
 			case ErrorPolicySkipped:
-				upstreamReqID := resp.Header.Get(requestIDHeader)
-				if upstreamReqID == "" {
-					upstreamReqID = resp.Header.Get("x-goog-request-id")
-				}
+				upstreamReqID := geminiOpsUpstreamRequestID(account, resp.Header, requestIDHeader)
 				if failoverErr := s.skippedErrorPolicyFailoverError(c, account, resp.StatusCode, respBody, upstreamReqID); failoverErr != nil {
 					return nil, failoverErr
 				}
@@ -1028,10 +1019,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 				if policy == ErrorPolicyMatched {
 					s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
 				}
-				upstreamReqID := resp.Header.Get(requestIDHeader)
-				if upstreamReqID == "" {
-					upstreamReqID = resp.Header.Get("x-goog-request-id")
-				}
+				upstreamReqID := geminiOpsUpstreamRequestID(account, resp.Header, requestIDHeader)
 				upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
 				upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 				upstreamDetail := ""
@@ -1061,10 +1049,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 		// ErrorPolicyNone → 原有逻辑
 		s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
 		{
-			upstreamReqID := resp.Header.Get(requestIDHeader)
-			if upstreamReqID == "" {
-				upstreamReqID = resp.Header.Get("x-goog-request-id")
-			}
+			upstreamReqID := geminiOpsUpstreamRequestID(account, resp.Header, requestIDHeader)
 			if failoverErr := s.geminiImmediateFailover(c, account, resp.StatusCode, respBody, upstreamReqID); failoverErr != nil {
 				return nil, failoverErr
 			}
@@ -1073,10 +1058,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 		if resp.StatusCode == http.StatusBadRequest {
 			msg400 := strings.ToLower(strings.TrimSpace(extractUpstreamErrorMessage(respBody)))
 			if isGoogleProjectConfigError(msg400) {
-				upstreamReqID := resp.Header.Get(requestIDHeader)
-				if upstreamReqID == "" {
-					upstreamReqID = resp.Header.Get("x-goog-request-id")
-				}
+				upstreamReqID := geminiOpsUpstreamRequestID(account, resp.Header, requestIDHeader)
 				upstreamMsg := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(respBody)))
 				upstreamDetail := ""
 				if s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
@@ -1103,10 +1085,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 			}
 		}
 		if s.shouldFailoverGeminiUpstreamError(resp.StatusCode) {
-			upstreamReqID := resp.Header.Get(requestIDHeader)
-			if upstreamReqID == "" {
-				upstreamReqID = resp.Header.Get("x-goog-request-id")
-			}
+			upstreamReqID := geminiOpsUpstreamRequestID(account, resp.Header, requestIDHeader)
 			upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
 			upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 			upstreamDetail := ""
@@ -1131,10 +1110,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 			})
 			return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody}
 		}
-		upstreamReqID := resp.Header.Get(requestIDHeader)
-		if upstreamReqID == "" {
-			upstreamReqID = resp.Header.Get("x-goog-request-id")
-		}
+		upstreamReqID := geminiOpsUpstreamRequestID(account, resp.Header, requestIDHeader)
 		return nil, s.writeGeminiMappedError(c, account, resp.StatusCode, upstreamReqID, respBody)
 	}
 
@@ -1142,12 +1118,14 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 	if requestID == "" {
 		requestID = resp.Header.Get("x-goog-request-id")
 	}
+	// ops 记录 / 换号判定用的上游请求号：优先账户配置的头（见 geminiOpsUpstreamRequestID）
+	opsRequestID := geminiOpsUpstreamRequestID(account, resp.Header, requestIDHeader)
 	if requestID != "" {
 		c.Header("x-request-id", requestID)
 	}
 
 	// 上游 200 但没有任何回答：按上游故障换号，不把空回复交给客户端计费。
-	if err := s.guardGeminiEmptyResponse(ctx, c, account, resp, watchdog, req.Stream || useUpstreamStream, requestID, mappedModel, "messages"); err != nil {
+	if err := s.guardGeminiEmptyResponse(ctx, c, account, resp, watchdog, req.Stream || useUpstreamStream, opsRequestID, mappedModel, "messages"); err != nil {
 		return nil, err
 	}
 
@@ -1500,10 +1478,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 			retryable := classifyGeminiUpstreamError(resp.StatusCode, respBody) != geminiErrorNoCapacity
 			if retryable && transientRetries < geminiMaxTransientRetries && attempt < geminiMaxRetries {
 				transientRetries++
-				upstreamReqID := resp.Header.Get(requestIDHeader)
-				if upstreamReqID == "" {
-					upstreamReqID = resp.Header.Get("x-goog-request-id")
-				}
+				upstreamReqID := geminiOpsUpstreamRequestID(account, resp.Header, requestIDHeader)
 				upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
 				upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 				upstreamDetail := ""
@@ -1563,6 +1538,8 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 	if requestID == "" {
 		requestID = resp.Header.Get("x-goog-request-id")
 	}
+	// ops 记录 / 换号判定用的上游请求号：优先账户配置的头（见 geminiOpsUpstreamRequestID）
+	opsRequestID := geminiOpsUpstreamRequestID(account, resp.Header, requestIDHeader)
 	if requestID != "" {
 		c.Header("x-request-id", requestID)
 	}
@@ -1594,16 +1571,16 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 			policy := s.rateLimitService.CheckErrorPolicy(ctx, account, resp.StatusCode, respBody, mappedModel)
 			switch policy {
 			case ErrorPolicySkipped:
-				if failoverErr := s.skippedErrorPolicyFailoverError(c, account, resp.StatusCode, respBody, requestID); failoverErr != nil {
+				if failoverErr := s.skippedErrorPolicyFailoverError(c, account, resp.StatusCode, respBody, opsRequestID); failoverErr != nil {
 					return nil, failoverErr
 				}
 				if account.IsCustomErrorCodesEnabled() {
-					return nil, s.writeGeminiCustomCodeSkippedError(c, account, resp.StatusCode, requestID, respBody, func() {
+					return nil, s.writeGeminiCustomCodeSkippedError(c, account, resp.StatusCode, opsRequestID, respBody, func() {
 						_ = s.writeGoogleError(c, http.StatusInternalServerError, geminiCustomCodeSkippedClientMessage)
 					})
 				}
 				// 池模式：客户端写出与 ErrorPolicyNone 相同（状态码/响应体保真），仅跳过账号状态标记。
-				return nil, s.writeGeminiNativeUpstreamError(c, account, resp, respBody, requestID, isOAuth)
+				return nil, s.writeGeminiNativeUpstreamError(c, account, resp, respBody, opsRequestID, isOAuth)
 			case ErrorPolicyMatched, ErrorPolicyTempUnscheduled:
 				if policy == ErrorPolicyMatched {
 					s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
@@ -1626,7 +1603,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 					AccountID:          account.ID,
 					AccountName:        account.Name,
 					UpstreamStatusCode: resp.StatusCode,
-					UpstreamRequestID:  requestID,
+					UpstreamRequestID:  opsRequestID,
 					Kind:               "failover",
 					Message:            upstreamMsg,
 					Detail:             upstreamDetail,
@@ -1637,7 +1614,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 
 		// ErrorPolicyNone → 原有逻辑
 		s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
-		if failoverErr := s.geminiImmediateFailover(c, account, resp.StatusCode, unwrapIfNeeded(isOAuth, respBody), requestID); failoverErr != nil {
+		if failoverErr := s.geminiImmediateFailover(c, account, resp.StatusCode, unwrapIfNeeded(isOAuth, respBody), opsRequestID); failoverErr != nil {
 			return nil, failoverErr
 		}
 		// 精确匹配服务端配置类 400 错误，触发 failover + 临时封禁
@@ -1662,7 +1639,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 					AccountID:          account.ID,
 					AccountName:        account.Name,
 					UpstreamStatusCode: resp.StatusCode,
-					UpstreamRequestID:  requestID,
+					UpstreamRequestID:  opsRequestID,
 					Kind:               "failover",
 					Message:            upstreamMsg,
 					Detail:             upstreamDetail,
@@ -1689,7 +1666,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 				AccountID:          account.ID,
 				AccountName:        account.Name,
 				UpstreamStatusCode: resp.StatusCode,
-				UpstreamRequestID:  requestID,
+				UpstreamRequestID:  opsRequestID,
 				Kind:               "failover",
 				Message:            upstreamMsg,
 				Detail:             upstreamDetail,
@@ -1697,12 +1674,12 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 			return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: evBody}
 		}
 
-		return nil, s.writeGeminiNativeUpstreamError(c, account, resp, respBody, requestID, isOAuth)
+		return nil, s.writeGeminiNativeUpstreamError(c, account, resp, respBody, opsRequestID, isOAuth)
 	}
 
 	// 上游 200 但没有任何回答：按上游故障换号，不把空回复交给客户端计费。
 	if action != "countTokens" {
-		if err := s.guardGeminiEmptyResponse(ctx, c, account, resp, watchdog, useUpstreamStream, requestID, mappedModel, "native_"+action); err != nil {
+		if err := s.guardGeminiEmptyResponse(ctx, c, account, resp, watchdog, useUpstreamStream, opsRequestID, mappedModel, "native_"+action); err != nil {
 			return nil, err
 		}
 	}
