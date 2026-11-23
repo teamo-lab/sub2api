@@ -147,3 +147,84 @@ func TestPoolModelFailureWithoutSharedWindowNeverBans(t *testing.T) {
 	require.Zero(t, repo.tempUnschedCalls)
 	require.Empty(t, repo.modelLimits)
 }
+
+func geminiRelayAccount() *Account {
+	// 生产上的 Gemini 中转号大多没开 pool_mode。
+	return &Account{ID: 1133, Platform: PlatformGemini, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true, Credentials: map[string]any{}}
+}
+
+func emptyResponseFailover() *UpstreamFailoverError {
+	return &UpstreamFailoverError{StatusCode: http.StatusBadGateway, Reason: GeminiEmptyResponseReason}
+}
+
+// 空 200 不在同账号重试，但聚集起来要冷却这个（账号, 模型），否则每个请求都先在这个号上白撞一跳。
+func TestEmptyResponseCoolsDownAccountModelAfterThreshold(t *testing.T) {
+	svc, repo := newPoolModelFailureFixture(geminiRelayAccount())
+	ctx := WithTempUnschedulableModel(context.Background(), "gemini-4-carbon")
+
+	for i := 1; i < poolModelFailureThreshold; i++ {
+		svc.TempUnscheduleRetryableError(ctx, 1133, emptyResponseFailover())
+	}
+	require.Empty(t, repo.modelLimits, "below the threshold nothing cools down")
+
+	before := time.Now()
+	svc.TempUnscheduleRetryableError(ctx, 1133, emptyResponseFailover())
+	require.Zero(t, repo.tempUnschedCalls, "empty replies must never ban the whole account")
+	require.Len(t, repo.modelLimits, 1)
+	require.WithinDuration(t, before.Add(poolModelFailureCooldown), repo.modelLimits["gemini-4-carbon"], 2*time.Second)
+}
+
+func TestErrorIn200CoolsDownOnlyForGatewayFailures(t *testing.T) {
+	t.Run("排队超时/限流（按 502 换号）计入冷却", func(t *testing.T) {
+		svc, repo := newPoolModelFailureFixture(geminiRelayAccount())
+		ctx := WithTempUnschedulableModel(context.Background(), "gemini-4-argon")
+		for i := 0; i < poolModelFailureThreshold; i++ {
+			svc.TempUnscheduleRetryableError(ctx, 1133, &UpstreamFailoverError{StatusCode: http.StatusBadGateway, Reason: GeminiErrorIn200Reason})
+		}
+		require.Contains(t, repo.modelLimits, "gemini-4-argon")
+		require.Zero(t, repo.tempUnschedCalls)
+	})
+
+	t.Run("请求级 4xx（参数、内容策略）不算账号的问题", func(t *testing.T) {
+		svc, repo := newPoolModelFailureFixture(geminiRelayAccount())
+		ctx := WithTempUnschedulableModel(context.Background(), "gemini-4-argon")
+		for i := 0; i < poolModelFailureThreshold*2; i++ {
+			svc.TempUnscheduleRetryableError(ctx, 1133, &UpstreamFailoverError{StatusCode: http.StatusBadRequest, Reason: GeminiErrorIn200Reason})
+		}
+		require.Zero(t, repo.getByIDCalls)
+		require.Empty(t, repo.modelLimits)
+		require.Zero(t, repo.tempUnschedCalls)
+	})
+}
+
+func TestNonRetryableFailuresOutsideEmptyPolicyStayUntouched(t *testing.T) {
+	cases := map[string]*UpstreamFailoverError{
+		"普通 5xx 换号":       {StatusCode: http.StatusBadGateway},
+		"请求级瞬时故障的空回复":     {StatusCode: http.StatusBadGateway, Reason: GeminiEmptyResponseReason, RequestScopedTransient: true},
+		"capability_miss": {StatusCode: http.StatusNotFound, Reason: GeminiCapabilityMissReason},
+	}
+	for name, failoverErr := range cases {
+		t.Run(name, func(t *testing.T) {
+			svc, repo := newPoolModelFailureFixture(geminiRelayAccount())
+			ctx := WithTempUnschedulableModel(context.Background(), "gemini-4-carbon")
+			for i := 0; i < poolModelFailureThreshold*2; i++ {
+				svc.TempUnscheduleRetryableError(ctx, 1133, failoverErr)
+			}
+			require.Zero(t, repo.getByIDCalls)
+			require.Empty(t, repo.modelLimits)
+			require.Zero(t, repo.tempUnschedCalls)
+		})
+	}
+}
+
+// 非 Gemini 账号不受影响（空回复原因只由 Gemini 路径产生，这里防御性地确认）。
+func TestEmptyResponseCooldownIgnoresNonGeminiAccounts(t *testing.T) {
+	account := &Account{ID: 9, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Credentials: map[string]any{}}
+	svc, repo := newPoolModelFailureFixture(account)
+	ctx := WithTempUnschedulableModel(context.Background(), "gpt-5")
+	for i := 0; i < poolModelFailureThreshold*2; i++ {
+		svc.TempUnscheduleRetryableError(ctx, 9, emptyResponseFailover())
+	}
+	require.Empty(t, repo.modelLimits)
+	require.Zero(t, repo.tempUnschedCalls)
+}
