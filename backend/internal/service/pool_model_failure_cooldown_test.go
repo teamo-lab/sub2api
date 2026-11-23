@@ -153,12 +153,27 @@ func geminiRelayAccount() *Account {
 	return &Account{ID: 1133, Platform: PlatformGemini, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true, Credentials: map[string]any{}}
 }
 
+// withReplyHealth 换一个干净的进程内回复计数器，并按给定次数预置有回答 / 坏回复。
+func withReplyHealth(t *testing.T, accountID int64, model string, usable, broken int) {
+	t.Helper()
+	prev := geminiReplyHealth
+	geminiReplyHealth = newGeminiReplyHealthTracker()
+	t.Cleanup(func() { geminiReplyHealth = prev })
+	for i := 0; i < usable; i++ {
+		geminiReplyHealth.observe(accountID, model, true)
+	}
+	for i := 0; i < broken; i++ {
+		geminiReplyHealth.observe(accountID, model, false)
+	}
+}
+
 func emptyResponseFailover() *UpstreamFailoverError {
 	return &UpstreamFailoverError{StatusCode: http.StatusBadGateway, Reason: GeminiEmptyResponseReason}
 }
 
 // 空 200 不在同账号重试，但聚集起来要冷却这个（账号, 模型），否则每个请求都先在这个号上白撞一跳。
 func TestEmptyResponseCoolsDownAccountModelAfterThreshold(t *testing.T) {
+	withReplyHealth(t, 1133, "gemini-4-carbon", 1, 9)
 	svc, repo := newPoolModelFailureFixture(geminiRelayAccount())
 	ctx := WithTempUnschedulableModel(context.Background(), "gemini-4-carbon")
 
@@ -176,6 +191,7 @@ func TestEmptyResponseCoolsDownAccountModelAfterThreshold(t *testing.T) {
 
 func TestErrorIn200CoolsDownOnlyForGatewayFailures(t *testing.T) {
 	t.Run("排队超时/限流（按 502 换号）计入冷却", func(t *testing.T) {
+		withReplyHealth(t, 1133, "gemini-4-argon", 0, 6)
 		svc, repo := newPoolModelFailureFixture(geminiRelayAccount())
 		ctx := WithTempUnschedulableModel(context.Background(), "gemini-4-argon")
 		for i := 0; i < poolModelFailureThreshold; i++ {
@@ -186,6 +202,7 @@ func TestErrorIn200CoolsDownOnlyForGatewayFailures(t *testing.T) {
 	})
 
 	t.Run("请求级 4xx（参数、内容策略）不算账号的问题", func(t *testing.T) {
+		withReplyHealth(t, 1133, "gemini-4-argon", 0, 6)
 		svc, repo := newPoolModelFailureFixture(geminiRelayAccount())
 		ctx := WithTempUnschedulableModel(context.Background(), "gemini-4-argon")
 		for i := 0; i < poolModelFailureThreshold*2; i++ {
@@ -205,6 +222,7 @@ func TestNonRetryableFailuresOutsideEmptyPolicyStayUntouched(t *testing.T) {
 	}
 	for name, failoverErr := range cases {
 		t.Run(name, func(t *testing.T) {
+			withReplyHealth(t, 1133, "gemini-4-carbon", 0, 10)
 			svc, repo := newPoolModelFailureFixture(geminiRelayAccount())
 			ctx := WithTempUnschedulableModel(context.Background(), "gemini-4-carbon")
 			for i := 0; i < poolModelFailureThreshold*2; i++ {
@@ -219,6 +237,7 @@ func TestNonRetryableFailuresOutsideEmptyPolicyStayUntouched(t *testing.T) {
 
 // 非 Gemini 账号不受影响（空回复原因只由 Gemini 路径产生，这里防御性地确认）。
 func TestEmptyResponseCooldownIgnoresNonGeminiAccounts(t *testing.T) {
+	withReplyHealth(t, 9, "gpt-5", 0, 10)
 	account := &Account{ID: 9, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Credentials: map[string]any{}}
 	svc, repo := newPoolModelFailureFixture(account)
 	ctx := WithTempUnschedulableModel(context.Background(), "gpt-5")
@@ -227,4 +246,49 @@ func TestEmptyResponseCooldownIgnoresNonGeminiAccounts(t *testing.T) {
 	}
 	require.Empty(t, repo.modelLimits)
 	require.Zero(t, repo.tempUnschedCalls)
+}
+
+// 11-23 回滚的原因：大部分时间能用的号（1132 的 3.8 成功率约 89%）偶尔一分钟回 5 次空，不能冷却。
+func TestEmptyResponseDoesNotCoolMostlyHealthyAccount(t *testing.T) {
+	withReplyHealth(t, 1132, "gemini-3.8-flash", 40, 5)
+	account := geminiRelayAccount()
+	account.ID = 1132
+	svc, repo := newPoolModelFailureFixture(account)
+	ctx := WithTempUnschedulableModel(context.Background(), "gemini-3.8-flash")
+	for i := 0; i < poolModelFailureThreshold*3; i++ {
+		svc.TempUnscheduleRetryableError(ctx, 1132, emptyResponseFailover())
+	}
+	require.Empty(t, repo.modelLimits, "a mostly healthy account must keep serving")
+	require.Zero(t, repo.tempUnschedCalls)
+}
+
+// 池模式号的可重试错误（#187 的原有策略）不受回复计数影响。
+func TestReplyHealthGateLeavesRetryablePoolFailuresAlone(t *testing.T) {
+	withReplyHealth(t, 1133, "gemini-3.8-flash", 100, 0)
+	svc, repo := newPoolModelFailureFixture(geminiPoolAccount(nil))
+	ctx := WithTempUnschedulableModel(context.Background(), "gemini-3.8-flash")
+	for i := 0; i < poolModelFailureThreshold; i++ {
+		svc.TempUnscheduleRetryableError(ctx, 1133, pool502())
+	}
+	require.Contains(t, repo.modelLimits, "gemini-3.8-flash")
+}
+
+func TestGeminiReplyHealthWindow(t *testing.T) {
+	tr := newGeminiReplyHealthTracker()
+	now := time.Unix(1_800_000_000, 0)
+	tr.now = func() time.Time { return now }
+
+	require.False(t, tr.mostlyUnusable(1, "m"), "no samples, no cooldown")
+	tr.observe(1, "m", false)
+	tr.observe(1, "m", false)
+	tr.observe(1, "m", true)
+	require.True(t, tr.mostlyUnusable(1, "m"))
+	require.False(t, tr.mostlyUnusable(1, "other"), "models are counted separately")
+	require.False(t, tr.mostlyUnusable(2, "m"), "accounts are counted separately")
+
+	now = now.Add(geminiReplyHealthBucket * geminiReplyHealthBuckets)
+	usable, broken := tr.counts(1, "m")
+	require.Zero(t, usable+broken, "old buckets fall out of the window")
+	tr.observe(1, "m", true)
+	require.False(t, tr.mostlyUnusable(1, "m"))
 }
