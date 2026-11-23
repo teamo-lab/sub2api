@@ -809,6 +809,8 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 		upstreamReq = upstreamReq.WithContext(attemptCtx)
 
 		resp, err = s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+		// 收到响应头（或出错）之后 Transport 不会再重放这个请求，放掉请求体，流式期间不再占内存。
+		releaseGeminiUpstreamRequestBody(upstreamReq)
 		if err != nil {
 			reason, ok := geminiTransportFailureReason(ctx, watchdog, GeminiUpstreamRequestErrorReason)
 			if !ok {
@@ -1414,6 +1416,8 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 		upstreamReq = upstreamReq.WithContext(attemptCtx)
 
 		resp, err = s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+		// 收到响应头（或出错）之后 Transport 不会再重放这个请求，放掉请求体，流式期间不再占内存。
+		releaseGeminiUpstreamRequestBody(upstreamReq)
 		if err != nil {
 			reason, ok := geminiTransportFailureReason(ctx, watchdog, GeminiUpstreamRequestErrorReason)
 			if !ok {
