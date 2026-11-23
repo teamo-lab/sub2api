@@ -74,50 +74,13 @@ func usesPoolModelFailureCooldown(account *Account) bool {
 	return account != nil && account.Platform == PlatformGemini && account.IsPoolMode()
 }
 
-// CoolsDownAccountModel reports whether a failure that is not retried on the same
-// account should still count toward the (account, model) cooldown window.
-//
-// Gemini "HTTP 200 but unusable" responses (empty reply, or an error object such as
-// a RootFlow queue-timeout RESOURCE_EXHAUSTED inside a 200) already move the request
-// to the next account, but without this the account kept being picked for that
-// model: in production a relay returned 250 empty 200s an hour on one model and
-// every one of them burned one of the request's three account switches.
-//
-// Only gateway-side failures count. An error-in-200 that carries a request-level
-// 4xx (bad argument, content policy) is about the request, not the account.
-func (e *UpstreamFailoverError) CoolsDownAccountModel() bool {
-	if e == nil || e.RequestScopedTransient {
-		return false
-	}
-	switch e.Reason {
-	case GeminiEmptyResponseReason:
-		return true
-	case GeminiErrorIn200Reason:
-		return e.StatusCode == http.StatusBadGateway
-	default:
-		return false
-	}
-}
-
-// usesModelFailureCooldownFor widens the per-model window to every Gemini API-key
-// account for the failures in CoolsDownAccountModel. Those failures are never
-// retried on the same account, so the legacy one-strike account ban never applied
-// to them; the clustered per-model cooldown is the only cooldown they get.
-func usesModelFailureCooldownFor(account *Account, failoverErr *UpstreamFailoverError) bool {
-	if usesPoolModelFailureCooldown(account) {
-		return true
-	}
-	return account != nil && account.Platform == PlatformGemini && account.IsAPIKeyOrBedrock() &&
-		failoverErr.CoolsDownAccountModel()
-}
-
 // ObservePoolModelFailure records one exhausted-retry failure of a Gemini pool
 // account and cools down the (account, model) pair once the rolling window
 // reaches the threshold. It returns true when the failure belongs to this policy,
 // in which case the caller must not apply an account-wide ban, whether or not a
 // cooldown was written.
 func (s *RateLimitService) ObservePoolModelFailure(ctx context.Context, account *Account, requestedModel string, failoverErr *UpstreamFailoverError) bool {
-	if failoverErr == nil || !usesModelFailureCooldownFor(account, failoverErr) {
+	if !usesPoolModelFailureCooldown(account) || failoverErr == nil {
 		return false
 	}
 	modelKey := strings.TrimSpace(account.GetMappedModel(strings.TrimSpace(requestedModel)))

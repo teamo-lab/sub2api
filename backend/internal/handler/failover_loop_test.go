@@ -1063,34 +1063,3 @@ func TestHandleFailoverErrorPassesRequestedModelToTempUnscheduler(t *testing.T) 
 
 	require.Equal(t, []string{"gemini-3.8-flash", ""}, mock.models)
 }
-
-// Gemini 空 200 / 200 里带错误：不在同账号重试，直接换号，同时交给冷却窗口计数。
-func TestHandleFailoverErrorGeminiEmptyResponseFeedsCooldown(t *testing.T) {
-	for _, err := range []*service.UpstreamFailoverError{
-		{StatusCode: http.StatusBadGateway, Reason: service.GeminiEmptyResponseReason},
-		{StatusCode: http.StatusBadGateway, Reason: service.GeminiErrorIn200Reason},
-	} {
-		t.Run(string(err.Reason), func(t *testing.T) {
-			mock := &mockTempUnscheduler{}
-			fs := NewFailoverState(3, false)
-			fs.RequestedModel = "gemini-4-carbon"
-
-			action := fs.HandleFailoverError(context.Background(), mock, 1133, service.PlatformGemini, maxSameAccountRetries, err)
-
-			require.Equal(t, FailoverContinue, action)
-			require.Equal(t, 1, fs.SwitchCount, "switches to the next account right away")
-			require.Zero(t, fs.SameAccountRetryCount[1133], "no same-account retry")
-			require.Contains(t, fs.FailedAccountIDs, int64(1133))
-			require.Len(t, mock.calls, 1)
-			require.Equal(t, int64(1133), mock.calls[0].accountID)
-		})
-	}
-
-	t.Run("200 里带请求级 4xx 不计入冷却", func(t *testing.T) {
-		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, false)
-		err := &service.UpstreamFailoverError{StatusCode: http.StatusBadRequest, Reason: service.GeminiErrorIn200Reason}
-		fs.HandleFailoverError(context.Background(), mock, 1133, service.PlatformGemini, maxSameAccountRetries, err)
-		require.Empty(t, mock.calls)
-	})
-}
