@@ -123,6 +123,9 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 	)
 
 	imageURLFallbackPending := claudeBodyHasImageURL(claudeBody)
+	// 流式响应期间不再引用 claudeBody / geminiReq（见 ForwardNative 的说明）：图片尺寸先读好，
+	// 缺用量时的估算从 handler 持有的原始 Chat Completions 请求体重新转换。
+	imageInputSize := s.extractImageInputSize(claudeBody)
 
 	var resp *http.Response
 	var watchdog *geminiUpstreamWatchdog
@@ -147,6 +150,8 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 		upstreamReq = upstreamReq.WithContext(attemptCtx)
 
 		resp, err = s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+		// 收到响应头（或出错）之后 Transport 不会再重放这个请求，放掉请求体，流式期间不再占内存。
+		releaseGeminiUpstreamRequestBody(upstreamReq)
 		if err != nil {
 			reason, ok := geminiTransportFailureReason(ctx, watchdog, GeminiUpstreamRequestErrorReason)
 			if !ok {
@@ -339,7 +344,7 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 		if err != nil {
 			return nil, err
 		}
-		usage = applyGeminiMissingUsageEstimate(account, streamRes.usage, sniffer, geminiReq, "chat_stream")
+		usage = applyGeminiMissingUsageEstimate(account, streamRes.usage, sniffer, func() []byte { return geminiRequestForEstimateFromChat(originalChatBody) }, "chat_stream")
 		firstTokenMs = streamRes.firstTokenMs
 		if streamRes.cut {
 			logGeminiStreamCut(account, "chat", usage)
@@ -369,7 +374,6 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 	}
 
 	imageCount := 0
-	imageInputSize := s.extractImageInputSize(claudeBody)
 	imageSize := normalizeOpenAIImageSizeTier(imageInputSize)
 	if isImageGenerationModel(originalModel) {
 		imageCount = 1
@@ -424,7 +428,7 @@ func (s *GeminiMessagesCompatService) buildGeminiChatCompletionsUpstreamRequestF
 			}
 
 			restGeminiReq := normalizeGeminiRequestForAIStudio(geminiReq)
-			upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, bytes.NewReader(restGeminiReq))
+			upstreamReq, err := newGeminiUpstreamRequest(ctx, http.MethodPost, fullURL, restGeminiReq)
 			if err != nil {
 				return nil, "", err
 			}
@@ -470,7 +474,7 @@ func (s *GeminiMessagesCompatService) buildGeminiChatCompletionsUpstreamRequestF
 					"request": inner,
 				})
 
-				upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, bytes.NewReader(wrappedBytes))
+				upstreamReq, err := newGeminiUpstreamRequest(ctx, http.MethodPost, fullURL, wrappedBytes)
 				if err != nil {
 					return nil, "", err
 				}
@@ -492,7 +496,7 @@ func (s *GeminiMessagesCompatService) buildGeminiChatCompletionsUpstreamRequestF
 			}
 
 			restGeminiReq := normalizeGeminiRequestForAIStudio(geminiReq)
-			upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, bytes.NewReader(restGeminiReq))
+			upstreamReq, err := newGeminiUpstreamRequest(ctx, http.MethodPost, fullURL, restGeminiReq)
 			if err != nil {
 				return nil, "", err
 			}
@@ -521,7 +525,7 @@ func (s *GeminiMessagesCompatService) buildGeminiChatCompletionsUpstreamRequestF
 			}
 
 			restGeminiReq := normalizeGeminiRequestForAIStudio(geminiReq)
-			upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, bytes.NewReader(restGeminiReq))
+			upstreamReq, err := newGeminiUpstreamRequest(ctx, http.MethodPost, fullURL, restGeminiReq)
 			if err != nil {
 				return nil, "", err
 			}

@@ -44,7 +44,7 @@ func sniff(t *testing.T, stream string, chunk int) *geminiUsageSniffer {
 func TestGeminiUsageSniffer_EstimatesWhenStreamHasNoUsage(t *testing.T) {
 	for _, chunk := range []int{1, 7, 4096} { // 行被拆成多次 Read 时也要能拼回来
 		s := sniff(t, geminiStreamWithoutUsage, chunk)
-		est := s.estimate([]byte(geminiUsageTestRequest))
+		est := s.estimate(func() []byte { return []byte(geminiUsageTestRequest) })
 		require.NotNil(t, est)
 		require.Equal(t, estimateTokensForText("Hello world, this is a test"), est.OutputTokens)
 		require.Equal(t, estimateGeminiRequestTokens([]byte(geminiUsageTestRequest)), est.InputTokens)
@@ -54,27 +54,27 @@ func TestGeminiUsageSniffer_EstimatesWhenStreamHasNoUsage(t *testing.T) {
 
 func TestGeminiUsageSniffer_NoEstimateWhenUpstreamReportsUsage(t *testing.T) {
 	s := sniff(t, geminiStreamWithUsage, 5)
-	require.Nil(t, s.estimate([]byte(geminiUsageTestRequest)))
+	require.Nil(t, s.estimate(func() []byte { return []byte(geminiUsageTestRequest) }))
 }
 
 func TestGeminiUsageSniffer_ZeroUsageMetadataCountsAsMissing(t *testing.T) {
 	stream := "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hi there\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":0,\"candidatesTokenCount\":0}}\n\n"
 	s := sniff(t, stream, 64)
-	require.NotNil(t, s.estimate([]byte(geminiUsageTestRequest)))
+	require.NotNil(t, s.estimate(func() []byte { return []byte(geminiUsageTestRequest) }))
 }
 
 func TestGeminiUsageSniffer_CumulativeTextNotDoubleCounted(t *testing.T) {
 	stream := "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"abcd efgh\"}]}}]}\n\n" +
 		"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"abcd efgh ijkl mnop\"}]}}]}\n\n"
 	s := sniff(t, stream, 64)
-	est := s.estimate([]byte(geminiUsageTestRequest))
+	est := s.estimate(func() []byte { return []byte(geminiUsageTestRequest) })
 	require.NotNil(t, est)
 	require.Equal(t, estimateTokensForText("abcd efgh ijkl mnop"), est.OutputTokens)
 }
 
 func TestGeminiUsageSniffer_NoCandidatesNoEstimate(t *testing.T) {
 	s := sniff(t, "data: {\"error\":{\"message\":\"x\"}}\n\n", 64)
-	require.Nil(t, s.estimate([]byte(geminiUsageTestRequest)))
+	require.Nil(t, s.estimate(func() []byte { return []byte(geminiUsageTestRequest) }))
 }
 
 func TestEstimateGeminiRequestTokens_CountsToolTraffic(t *testing.T) {
