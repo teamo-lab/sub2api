@@ -59,6 +59,17 @@ var geminiCapabilityMissPatterns = []string{
 	"must include at least one parts field",
 }
 
+// AccountContentRejectFailoverExtraKey：accounts.extra 里为 true 的号，上游回「内容被本中转的策略拦截」
+// 这类 400 时按 capability_miss 换号。只给自己另加了一层内容过滤、而同组其它号照常放行的中转打开
+// （例如 hoyorouter：同人 / 角色扮演请求被它拦，其它 Gemini 号能接）。默认关，其它号的内容拦截照旧透传。
+const AccountContentRejectFailoverExtraKey = "content_reject_failover"
+
+// geminiContentRejectPatterns 是中转自己内容过滤的拒绝文案（小写匹配），只在号打开
+// content_reject_failover 时生效。
+var geminiContentRejectPatterns = []string{
+	"rejected by upstream policy",
+}
+
 // geminiNoCapacityPatterns 是中转「自己没有可用资源」的错误信息（小写匹配）。
 var geminiNoCapacityPatterns = []string{
 	"no available gemini accounts",
@@ -111,10 +122,25 @@ func classifyGeminiUpstreamError(statusCode int, body []byte) geminiErrorClass {
 	return geminiErrorDefault
 }
 
+// classifyGeminiAccountUpstreamError 在 classifyGeminiUpstreamError 之上加按号开关的规则：
+// 打开 content_reject_failover 的号，400 内容拦截按 capability_miss 换号（不冷却、不在同号重试）。
+func classifyGeminiAccountUpstreamError(account *Account, statusCode int, body []byte) geminiErrorClass {
+	class := classifyGeminiUpstreamError(statusCode, body)
+	if class == geminiErrorDefault && statusCode == http.StatusBadRequest && account.geminiContentRejectFailover() &&
+		containsAny(strings.ToLower(string(body)), geminiContentRejectPatterns...) {
+		return geminiErrorCapabilityMiss
+	}
+	return class
+}
+
+func (a *Account) geminiContentRejectFailover() bool {
+	return a != nil && a.getExtraBool(AccountContentRejectFailoverExtraKey)
+}
+
 // geminiImmediateFailover 对需要立即换号的上游错误记 ops 事件并返回 UpstreamFailoverError；
 // 其它错误返回 nil，由调用方按原有逻辑处理。
 func (s *GeminiMessagesCompatService) geminiImmediateFailover(c *gin.Context, account *Account, statusCode int, respBody []byte, upstreamRequestID string) *UpstreamFailoverError {
-	class := classifyGeminiUpstreamError(statusCode, respBody)
+	class := classifyGeminiAccountUpstreamError(account, statusCode, respBody)
 	if class == geminiErrorDefault {
 		return nil
 	}
