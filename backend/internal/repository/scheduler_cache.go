@@ -1024,6 +1024,9 @@ func filterSchedulerExtra(extra map[string]any) map[string]any {
 		"model_rate_limits",
 		// 选路能力过滤（route_ab_gemini.go）在负载层 / 粘性层读这个键，裁掉会让声明失效。
 		service.AccountRouteMissingCapsExtraKey,
+		// 选号阶段按请求体上限跳过账号（openAIAccountRejectsRequestBodySize）读的是本投影，
+		// 裁掉它，上限在调度器路径上不生效，大请求体会先发到上游等它拒绝再换号。
+		service.AccountExtraMaxRequestBodyBytes,
 		service.UpstreamBillingProbeExtraKey,
 		service.GrokMediaEligibleExtraKey,
 		"grok_billing_snapshot",
