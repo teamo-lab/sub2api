@@ -82,6 +82,36 @@ func (r schedulerGroupAwareOpenAIAccountRepo) ListSchedulableUngroupedByPlatform
 	return result, nil
 }
 
+// 调度快照按配置池建（上游 39bac35a3）：冷却中的号也在快照里，读快照时再按 IsSchedulable 过滤。
+func (r schedulerTestOpenAIAccountRepo) ListModelAvailabilityCandidates(_ context.Context, _ *int64, platforms []string, _ bool) ([]Account, error) {
+	var result []Account
+	for _, acc := range r.accounts {
+		for _, platform := range platforms {
+			if acc.Platform == platform {
+				result = append(result, acc)
+				break
+			}
+		}
+	}
+	return result, nil
+}
+
+func (r schedulerGroupAwareOpenAIAccountRepo) ListModelAvailabilityCandidates(_ context.Context, groupID *int64, platforms []string, _ bool) ([]Account, error) {
+	var result []Account
+	for _, acc := range r.accounts {
+		if !openAIStickyAccountMatchesGroup(&acc, groupID) {
+			continue
+		}
+		for _, platform := range platforms {
+			if acc.Platform == platform {
+				result = append(result, acc)
+				break
+			}
+		}
+	}
+	return result, nil
+}
+
 type schedulerTestConcurrencyCache struct {
 	ConcurrencyCache
 	loadBatchErr    error

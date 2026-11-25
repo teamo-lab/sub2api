@@ -210,14 +210,14 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		streamInterval = resolveGrokStreamIdleTimeout(cfgSec)
 	}
 	// 仅监控上游数据间隔超时，不被下游写入阻塞影响
-	var intervalTicker *time.Ticker
+	var intervalTimer *time.Timer
 	if streamInterval > 0 {
-		intervalTicker = time.NewTicker(streamInterval)
-		defer intervalTicker.Stop()
+		intervalTimer = time.NewTimer(streamInterval)
+		defer intervalTimer.Stop()
 	}
 	var intervalCh <-chan time.Time
-	if intervalTicker != nil {
-		intervalCh = intervalTicker.C
+	if intervalTimer != nil {
+		intervalCh = intervalTimer.C
 	}
 
 	keepaliveInterval := time.Duration(0)
@@ -965,6 +965,12 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if streamEarlyErr != nil {
 				return resultWithUsage(), streamEarlyErr
 			}
+			// Terminal 事件完整写出后直接结束，不等上游 EOF（见下方异步循环同款说明）。
+			// Codex bare error 序列（error 后可能跟 response.failed 或翻盘的 completed）
+			// 必须继续读取，不适用提前结束。
+			if sawTerminalEvent && !eventInProgress && !(codexFailureTerminal && sawBareError) {
+				return finalizeStream()
+			}
 		}
 		if result, err, done := handleScanErr(documentScanner.Err()); done {
 			return result, err
@@ -1044,6 +1050,15 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if streamEarlyErr != nil {
 				return resultWithUsage(), streamEarlyErr
 			}
+			// Terminal 事件（response.completed 等）已完整写出后不再等上游 EOF：
+			// 上游在 keep-alive/HTTP2 复用连接上可能拖延关闭连接，空等期间只能
+			// 靠 keepalive 维持，白白拉长尾延迟。usage 已在 terminal 事件中解析。
+			// Codex bare error 序列（error 后可能跟 response.failed 或翻盘的 completed）
+			// 必须继续读取，不适用提前结束。
+			if sawTerminalEvent && !eventInProgress && !(codexFailureTerminal && sawBareError) {
+				_ = resp.Body.Close()
+				return finalizeStream()
+			}
 
 		case <-intervalCh:
 			// A parsed terminal already owns outcome and usage. Idle drain must
@@ -1055,7 +1070,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				return resultWithUsage(), fmt.Errorf("upstream response failed: %s", failedMessage)
 			}
 			lastRead := time.Unix(0, atomic.LoadInt64(&lastReadAt))
-			if time.Since(lastRead) < streamInterval {
+			if remaining := streamInterval - time.Since(lastRead); remaining > 0 {
+				// Re-arm for the actual last-read deadline.
+				intervalTimer.Reset(remaining)
 				continue
 			}
 			if codexFailureTerminal && sawBareError && !sawResponseFailed {
@@ -1069,6 +1086,14 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			// 处理流超时，可能标记账户为临时不可调度或错误状态
 			if s.rateLimitService != nil {
 				s.rateLimitService.HandleStreamTimeout(ctx, account, originalModel)
+			}
+			if account != nil && account.Platform == PlatformOpenAI &&
+				!openAIStreamClientOutputStarted(c, clientOutputStarted) && !eventShouldFlush {
+				_ = resp.Body.Close()
+				return resultWithUsage(), s.newOpenAIStreamFailoverErrorWithModel(
+					c, account, false, upstreamRequestID, nil,
+					"OpenAI upstream stream idle timeout before model output", mappedModel, resp.Header,
+				)
 			}
 			// Grok: short cool + account failover when no client-visible bytes
 			// were committed yet (pre-commit). After output started we keep the

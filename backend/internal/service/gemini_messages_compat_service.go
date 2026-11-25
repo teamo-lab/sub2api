@@ -3236,9 +3236,10 @@ func extractGeminiUsage(data []byte) *ClaudeUsage {
 	}
 
 	// 注意：Gemini 的 promptTokenCount 包含 cachedContentTokenCount，
-	// 但 Claude 的 input_tokens 不包含 cache_read_input_tokens，需要减去
+	// 但 Claude 的 input_tokens 不包含 cache_read_input_tokens，需要减去。
+	// prompt 被拦截时上游可能只报 cachedContentTokenCount，差值下限为 0。
 	return &ClaudeUsage{
-		InputTokens:          prompt - cached,
+		InputTokens:          max(prompt-cached, 0),
 		OutputTokens:         cand + thoughts,
 		CacheReadInputTokens: cached,
 		ImageOutputTokens:    imageTokens,
@@ -3617,6 +3618,7 @@ func convertClaudeMessagesToGeminiContents(messages any, toolUseIDToName map[str
 		case []any:
 			// 如果只有一个 block，不过滤空白（让上游 API 报错）
 			singleBlock := len(content) == 1
+			var toolImageParts []any
 
 			for _, block := range content {
 				bm, ok := block.(map[string]any)
@@ -3657,14 +3659,20 @@ func convertClaudeMessagesToGeminiContents(messages any, toolUseIDToName map[str
 					if name == "" {
 						name = "tool"
 					}
+					text := extractClaudeContentText(bm["content"])
+					images := extractClaudeToolResultImageParts(bm["content"])
+					if text == "" && len(images) > 0 {
+						text = "[image attached below]"
+					}
 					parts = append(parts, map[string]any{
 						"functionResponse": map[string]any{
 							"name": name,
 							"response": map[string]any{
-								"content": extractClaudeContentText(bm["content"]),
+								"content": text,
 							},
 						},
 					})
+					toolImageParts = append(toolImageParts, images...)
 				case "image":
 					if src, ok := bm["source"].(map[string]any); ok {
 						if srcType, _ := src["type"].(string); srcType == "url" {
@@ -3706,6 +3714,7 @@ func convertClaudeMessagesToGeminiContents(messages any, toolUseIDToName map[str
 					}
 				}
 			}
+			parts = append(parts, toolImageParts...)
 		default:
 			// ignore
 		}
@@ -3720,6 +3729,34 @@ func convertClaudeMessagesToGeminiContents(messages any, toolUseIDToName map[str
 			"role":  gRole,
 			"parts": parts,
 		})
+	}
+	// Gemini/Vertex 拒收「以 functionResponse 开头、后面还跟着其它 part」的最后一个 turn，
+	// 报错文案是误导性的 "Requests ending with a model turn are not supported."。
+	// 客户端在工具结果后紧跟一条 user 文本时（例如 ACP nudge），CC→Claude 的
+	// mergeConsecutiveMessages 会把它并进同一个 user 消息，这里再把尾部的非
+	// functionResponse part 拆成独立的一轮 user，语义顺序不变。
+	if n := len(out); n > 0 {
+		if last, ok := out[n-1].(map[string]any); ok {
+			if parts, ok := last["parts"].([]any); ok {
+				lastFR := -1
+				for i, p := range parts {
+					pm, ok := p.(map[string]any)
+					if !ok {
+						continue
+					}
+					if _, isFR := pm["functionResponse"]; isFR {
+						lastFR = i
+					}
+				}
+				if lastFR >= 0 && lastFR < len(parts)-1 {
+					last["parts"] = parts[:lastFR+1]
+					out = append(out, map[string]any{
+						"role":  "user",
+						"parts": parts[lastFR+1:],
+					})
+				}
+			}
+		}
 	}
 	return out, nil
 }
@@ -3746,6 +3783,40 @@ func extractClaudeContentText(v any) string {
 		b, _ := json.Marshal(t)
 		return string(b)
 	}
+}
+
+func extractClaudeToolResultImageParts(v any) []any {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+
+	parts := make([]any, 0)
+	for _, part := range arr {
+		pm, ok := part.(map[string]any)
+		if !ok || pm["type"] != "image" {
+			continue
+		}
+		source, ok := pm["source"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if sourceType, _ := source["type"].(string); sourceType != "base64" {
+			continue
+		}
+		mediaType, _ := source["media_type"].(string)
+		data, _ := source["data"].(string)
+		if mediaType == "" || data == "" {
+			continue
+		}
+		parts = append(parts, map[string]any{
+			"inlineData": map[string]any{
+				"mimeType": mediaType,
+				"data":     data,
+			},
+		})
+	}
+	return parts
 }
 
 func convertClaudeToolsToGeminiTools(tools any) []any {
