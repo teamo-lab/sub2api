@@ -291,3 +291,62 @@ func recordRouterUpstreamAccountRate(c *gin.Context, stateKey, header string, ac
 	}
 	setRouterPrivateHeader(c, header, string(payload))
 }
+
+// RouterAccountSourcesHeader carries the operator-tagged upstream source
+// (Account.Extra["upstream_source"], e.g. "vertex", "antigravity", "codex") of
+// every account this request selected, keyed by Sub2API's positive account id.
+// Router records it on the trace attempt and the billing fact so marketplace
+// metrics can attribute a mixed group's traffic to the serving account's
+// supplier. It is a separate header so Routers that pin the attempts schema
+// keep working; untagged accounts are omitted.
+const (
+	RouterAccountSourcesHeader = "x-teamo-upstream-account-sources"
+	routerAccountSourcesKey    = "router_upstream_account_sources"
+	accountUpstreamSourceKey   = "upstream_source"
+	maxRouterAccountSourceLen  = 32
+)
+
+// RecordRouterUpstreamAccountSource publishes the selected account's upstream
+// source. Values outside [a-z0-9_-]{1,32} are omitted rather than forwarded,
+// so the header can never carry free text from account configuration.
+func RecordRouterUpstreamAccountSource(c *gin.Context, account *Account) {
+	if account == nil || account.ID <= 0 || !RouterContractV2Requested(c) {
+		return
+	}
+	source := normalizeRouterAccountSource(account.GetExtraString(accountUpstreamSourceKey))
+	if source == "" {
+		return
+	}
+	value, _ := c.Get(routerAccountSourcesKey)
+	state, _ := value.(map[string]string)
+	if state == nil {
+		state = make(map[string]string)
+		c.Set(routerAccountSourcesKey, state)
+	}
+	key := strconv.FormatInt(account.ID, 10)
+	if current, ok := state[key]; ok && current == source {
+		return
+	}
+	if _, ok := state[key]; !ok && len(state) >= maxRouterAttempts {
+		return
+	}
+	state[key] = source
+	payload, err := json.Marshal(state)
+	if err != nil {
+		return
+	}
+	setRouterPrivateHeader(c, RouterAccountSourcesHeader, string(payload))
+}
+
+func normalizeRouterAccountSource(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" || len(value) > maxRouterAccountSourceLen {
+		return ""
+	}
+	for _, r := range value {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '_' && r != '-' {
+			return ""
+		}
+	}
+	return value
+}
