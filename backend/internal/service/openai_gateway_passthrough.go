@@ -2189,8 +2189,10 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	// pendingLines 在首个可见输出前保留前导事件，确保无输出失败仍可安全 failover。
 	// 工具调用参数帧也扣在这里直到 item 完成；pendingBytes 超出上限即放弃保护
 	// 立刻放行（fail-open），迟到的保护不能变成饿死下游。
+	// toolArgsHold 另给参数暂存单独设时长/字节上限（见 openai_tool_args_hold.go）。
 	pendingLines := make([]string, 0, 8)
 	pendingBytes := 0
+	toolArgsHold := newOpenAIToolArgsHold()
 	var relayGate *relay.CommitGate
 	if s.teamoRelayEnabled(c) {
 		markTeamoRelayPath(c, "responses_passthrough")
@@ -2339,6 +2341,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			suppressCurrentEvent = codexFailureTerminal && (eventType == "error" || (sawBareError && !sawResponseFailed && eventType != "response.failed"))
 		}
 		lineStartsClientOutput := false
+		lineEventType := ""
 		forceFlushFailedEvent := false
 		if data, ok := extractOpenAISSEDataLine(line); ok {
 			dataBytes := []byte(data)
@@ -2375,6 +2378,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				}
 			}
 			eventType := effectiveOpenAISSEEventType(dataBytes, rawEventType)
+			lineEventType = eventType
 			observeReasoning(dataBytes, eventType)
 			if codexFailureTerminal && sawBareError && !sawResponseFailed && eventType != "response.failed" {
 				suppressCurrentEvent = true
@@ -2541,6 +2545,13 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			if relayGate == nil && !clientOutputStarted && !lineStartsClientOutput &&
 				pendingBytes+len(line) > openAIPassthroughPendingMaxBytes {
 				lineStartsClientOutput = true
+			}
+			if relayGate == nil && !clientOutputStarted && !lineStartsClientOutput &&
+				toolArgsHold.Exceeded(lineEventType, len(line)) {
+				// 参数暂存超出预算：连同已扣的帧一起放行，后续参数边生成边下发。
+				// 半截参数一旦写出就是答案输出，之后失败不能再按「仅推理」换号重放。
+				lineStartsClientOutput = true
+				pendingAnswerOutput = true
 			}
 			if !clientOutputStarted && !lineStartsClientOutput {
 				if relayGate != nil {

@@ -632,6 +632,8 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	wroteDownstream := false
 	pendingClientMessages := make([][]byte, 0, 4)
 	pendingClientMessageBytes := int64(0)
+	// toolArgsHold bounds the pre-output tool-argument hold (openai_tool_args_hold.go).
+	toolArgsHold := newOpenAIToolArgsHold()
 	capacityFailoverSuppressedLogged := false
 	clientDisconnected := false
 	officialOpenAIResponses := account != nil && account.Platform == PlatformOpenAI
@@ -875,7 +877,8 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			stageBeforeSemanticOutput := turn == 1 && account.Platform == PlatformOpenAI && !wroteDownstream
 			commitStagedMessages := !stageBeforeSemanticOutput ||
 				openAIStreamDataStartsClientOutput(string(clientMessage), eventType) ||
-				isOpenAIWSTerminalEvent(eventType)
+				isOpenAIWSTerminalEvent(eventType) ||
+				(stageBeforeSemanticOutput && toolArgsHold.Exceeded(eventType, len(clientMessage)))
 			if stageBeforeSemanticOutput && !commitStagedMessages {
 				if pendingClientMessageBytes+int64(len(clientMessage)) > openAIFirstOutputStageMaxBytes {
 					return nil, s.newOpenAIStreamFailoverError(
