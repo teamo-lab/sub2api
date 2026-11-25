@@ -5,6 +5,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -209,4 +210,47 @@ func TestRouterUpstreamAccountSellRatesNotWrittenAfterResponse(t *testing.T) {
 	premium := 1.6
 	RecordRouterUpstreamAccountSellRate(c, &Account{ID: 1119, SellRateMultiplier: &premium})
 	require.Empty(t, recorder.Header().Get(RouterAccountSellRatesHeader))
+}
+
+func TestRouterUpstreamAccountSourcesFollowSelectedAccounts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-4-carbon:generateContent", nil)
+	c.Request.Header.Set(RouterContractHeader, RouterContractV2)
+
+	// 1142 serves first, fails over to the Vertex account 1137.
+	RecordRouterUpstreamAccountSource(c, &Account{ID: 1142, Extra: map[string]any{"upstream_source": "antigravity"}})
+	RecordRouterUpstreamAccountSource(c, &Account{ID: 1137, Extra: map[string]any{"upstream_source": " Vertex "}})
+	RecordRouterUpstreamAccountSource(c, &Account{ID: 1137, Extra: map[string]any{"upstream_source": "vertex"}})
+	// Untagged, non-string, and free-text tags are omitted.
+	RecordRouterUpstreamAccountSource(c, &Account{ID: 1120})
+	RecordRouterUpstreamAccountSource(c, &Account{ID: 1121, Extra: map[string]any{"upstream_source": 7}})
+	RecordRouterUpstreamAccountSource(c, &Account{ID: 1122, Extra: map[string]any{"upstream_source": "vertex; drop"}})
+	RecordRouterUpstreamAccountSource(c, &Account{ID: 1123, Extra: map[string]any{"upstream_source": strings.Repeat("a", 33)}})
+
+	var sources map[string]string
+	require.NoError(t, json.Unmarshal([]byte(recorder.Header().Get(RouterAccountSourcesHeader)), &sources))
+	require.Equal(t, map[string]string{"1142": "antigravity", "1137": "vertex"}, sources)
+	require.Empty(t, recorder.Header().Get(RouterAccountRatesHeader))
+}
+
+func TestRouterUpstreamAccountSourcesOnlyForRouterCallersBeforeCommit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tagged := &Account{ID: 1137, Extra: map[string]any{"upstream_source": "vertex"}}
+
+	public := httptest.NewRecorder()
+	pc, _ := gin.CreateTestContext(public)
+	pc.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	RecordRouterUpstreamAccountSource(pc, tagged)
+	RecordRouterUpstreamAccountSource(pc, nil)
+	require.Empty(t, public.Header().Get(RouterAccountSourcesHeader))
+
+	committed := httptest.NewRecorder()
+	cc, _ := gin.CreateTestContext(committed)
+	cc.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	cc.Request.Header.Set(RouterContractHeader, RouterContractV2)
+	cc.String(http.StatusOK, "committed")
+	RecordRouterUpstreamAccountSource(cc, tagged)
+	require.Empty(t, committed.Header().Get(RouterAccountSourcesHeader))
 }
