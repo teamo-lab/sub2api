@@ -61,6 +61,57 @@ func TestAccountRouteMissingCapabilityAndPreferFitting(t *testing.T) {
 	require.Equal(t, []*Account{listed}, preferRouteFittingAccounts(ctx, []*Account{listed}))
 }
 
+func TestParseRouteRequestGoogleSearch(t *testing.T) {
+	for _, body := range []string{
+		`{"contents":[],"tools":[{"google_search":{}}]}`,
+		`{"contents":[],"tools":[{"functionDeclarations":[{"name":"f"}]},{"googleSearch":{}}]}`,
+		`{"contents":[],"tools":[{"googleSearchRetrieval":{}}]}`,
+	} {
+		require.Equal(t, []string{RouteCapGoogleSearch}, ParseGeminiNativeRouteRequest([]byte(body), false).Needs, body)
+	}
+	require.Empty(t, ParseGeminiNativeRouteRequest([]byte(`{"tools":[{"functionDeclarations":[{"name":"google_search"}]}]}`), false).Needs,
+		"a function that happens to be named google_search is not the built-in tool")
+	require.Empty(t, ParseGeminiNativeRouteRequest([]byte(`{"tools":[{"codeExecution":{}}]}`), false).Needs)
+
+	require.Equal(t, []string{RouteCapGoogleSearch},
+		ParseChatCompletionsRouteRequest([]byte(`{"model":"gemini-3.8-flash","tools":[{"type":"function","function":{"name":"f"}},{"type":"Web_Search"}]}`), false).Needs)
+	require.Empty(t, ParseChatCompletionsRouteRequest([]byte(`{"model":"gemini-3.8-flash","tools":[{"type":"function","function":{"name":"web_search"}}]}`), false).Needs,
+		"a client-side function named web_search is not promoted to googleSearch")
+}
+
+func TestRouteMissingCapabilityScopedToModel(t *testing.T) {
+	// 1138 这类混池：3.8 能搜、hydrogen 不能；1140：3.8 和 3.6 都不能。
+	rootflow := &Account{ID: 1138, Extra: map[string]any{AccountRouteMissingCapsExtraKey: []any{"google_search@gemini-4-hydrogen"}}}
+	swarm := &Account{ID: 1140, Extra: map[string]any{AccountRouteMissingCapsExtraKey: "google_search@gemini-3.8-flash, google_search@Gemini-3.6-Flash"}}
+	hoyo := &Account{ID: 1149}
+	everywhere := &Account{ID: 1141, Extra: map[string]any{AccountRouteMissingCapsExtraKey: []string{"google_search"}}}
+
+	require.False(t, rootflow.RouteMissingCapabilityForModel(RouteCapGoogleSearch, "gemini-3.8-flash"))
+	require.True(t, rootflow.RouteMissingCapabilityForModel(RouteCapGoogleSearch, "gemini-4-hydrogen"))
+	require.True(t, rootflow.RouteMissingCapabilityForModel(RouteCapGoogleSearch, "models/GEMINI-4-HYDROGEN"))
+	require.False(t, rootflow.RouteMissingCapability(RouteCapGoogleSearch), "a model-scoped entry is not an account-wide one")
+	require.False(t, rootflow.RouteMissingCapabilityForModel(RouteCapResponseSchema, "gemini-4-hydrogen"))
+	require.True(t, swarm.RouteMissingCapabilityForModel(RouteCapGoogleSearch, "gemini-3.6-flash"))
+	require.True(t, everywhere.RouteMissingCapabilityForModel(RouteCapGoogleSearch, "anything"))
+	require.True(t, everywhere.RouteMissingCapability(RouteCapGoogleSearch))
+
+	// 声明写的是映射后的上游模型名时也认。
+	mapped := &Account{ID: 1128, Platform: PlatformGemini,
+		Credentials: map[string]any{"model_mapping": map[string]any{"gemini-3.1-pro-stable": "gemini-3.1-pro-preview"}},
+		Extra:       map[string]any{AccountRouteMissingCapsExtraKey: []any{"google_search@gemini-3.1-pro-preview"}}}
+	require.True(t, mapped.RouteMissingCapabilityForModel(RouteCapGoogleSearch, "gemini-3.1-pro-stable"))
+
+	all := []*Account{rootflow, swarm, hoyo, everywhere}
+	search38 := WithGeminiRouteRequest(context.Background(), GeminiRouteRequest{Model: "gemini-3.8-flash", Needs: []string{RouteCapGoogleSearch}})
+	require.Equal(t, []*Account{rootflow, hoyo}, preferRouteFittingAccounts(search38, all))
+	searchHydrogen := WithGeminiRouteRequest(context.Background(), GeminiRouteRequest{Model: "gemini-4-hydrogen", Needs: []string{RouteCapGoogleSearch}})
+	require.Equal(t, []*Account{swarm, hoyo}, preferRouteFittingAccounts(searchHydrogen, all))
+	plain38 := WithGeminiRouteRequest(context.Background(), GeminiRouteRequest{Model: "gemini-3.8-flash"})
+	require.Equal(t, all, preferRouteFittingAccounts(plain38, all), "requests without search keep every account")
+	// 都不满足时不排除。
+	require.Equal(t, []*Account{swarm, everywhere}, preferRouteFittingAccounts(search38, []*Account{swarm, everywhere}))
+}
+
 func TestRouteABGroupOverridesAndSellPriceBasis(t *testing.T) {
 	cfg, ok := parseOpenAIRouteABConfig(`{"groups":{"82":{"mode":"shadow","price_basis":"SELL","cost_ms_per_rate":10000,"max_priority":5,"error_penalty_ms":60000,"stall_min_ms":30000},"6":{"mode":"shadow","cost_ms_per_rate":-1}}}`)
 	require.True(t, ok)
