@@ -14,7 +14,6 @@ import (
 
 func TestShouldFailoverOpenAIUpstreamResponse_RequestTimeout(t *testing.T) {
 	svc := &OpenAIGatewayService{}
-	account := &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
 	tests := []struct {
 		name   string
 		status int
@@ -32,13 +31,14 @@ func TestShouldFailoverOpenAIUpstreamResponse_RequestTimeout(t *testing.T) {
 		{"not_found", http.StatusNotFound, `{"error":{"message":"Not found"}}`, false},
 		{"unprocessable_entity", http.StatusUnprocessableEntity, `{"error":{"message":"Invalid request"}}`, false},
 		{"cyber_policy", http.StatusRequestTimeout, `{"error":{"code":"cyber_policy","message":"blocked"}}`, false},
-		{"context_length", http.StatusRequestTimeout, `{"error":{"code":"context_length_exceeded","message":"Maximum context length exceeded"}}`, false},
-		{"context_window", http.StatusRequestTimeout, `{"error":{"message":"Input exceeds the context window"}}`, false},
+		// 与上游不同：各上游同一模型的上下文窗口不一样大，超窗口要换号（openai_context_window_failover.go）。
+		{"context_length", http.StatusRequestTimeout, `{"error":{"code":"context_length_exceeded","message":"Maximum context length exceeded"}}`, true},
+		{"context_window", http.StatusRequestTimeout, `{"error":{"message":"Input exceeds the context window"}}`, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			body := []byte(tt.body)
-			require.Equal(t, tt.want, svc.shouldFailoverOpenAIUpstreamResponse(account, tt.status, extractUpstreamErrorMessage(body), body))
+			require.Equal(t, tt.want, svc.shouldFailoverOpenAIUpstreamResponse(tt.status, extractUpstreamErrorMessage(body), body))
 		})
 	}
 }
