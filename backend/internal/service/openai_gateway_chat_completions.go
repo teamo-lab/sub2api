@@ -753,6 +753,8 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 		defer relayGate.Close()
 	}
 	refusalDetector := newOpenAIChatSilentRefusalDetector(requestBodyLen)
+	// toolArgsHold bounds the pre-output tool-argument hold (openai_tool_args_hold.go).
+	toolArgsHold := newOpenAIToolArgsHold()
 	var streamFailoverErr *UpstreamFailoverError
 	var streamNonFailoverErr error
 	terminalEventType := ""
@@ -954,6 +956,12 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 		}
 
 		eventStartsClientOutput := openAIStreamDataStartsClientOutput(payload, event.Type)
+		if !eventStartsClientOutput && !clientOutputStarted && relayGate == nil && toolArgsHold.Exceeded(event.Type, len(payload)) {
+			// 参数暂存超出预算：放行已扣的块，之后参数边生成边下发；
+			// 半截参数写出即答案输出，之后失败不能再按「仅推理」换号重放。
+			eventStartsClientOutput = true
+			pendingAnswerOutput = true
+		}
 		if openAIStreamDataStartsAnswerOutput(payload, event.Type) {
 			pendingAnswerOutput = true
 		}
@@ -1039,6 +1047,10 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 
 	finalizeStream := func() (*OpenAIForwardResult, error) {
 		if streamFailoverErr != nil {
+			if !clientOutputStarted {
+				// 首个语义输出之前下游最多收到过心跳注释，换号后接着在同一条流里写。
+				streamFailoverErr.SafeToFailoverAfterWrite = true
+			}
 			if !s.teamoRelayEnabled(c) && (c == nil || c.Writer == nil || !c.Writer.Written()) {
 				return nil, streamFailoverErr
 			}
@@ -1096,7 +1108,10 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 		}
 		if !clientDisconnected && !clientOutputStarted {
 			if refusalDetector.IsSilentRefusal() {
-				return nil, newOpenAISilentRefusalFailoverError(c, account, requestID)
+				failoverErr := newOpenAISilentRefusalFailoverError(c, account, requestID)
+				// 下游最多收到过心跳注释，仍可在同一条流里换号。
+				failoverErr.SafeToFailoverAfterWrite = true
+				return nil, failoverErr
 			}
 			if relayGate != nil && !relayGate.Committed() {
 				writeStreamHeaders()
@@ -1320,15 +1335,19 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 			if clientDisconnected {
 				continue
 			}
-			if refusalDetector.Enabled() && !clientOutputStarted {
-				continue
-			}
-			if time.Since(lastDataAt) < keepaliveInterval {
+			// 首个语义输出之前，上游帧都扣在 pendingSSE 里（推理、工具参数、
+			// 静默拒绝检测），上游有数据不代表下游收到了字节，所以按节拍照发心跳。
+			// 心跳字节记入 keepalive 账，失败时 SafeToFailoverAfterWrite 保持可换号。
+			if clientOutputStarted && time.Since(lastDataAt) < keepaliveInterval {
 				continue
 			}
 			// Send SSE comment as keepalive
 			writeStreamHeaders()
-			if _, err := fmt.Fprint(c.Writer, ":\n\n"); err != nil {
+			n, err := fmt.Fprint(c.Writer, ":\n\n")
+			if !clientOutputStarted {
+				recordOpenAIStreamKeepaliveBytes(c, n)
+			}
+			if err != nil {
 				logger.L().Info("openai chat_completions stream: client disconnected during keepalive",
 					zap.String("request_id", requestID),
 				)

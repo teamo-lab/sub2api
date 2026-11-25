@@ -284,6 +284,8 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	answerOutputStarted := false
 	pendingAnswerOutput := false
 	answerOutputReached := func() bool { return answerOutputStarted || pendingAnswerOutput }
+	// toolArgsHold bounds the pre-output tool-argument hold (openai_tool_args_hold.go).
+	toolArgsHold := newOpenAIToolArgsHold()
 	codexFailureTerminal := account != nil && account.IsOpenAIOAuthLike()
 	upstreamRequestID := opsUpstreamRequestID(account, resp.Header)
 	var streamEarlyErr error
@@ -792,6 +794,12 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				line = s.replaceModelInSSELine(line, mappedModel, originalModel)
 			}
 			startsClientOutput := forceFlushFailedEvent || openAIStreamDataStartsClientOutput(data, eventType)
+			if !startsClientOutput && !clientOutputStarted && toolArgsHold.Exceeded(eventType, len(line)) {
+				// 参数暂存超出预算：放行已扣的帧，之后参数边生成边下发；
+				// 半截参数写出即答案输出，之后失败不能再按「仅推理」换号重放。
+				startsClientOutput = true
+				pendingAnswerOutput = true
+			}
 			// Keep upstream progress (and its existing timeout/TTFT semantics)
 			// separate from releasing data to the caller. Only known textual
 			// reasoning may stay held beyond the old progress boundary.
