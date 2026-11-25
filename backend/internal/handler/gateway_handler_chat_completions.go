@@ -168,7 +168,9 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		})
 		fs.RequestedModel = reqModel
 		// 选路实验 / 能力过滤用的请求特征（只对 Gemini 分组）。
-		c.Request = c.Request.WithContext(service.WithGeminiRouteRequest(c.Request.Context(), service.ParseChatCompletionsRouteRequest(body, reqStream)))
+		routeReq := service.ParseChatCompletionsRouteRequest(body, reqStream)
+		routeReq.Model = reqModel
+		c.Request = c.Request.WithContext(service.WithGeminiRouteRequest(c.Request.Context(), routeReq))
 	}
 
 	for {

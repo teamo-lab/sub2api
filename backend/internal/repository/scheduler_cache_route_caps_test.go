@@ -13,13 +13,15 @@ func TestSchedulerProjectionKeepsRouteMissingCaps(t *testing.T) {
 		ID:       1136,
 		Platform: service.PlatformGemini,
 		Extra: map[string]any{
-			service.AccountRouteMissingCapsExtraKey: []any{service.RouteCapResponseSchema, service.RouteCapOutputLimits},
+			service.AccountRouteMissingCapsExtraKey: []any{service.RouteCapResponseSchema, service.RouteCapOutputLimits, "google_search@gemini-4-neon"},
 			"some_unrelated_key":                    "dropped",
 		},
 	}
 	projected := buildSchedulerMetadataAccount(account)
 	require.True(t, projected.RouteMissingCapability(service.RouteCapResponseSchema))
 	require.True(t, projected.RouteMissingCapability(service.RouteCapOutputLimits))
+	require.True(t, projected.RouteMissingCapabilityForModel(service.RouteCapGoogleSearch, "gemini-4-neon"))
+	require.False(t, projected.RouteMissingCapabilityForModel(service.RouteCapGoogleSearch, "gemini-4-carbon"))
 	require.NotContains(t, projected.Extra, "some_unrelated_key")
 
 	require.True(t, shouldEnqueueSchedulerOutboxForExtraUpdates(map[string]any{

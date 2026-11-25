@@ -7,10 +7,12 @@ package service
 //
 //   - 请求特征（WithGeminiRouteRequest）：handler 解析请求体后挂到 ctx。档位 = 模型 ×
 //     thinking 档 × 请求体档；非流式另成一档（首字样本取整条响应耗时，只和非流式比）。
-//   - 能力需求：请求要求结构化输出（responseSchema / JSON mime）或输出限制
-//     （maxOutputTokens / stopSequences）时，优先排除在 accounts.extra.route_missing_caps
-//     里声明缺这项能力的号（例如不认 generationConfig 的中转）。没有号满足时不排除，
-//     宁可降级也不让请求无号可用。这层过滤不依赖实验开关。
+//   - 能力需求：请求要求结构化输出（responseSchema / JSON mime）、输出限制
+//     （maxOutputTokens / stopSequences）或谷歌搜索（googleSearch 工具）时，优先排除在
+//     accounts.extra.route_missing_caps 里声明缺这项能力的号（例如不认 generationConfig 的
+//     中转、回 200 却不带 groundingMetadata 的中转）。声明可以只对某个模型生效：
+//     "google_search@gemini-3.8-flash"。没有号满足时不排除，宁可降级也不让请求无号可用。
+//     这层过滤不依赖实验开关。
 //   - 挂点：GatewayService.SelectAccountWithLoadAwareness 的粘性层记 layer=sticky，
 //     负载层按评分（B 组）或老顺序（影子 / A 组）选号；首字取第一个非 thought 的回答片段。
 
@@ -29,8 +31,13 @@ const (
 	RouteCapResponseSchema = "response_schema"
 	// RouteCapOutputLimits：会照 maxOutputTokens / stopSequences 截断。
 	RouteCapOutputLimits = "output_limits"
+	// RouteCapGoogleSearch：带 googleSearch 工具时真的去搜，并返回 groundingMetadata。
+	// 有的中转是混池，同一个号有的模型能搜、有的不能，所以常配成 "google_search@<模型>"。
+	RouteCapGoogleSearch = "google_search"
 
 	// AccountRouteMissingCapsExtraKey：accounts.extra 里声明该号缺的能力（字符串数组或逗号分隔）。
+	// 每项是 "<能力>"（所有模型都缺）或 "<能力>@<模型>"（只有这个模型缺；模型按请求模型名
+	// 或该号映射后的模型名匹配，不区分大小写）。
 	AccountRouteMissingCapsExtraKey = "route_missing_caps"
 
 	routeShapeNonStreamSuffix = "|ns"
@@ -42,6 +49,9 @@ type GeminiRouteRequest struct {
 	Stream    bool
 	BodyBytes int
 	Needs     []string
+	// Model 是请求的模型名，用来匹配只对某个模型生效的能力声明（"google_search@<模型>"）。
+	// 由 handler 填；为空时只有不带模型的声明生效。
+	Model string
 }
 
 type geminiRouteRequestContextKey struct{}
@@ -66,6 +76,9 @@ func geminiRouteRequestFromContext(ctx context.Context) (GeminiRouteRequest, boo
 // ParseGeminiNativeRouteRequest 解析原生 generateContent / streamGenerateContent 请求体。
 func ParseGeminiNativeRouteRequest(body []byte, stream bool) GeminiRouteRequest {
 	req := GeminiRouteRequest{Stream: stream, BodyBytes: len(body)}
+	if geminiNativeToolsUseGoogleSearch(body) {
+		req.Needs = append(req.Needs, RouteCapGoogleSearch)
+	}
 	gc := gjson.GetBytes(body, "generationConfig")
 	if !gc.Exists() {
 		gc = gjson.GetBytes(body, "generation_config")
@@ -110,7 +123,28 @@ func ParseChatCompletionsRouteRequest(body []byte, stream bool) GeminiRouteReque
 			break
 		}
 	}
+	// Chat Completions 里只有 type=web_search 的工具会被转成 Gemini 的 googleSearch
+	// （apicompat.convertChatToolsToResponses → convertClaudeToolsToGeminiTools），
+	// 名叫 web_search 的 function 仍是客户端函数，不算。
+	for _, tool := range gjson.GetBytes(body, "tools").Array() {
+		if strings.EqualFold(strings.TrimSpace(tool.Get("type").String()), "web_search") {
+			req.Needs = append(req.Needs, RouteCapGoogleSearch)
+			break
+		}
+	}
 	return req
+}
+
+// geminiNativeToolsUseGoogleSearch 判断原生请求的 tools 里有没有谷歌搜索类内置工具。
+func geminiNativeToolsUseGoogleSearch(body []byte) bool {
+	for _, tool := range gjson.GetBytes(body, "tools").Array() {
+		for _, key := range []string{"googleSearch", "google_search", "googleSearchRetrieval", "google_search_retrieval"} {
+			if tool.Get(key).Exists() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func firstExisting(obj gjson.Result, keys ...string) gjson.Result {
@@ -138,32 +172,61 @@ func geminiThinkingBudgetBand(budget int64) string {
 	}
 }
 
-// RouteMissingCapability 返回账号是否声明缺少某项能力。
+// RouteMissingCapability 返回账号是否声明对所有模型都缺少某项能力（不带 @模型 的声明）。
 func (a *Account) RouteMissingCapability(capability string) bool {
+	return a.RouteMissingCapabilityForModel(capability, "")
+}
+
+// RouteMissingCapabilityForModel 返回账号是否声明在这个模型上缺少某项能力：
+// "<能力>" 对所有模型生效；"<能力>@<模型>" 只在请求模型名或映射后的模型名等于该模型时生效。
+func (a *Account) RouteMissingCapabilityForModel(capability, model string) bool {
 	if a == nil || a.Extra == nil || capability == "" {
 		return false
 	}
+	var entries []string
 	switch v := a.Extra[AccountRouteMissingCapsExtraKey].(type) {
 	case []any:
 		for _, item := range v {
-			if s, ok := item.(string); ok && strings.EqualFold(strings.TrimSpace(s), capability) {
-				return true
+			if s, ok := item.(string); ok {
+				entries = append(entries, s)
 			}
 		}
 	case []string:
-		for _, s := range v {
-			if strings.EqualFold(strings.TrimSpace(s), capability) {
-				return true
-			}
-		}
+		entries = v
 	case string:
-		for _, s := range strings.Split(v, ",") {
-			if strings.EqualFold(strings.TrimSpace(s), capability) {
-				return true
-			}
+		entries = strings.Split(v, ",")
+	}
+	rawModel := strings.TrimPrefix(strings.TrimSpace(model), "models/")
+	model = normalizeRouteCapModel(model)
+	mapped := ""
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		name, scope, scoped := strings.Cut(entry, "@")
+		if !strings.EqualFold(strings.TrimSpace(name), capability) {
+			continue
+		}
+		if !scoped {
+			return true
+		}
+		scope = normalizeRouteCapModel(scope)
+		if model == "" || scope == "" {
+			continue
+		}
+		if scope == model {
+			return true
+		}
+		if mapped == "" {
+			mapped = normalizeRouteCapModel(a.GetMappedModel(rawModel))
+		}
+		if scope == mapped {
+			return true
 		}
 	}
 	return false
+}
+
+func normalizeRouteCapModel(model string) string {
+	return strings.ToLower(strings.TrimPrefix(strings.TrimSpace(model), "models/"))
 }
 
 // routeAccountFitsRequest 判断账号是否具备 ctx 里请求声明需要的全部能力。
@@ -173,7 +236,7 @@ func routeAccountFitsRequest(ctx context.Context, account *Account) bool {
 		return true
 	}
 	for _, need := range req.Needs {
-		if account.RouteMissingCapability(need) {
+		if account.RouteMissingCapabilityForModel(need, req.Model) {
 			return false
 		}
 	}

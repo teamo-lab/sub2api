@@ -381,7 +381,9 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 
 	// 选路实验 / 能力过滤用的请求特征（只看生成请求，countTokens 等不参与）。
 	if action == "generateContent" || action == "streamGenerateContent" {
-		c.Request = c.Request.WithContext(service.WithGeminiRouteRequest(c.Request.Context(), service.ParseGeminiNativeRouteRequest(body, stream)))
+		routeReq := service.ParseGeminiNativeRouteRequest(body, stream)
+		routeReq.Model = modelName
+		c.Request = c.Request.WithContext(service.WithGeminiRouteRequest(c.Request.Context(), routeReq))
 	}
 
 	fs := NewFailoverState(h.maxAccountSwitchesGemini, hasBoundSession)
