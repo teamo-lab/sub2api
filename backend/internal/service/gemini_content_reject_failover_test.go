@@ -14,6 +14,9 @@ import (
 // hoyorouter 的内容过滤拒绝原文（11-24 生产 ops_error_logs）。
 const hoyoContentRejectBody = `{"error":{"code":400,"message":"Request was rejected by upstream policy; modify the prompt or context and try again. (ref: req_5edb238c8134)","status":"INVALID_ARGUMENT"}}`
 
+// geminimodel 的拦截原文（11-26 生产 ops_error_logs，号 1131）。
+const geminimodelProhibitedBody = `{"error":{"message":"PROHIBITED_CONTENT","type":"invalid_request_error"}}`
+
 func withContentRejectFailover(acc *Account) *Account {
 	if acc.Extra == nil {
 		acc.Extra = map[string]any{}
@@ -41,6 +44,25 @@ func TestClassifyGeminiAccountUpstreamError_ContentReject(t *testing.T) {
 	require.Equal(t, geminiErrorDefault, classifyGeminiAccountUpstreamError(str, http.StatusBadRequest, body))
 	// 原有分类不受影响
 	require.Equal(t, geminiErrorCapabilityMiss, classifyGeminiAccountUpstreamError(plain, http.StatusNotFound, []byte(`{}`)))
+}
+
+func TestClassifyGeminiAccountUpstreamError_ProhibitedContent(t *testing.T) {
+	flagged := withContentRejectFailover(geminiNonPoolAPIKeyAccount())
+	plain := geminiNonPoolAPIKeyAccount()
+	body := []byte(geminimodelProhibitedBody)
+
+	require.Equal(t, geminiErrorCapabilityMiss, classifyGeminiAccountUpstreamError(flagged, http.StatusBadRequest, body))
+	require.Equal(t, geminiErrorDefault, classifyGeminiAccountUpstreamError(plain, http.StatusBadRequest, body), "only opted-in accounts fail over")
+	require.Equal(t, geminiErrorDefault, classifyGeminiAccountUpstreamError(flagged, http.StatusOK, body))
+}
+
+func TestGeminiForwardNative_ProhibitedContentFailsOverOnOptedInAccount(t *testing.T) {
+	svc, stub := newGeminiSkippedWriteService(http.StatusBadRequest, geminimodelProhibitedBody)
+	c, _ := newGeminiNativeTestContext(t)
+	_, err := svc.ForwardNative(context.Background(), c, withContentRejectFailover(geminiPoolModeAPIKeyAccount()), "gemini-3.8-flash", "generateContent", false, []byte(geminiUsageTestRequest))
+	fe := requireGeminiImmediateFailover(t, c, err, http.StatusBadRequest, GeminiCapabilityMissReason)
+	require.Equal(t, 1, stub.calls, "no same-account retry")
+	require.JSONEq(t, geminimodelProhibitedBody, string(fe.ResponseBody))
 }
 
 func TestGeminiForwardNative_ContentRejectFailsOverOnOptedInAccount(t *testing.T) {
