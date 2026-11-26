@@ -60,14 +60,17 @@ var geminiCapabilityMissPatterns = []string{
 }
 
 // AccountContentRejectFailoverExtraKey：accounts.extra 里为 true 的号，上游回「内容被本中转的策略拦截」
-// 这类 400 时按 capability_miss 换号。只给自己另加了一层内容过滤、而同组其它号照常放行的中转打开
-// （例如 hoyorouter：同人 / 角色扮演请求被它拦，其它 Gemini 号能接）。默认关，其它号的内容拦截照旧透传。
+// 这类 400 时按 capability_miss 换号。只给拦得比同组其它号严的中转打开
+// （例如 hoyorouter：同人 / 角色扮演请求被它拦，其它 Gemini 号能接；geminimodel：同样的 3.8 请求
+// 回 400 PROHIBITED_CONTENT，同组 hoyo 照常放行）。默认关，其它号的内容拦截照旧透传。
 const AccountContentRejectFailoverExtraKey = "content_reject_failover"
 
-// geminiContentRejectPatterns 是中转自己内容过滤的拒绝文案（小写匹配），只在号打开
+// geminiContentRejectPatterns 是中转内容拦截的拒绝文案（小写匹配），只在号打开
 // content_reject_failover 时生效。
 var geminiContentRejectPatterns = []string{
 	"rejected by upstream policy",
+	// geminimodel（new-api 反代）把 Google 的拦截原因放进 400 的 message：{"error":{"message":"PROHIBITED_CONTENT"}}
+	"prohibited_content",
 }
 
 // geminiNoCapacityPatterns 是中转「自己没有可用资源」的错误信息（小写匹配）。
