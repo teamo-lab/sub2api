@@ -55,9 +55,11 @@ INSERT INTO ops_error_logs (
   response_latency_ms,
   time_to_first_token_ms,
   created_at,
-  api_key_prefix
+  api_key_prefix,
+  router_request_id,
+  router_user_id
 ) VALUES (
-  $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38
+  $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40
 )`
 
 func NewOpsRepository(db *sql.DB) service.OpsRepository {
@@ -167,6 +169,8 @@ func opsInsertErrorLogArgs(input *service.OpsInsertErrorLogInput) []any {
 		opsNullInt64(input.TimeToFirstTokenMs),
 		input.CreatedAt,
 		opsNullString(input.APIKeyPrefix),
+		opsNullString(input.RouterRequestID),
+		opsNullString(input.RouterUserID),
 	}
 }
 
@@ -267,7 +271,9 @@ SELECT
   COALESCE(e.user_agent, ''),
   e.request_type,
   COALESCE(ak.name, ''),
-  ak.deleted_at
+  ak.deleted_at,
+  COALESCE(e.router_request_id, ''),
+  COALESCE(e.router_user_id, '')
 FROM ops_error_logs e
 LEFT JOIN accounts a ON e.account_id = a.id
 LEFT JOIN groups g ON e.group_id = g.id
@@ -338,6 +344,8 @@ LIMIT $` + itoa(len(args)+1) + ` OFFSET $` + itoa(len(args)+2)
 			&requestType,
 			&apiKeyName,
 			&apiKeyDeletedAt,
+			&item.RouterRequestID,
+			&item.RouterUserID,
 		); err != nil {
 			return nil, err
 		}
@@ -449,7 +457,9 @@ SELECT
   e.time_to_first_token_ms,
   COALESCE(e.api_key_prefix, ''),
   COALESCE(ak.name, ''),
-  ak.deleted_at
+  ak.deleted_at,
+  COALESCE(e.router_request_id, ''),
+  COALESCE(e.router_user_id, '')
 FROM ops_error_logs e
 LEFT JOIN users u ON e.user_id = u.id
 LEFT JOIN accounts a ON e.account_id = a.id
@@ -524,6 +534,8 @@ LIMIT 1`
 		&out.APIKeyPrefix,
 		&detailAPIKeyName,
 		&detailAPIKeyDeletedAt,
+		&out.RouterRequestID,
+		&out.RouterUserID,
 	)
 	if err != nil {
 		return nil, err
@@ -995,11 +1007,22 @@ func buildOpsErrorLogsWhere(filter *service.OpsErrorLogFilter) (string, []any) {
 		clauses = append(clauses, "COALESCE(e.client_request_id,'') = $"+itoa(len(args)))
 	}
 
+	if routerUID := strings.TrimSpace(filter.RouterUserID); routerUID != "" {
+		args = append(args, routerUID)
+		clauses = append(clauses, "e.router_user_id = $"+itoa(len(args)))
+	}
+	if filter.AnyAccountID != nil && *filter.AnyAccountID > 0 {
+		// 最终落在该账号，或换号过程中任意一跳用过该账号（upstream_errors 是逐跳数组）。
+		args = append(args, *filter.AnyAccountID)
+		n := itoa(len(args))
+		clauses = append(clauses, "(e.account_id = $"+n+" OR COALESCE(e.upstream_errors, '[]'::jsonb) @> jsonb_build_array(jsonb_build_object('account_id', $"+n+"::bigint)))")
+	}
+
 	if q := strings.TrimSpace(filter.Query); q != "" {
 		like := "%" + q + "%"
 		args = append(args, like)
 		n := itoa(len(args))
-		clauses = append(clauses, "(e.request_id ILIKE $"+n+" OR e.client_request_id ILIKE $"+n+" OR e.error_message ILIKE $"+n+")")
+		clauses = append(clauses, "(e.request_id ILIKE $"+n+" OR e.client_request_id ILIKE $"+n+" OR e.error_message ILIKE $"+n+" OR e.router_request_id ILIKE $"+n+" OR e.router_user_id ILIKE $"+n+")")
 	}
 
 	if userQuery := strings.TrimSpace(filter.UserQuery); userQuery != "" {

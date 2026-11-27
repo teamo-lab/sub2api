@@ -161,6 +161,8 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	if result == nil {
 		return errors.New("openai usage result is nil")
 	}
+	// Responses 状态机：登记本轮 response_id，下一轮带 previous_response_id 时接上前缀。
+	SetCacheProbeResponseID(ctx, result.ResponseID)
 	if s.rateLimitService != nil && input.Account != nil && input.Account.Platform == PlatformOpenAI {
 		s.rateLimitService.ResetOpenAI403Counter(ctx, input.Account.ID)
 	}

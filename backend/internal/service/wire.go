@@ -562,6 +562,22 @@ func ProvideOpsCleanupService(
 	return svc
 }
 
+// ProvideOpsCacheAnalyzer 创建并启动缓存命中根因分析器。每个网关进程都要跑（不是单例任务）：
+// 归因发生在处理请求的进程里，结果以累加方式写进 ops_cache_analysis_5m。
+func ProvideOpsCacheAnalyzer(opsRepo OpsRepository, redisClient *redis.Client, cfg *config.Config) *OpsCacheAnalyzer {
+	if cfg == nil || !cfg.Ops.Enabled || !cfg.Ops.CacheAnalysis.Enabled {
+		return nil
+	}
+	store, _ := opsRepo.(OpsCacheAnalysisStore)
+	var rdb *redis.Client
+	if cfg.Ops.CacheAnalysis.L2TTL > 0 {
+		rdb = redisClient
+	}
+	analyzer := NewOpsCacheAnalyzer(cfg.Ops.CacheAnalysis, store, rdb)
+	analyzer.Start()
+	return analyzer
+}
+
 func ProvideOpsSystemLogSink(opsRepo OpsRepository) *OpsSystemLogSink {
 	sink := NewOpsSystemLogSink(opsRepo)
 	sink.Start()
@@ -882,6 +898,7 @@ var ProviderSet = wire.NewSet(
 	NewDataManagementService,
 	ProvideBackupService,
 	ProvideOpsSystemLogSink,
+	ProvideOpsCacheAnalyzer,
 	ProvideOpsService,
 	ProvideOpsIngressRejectAggregator,
 	ProvideAuditLogService,

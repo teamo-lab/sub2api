@@ -576,6 +576,8 @@ func writeUsageLogBestEffort(ctx context.Context, repo UsageLogRepository, usage
 	if repo == nil || usageLog == nil {
 		return
 	}
+	// 缓存命中根因分析：非阻塞投递，分析器没开或队列满时直接跳过，不影响落库。
+	observeCacheUsage(ctx, usageLog)
 	usageCtx, cancel := detachedBillingContext(ctx)
 	defer cancel()
 

@@ -32,6 +32,7 @@ func ClientRequestIDWithOptions(exposeOneAPI bool) gin.HandlerFunc {
 			c.Next()
 			return
 		}
+		applyRouterCorrelation(c)
 
 		if v, _ := c.Request.Context().Value(ctxkey.ClientRequestID).(string); strings.TrimSpace(v) != "" {
 			var valid bool

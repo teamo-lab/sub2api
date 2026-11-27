@@ -53,6 +53,51 @@ export default {
       ascending: 'ascending',
       descending: 'descending'
     },
+    cache: {
+      cardLabel: 'Cache hit rate',
+      reusable: 'Reusable-prefix hit {rate}',
+      saved: 'Est. saved {amount}',
+      noData: 'No data',
+      title: 'Cache miss root causes',
+      summary: 'Uncached {tokens} tokens · est. saved {amount}',
+      barLabel: 'Share of prompt tokens by cause',
+      legendTitle: 'Cause',
+      requests: '{count} requests',
+      hint: 'Attributed by prompt tokens: cached reads count as Hit, new content appended in a hit request counts as Incremental; misses are checked in order: below minimum → no cache breakpoint → stateful chain lost → single turn / new session → TTL expired → account switch → prefix drift → upstream miss. Reusable-prefix hit rate = hit ÷ (hit + TTL expired + account switch + prefix drift + upstream miss).',
+      accountsTitle: 'Accounts with the most misses',
+      accountsCaption: 'Sorted by tokens that should have hit (TTL expired, account switch, prefix drift, upstream miss); top 10',
+      accountColumns: { account: 'Account', promptTokens: 'Prompt tokens', hitRate: 'Hit rate', topCauses: 'Top miss causes' },
+      empty: 'No analysis data in this range yet (collection starts with this release)',
+      loadFailed: 'Failed to load cache analysis',
+      causes: {
+        hit: 'Hit',
+        incremental: 'Incremental',
+        single_turn: 'Single turn',
+        below_min: 'Below minimum',
+        no_breakpoint: 'No cache breakpoint',
+        new_session: 'New session (cold multi-turn)',
+        state_lost: 'Stateful chain lost',
+        ttl_expired: 'TTL expired',
+        account_switch: 'Account switch',
+        prefix_drift: 'Prefix drift',
+        upstream_miss: 'Upstream miss',
+        unanalyzed: 'Not analyzed'
+      },
+      causeHints: {
+        hit: 'Upstream reported cache-read tokens',
+        incremental: 'Content newly appended in a hit request; it could never hit',
+        single_turn: 'No conversation history, only the system prompt is reusable',
+        below_min: 'Prompt under 1024 tokens; upstream does not cache it',
+        no_breakpoint: 'Request to Claude has no cache_control, so upstream writes no cache',
+        new_session: 'Multi-turn, but this history never passed through here before',
+        state_lost: 'previous_response_id points to a turn outside the observed window',
+        ttl_expired: 'Prefix seen before, but longer ago than the upstream cache lifetime',
+        account_switch: 'Prefix was last served by another account',
+        prefix_drift: 'Earlier content of the same session changed (timestamps, tool order…)',
+        upstream_miss: 'Same account, same prefix, within TTL, still missed: upstream issue',
+        unanalyzed: 'Traffic whose body was not analyzed (WebSocket, oversized bodies…)'
+      }
+    },
     alertScopeHint: 'Only alert events matching the current account and group filters are shown (alerts are not per user).',
     loadFailed: 'Failed to load account monitoring data'
   }

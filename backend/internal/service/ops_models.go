@@ -51,6 +51,9 @@ type OpsErrorLog struct {
 	ClientRequestID string `json:"client_request_id"`
 	RequestID       string `json:"request_id"`
 	Message         string `json:"message"`
+	// RouterRequestID / RouterUserID：前置 TeamoRouter 声明的 request_id 和终端用户 uid。
+	RouterRequestID string `json:"router_request_id,omitempty"`
+	RouterUserID    string `json:"router_user_id,omitempty"`
 
 	UserID      *int64 `json:"user_id"`
 	UserEmail   string `json:"user_email"`
@@ -121,6 +124,10 @@ type OpsErrorLogFilter struct {
 	// Optional correlation keys for exact matching.
 	RequestID       string
 	ClientRequestID string
+	// RouterUserID 精确匹配 router 声明的终端用户 uid。
+	RouterUserID string
+	// AnyAccountID 匹配最终账号或任意一跳上游尝试（upstream_errors[].account_id）用过的账号。
+	AnyAccountID *int64
 
 	// User-scoped filters (used by the user-facing error requests endpoint and
 	// by admin drill-down from the usage page).

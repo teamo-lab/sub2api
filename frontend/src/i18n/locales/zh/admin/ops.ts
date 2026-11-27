@@ -275,7 +275,9 @@ export default {
         requestType: '类型',
         requestTypeSync: '同步',
         requestTypeStream: '流式',
-        requestTypeWs: 'WS'
+        requestTypeWs: 'WS',
+        routerUserTitle: 'TeamoRouter 终端用户 uid',
+        viaSub2apiUser: '经 {user}'
       },
       // Error Details Modal
       errorDetails: {
@@ -301,7 +303,19 @@ export default {
           internal: '内部'
         },
         total: '总计：',
-        searchPlaceholder: '搜索 request_id / client_request_id / message'
+        searchPlaceholder: '搜索 request_id / router request_id / uid / message',
+        filters: {
+          search: '搜索',
+          statusCode: '状态码',
+          phase: '阶段',
+          owner: '归属方',
+          view: '范围',
+          account: '账号（含换号经过的账号）',
+          allAccounts: '全部账号',
+          searchAccount: '搜索账号名或 ID',
+          routerUser: 'Router 用户 uid',
+          routerUserPlaceholder: 'u-…'
+        }
       },
       // Error Detail Modal
       errorDetail: {
@@ -331,6 +345,26 @@ export default {
           account: '账号',
           status: '状态码',
           requestId: '请求ID'
+        },
+        router: {
+          title: 'TeamoRouter 关联',
+          userId: 'Router 用户 uid',
+          requestId: 'Router request_id',
+          clientRequestId: 'Sub2API client_request_id',
+          clientRequestIdHint: '= router trace 的 sub2apiClientRequestId',
+          sub2apiRequestId: 'Sub2API request_id',
+          finalAccount: '最终上游账号',
+          missing: '这条请求没有带 router 关联头（router 未升级，或不是 router 转来的流量）'
+        },
+        attempts: {
+          title: '上游账号尝试（逐跳）',
+          caption: '按时间顺序列出这次请求在 Sub2API 内换过的上游账号',
+          at: '时间',
+          account: '账号',
+          status: '状态码',
+          upstreamRequestId: '上游请求 ID',
+          kind: '类型',
+          message: '原因'
         },
         responsePreview: {
           expand: '响应内容（点击展开）',

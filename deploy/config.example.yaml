@@ -979,6 +979,18 @@ ops:
   # Other detailed settings (cleanup, aggregation, etc.) are configured in ops settings dialog
   # 其他详细设置（数据清理、预聚合等）在运维监控设置对话框中配置
   enabled: true
+  # Prompt-cache root-cause analysis (account ops page). Request bodies are reduced to hashes only.
+  # 缓存命中根因分析（账号监控页）。请求体只转成哈希，不保存原文。
+  cache_analysis:
+    enabled: true
+    # Fraction of requests analyzed (0-1] / 参与分析的请求比例
+    sample_rate: 1.0
+    # Bodies larger than this are counted as "not analyzed" / 超过此大小的请求体记为未分析
+    max_body_bytes: 8388608
+    # In-process LRU size; Redis keeps state across restarts for l2_ttl (0 disables Redis)
+    # 进程内 LRU 容量；Redis 在 l2_ttl 内跨重启/蓝绿保留会话状态（0 关闭 Redis 层）
+    l1_entries: 200000
+    l2_ttl: 2h
 
 # =============================================================================
 # JWT Configuration

@@ -929,6 +929,9 @@ export interface OpsErrorLog {
   resolved_by_user_id?: number | null
 
   client_request_id: string
+  /** 前置 TeamoRouter 声明的 request_id / 终端用户 uid（router 流量才有） */
+  router_request_id?: string
+  router_user_id?: string
   request_id: string
   message: string
 
@@ -1040,6 +1043,59 @@ export async function getErrorDistribution(
   options: OpsRequestOptions = {}
 ): Promise<OpsErrorDistributionResponse> {
   const { data } = await apiClient.get<OpsErrorDistributionResponse>('/admin/ops/dashboard/error-distribution', {
+    params,
+    signal: options.signal
+  })
+  return data
+}
+
+export type OpsCacheCause =
+  | 'hit'
+  | 'incremental'
+  | 'single_turn'
+  | 'below_min'
+  | 'no_breakpoint'
+  | 'new_session'
+  | 'state_lost'
+  | 'ttl_expired'
+  | 'account_switch'
+  | 'prefix_drift'
+  | 'upstream_miss'
+  | 'unanalyzed'
+
+export interface OpsCacheAnalysisCauseStat {
+  cause: OpsCacheCause
+  requests: number
+  tokens: number
+}
+
+export interface OpsCacheAnalysisAccountStat {
+  account_id: number
+  account_name: string
+  prompt_tokens: number
+  hit_tokens: number
+  causes: OpsCacheAnalysisCauseStat[]
+}
+
+export interface OpsCacheAnalysisResponse {
+  start_time: string
+  end_time: string
+  requests: number
+  prompt_tokens: number
+  hit_tokens: number
+  uncached_tokens: number
+  saved_usd: number
+  hit_rate: number | null
+  reusable_hit_rate: number | null
+  causes: OpsCacheAnalysisCauseStat[]
+  accounts: OpsCacheAnalysisAccountStat[] | null
+}
+
+export async function getCacheAnalysis(
+  params: OpsDashboardFilterParams,
+  options: OpsRequestOptions = {}
+): Promise<OpsCacheAnalysisResponse> {
+  const { data } = await apiClient.get<OpsCacheAnalysisResponse>('/admin/ops/dashboard/cache-analysis', {
     params,
     signal: options.signal
   })
@@ -1349,6 +1405,7 @@ export const opsAPI = {
   getLatencyHistogram,
   getErrorTrend,
   getErrorDistribution,
+  getCacheAnalysis,
   getDashboardModels,
   getDashboardAccountBreakdown,
   getOpenAITokenStats,

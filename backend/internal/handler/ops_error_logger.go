@@ -400,7 +400,7 @@ func estimateOpsErrorLogJobBytes(entry *service.OpsInsertErrorLogInput) int64 {
 		return 1
 	}
 	const fixedOverhead = 512
-	size := fixedOverhead + len(entry.RequestID) + len(entry.ClientRequestID) +
+	size := fixedOverhead + len(entry.RequestID) + len(entry.ClientRequestID) + len(entry.RouterRequestID) + len(entry.RouterUserID) +
 		len(entry.Platform) + len(entry.Model) + len(entry.RequestPath) +
 		len(entry.InboundEndpoint) + len(entry.UpstreamEndpoint) +
 		len(entry.RequestedModel) + len(entry.UpstreamModel) + len(entry.UserAgent) +
@@ -1200,6 +1200,8 @@ func OpsErrorLoggerMiddleware(ops *service.OpsService) gin.HandlerFunc {
 		entry := &service.OpsInsertErrorLogInput{
 			RequestID:       requestID,
 			ClientRequestID: clientRequestID,
+			RouterRequestID: opsContextString(c, ctxkey.RouterRequestID),
+			RouterUserID:    opsContextString(c, ctxkey.RouterUserID),
 
 			AccountID: accountID,
 			Platform:  platform,
@@ -1356,6 +1358,8 @@ func logOpsRecoveredUpstream(c *gin.Context, ops *service.OpsService, finalStatu
 			entry.RequestID, _ = c.Request.Context().Value(ctxkey.RequestID).(string)
 		}
 	}
+	entry.RouterRequestID = opsContextString(c, ctxkey.RouterRequestID)
+	entry.RouterUserID = opsContextString(c, ctxkey.RouterUserID)
 	entry.RequestID = strings.TrimSpace(entry.RequestID)
 	if entry.RequestID == "" {
 		entry.RequestID = c.Writer.Header().Get("X-Request-Id")
@@ -1393,6 +1397,15 @@ func logOpsRecoveredUpstream(c *gin.Context, ops *service.OpsService, finalStatu
 	}
 	applyOpsLatencyFieldsFromContext(c, entry)
 	enqueueOpsErrorLog(ops, entry)
+}
+
+// opsContextString 读 request context 里的字符串值（router 关联 ID 等），读不到返回空串。
+func opsContextString(c *gin.Context, key ctxkey.Key) string {
+	if c == nil || c.Request == nil {
+		return ""
+	}
+	value, _ := c.Request.Context().Value(key).(string)
+	return strings.TrimSpace(value)
 }
 
 func opsRequestTypeFromContext(c *gin.Context) *int16 {
@@ -1484,6 +1497,8 @@ func logOpsStreamErrorValue(c *gin.Context, ops *service.OpsService, wireStatus 
 	entry := &service.OpsInsertErrorLogInput{
 		RequestID:       requestID,
 		ClientRequestID: clientRequestID,
+		RouterRequestID: opsContextString(c, ctxkey.RouterRequestID),
+		RouterUserID:    opsContextString(c, ctxkey.RouterUserID),
 
 		AccountID: accountID,
 		Platform:  platform,

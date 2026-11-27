@@ -1824,6 +1824,53 @@ type OpsConfig struct {
 
 	// Pre-aggregation configuration.
 	Aggregation OpsAggregationConfig `mapstructure:"aggregation"`
+
+	// CacheAnalysis 控制缓存命中根因分析（请求体转 IR、按前缀归因未命中原因）。
+	CacheAnalysis OpsCacheAnalysisConfig `mapstructure:"cache_analysis"`
+}
+
+// OpsCacheAnalysisConfig 配置缓存命中根因分析。零值字段由 WithDefaults 补齐。
+type OpsCacheAnalysisConfig struct {
+	Enabled bool `mapstructure:"enabled"`
+	// SampleRate 是参与分析的请求比例（0–1]；1 表示全量。
+	SampleRate float64 `mapstructure:"sample_rate"`
+	// MaxBodyBytes 超过这个大小的请求体不分析（记为 unanalyzed），避免大请求占 CPU。
+	MaxBodyBytes int64 `mapstructure:"max_body_bytes"`
+	// L1Entries 是进程内前缀 LRU 的容量（会话表和 response 状态表各取四分之一）。
+	L1Entries int `mapstructure:"l1_entries"`
+	// L2TTL 是 Redis 里前缀/会话/状态的保留时长；0 关闭 L2。
+	L2TTL time.Duration `mapstructure:"l2_ttl"`
+	// L2Timeout 是单次 Redis 查找的超时。
+	L2Timeout     time.Duration `mapstructure:"l2_timeout"`
+	Workers       int           `mapstructure:"workers"`
+	QueueSize     int           `mapstructure:"queue_size"`
+	FlushInterval time.Duration `mapstructure:"flush_interval"`
+}
+
+// WithDefaults 返回补齐默认值后的配置。
+func (c OpsCacheAnalysisConfig) WithDefaults() OpsCacheAnalysisConfig {
+	if c.SampleRate <= 0 || c.SampleRate > 1 {
+		c.SampleRate = 1
+	}
+	if c.MaxBodyBytes <= 0 {
+		c.MaxBodyBytes = 8 << 20
+	}
+	if c.L1Entries <= 0 {
+		c.L1Entries = 200_000
+	}
+	if c.L2Timeout <= 0 {
+		c.L2Timeout = 50 * time.Millisecond
+	}
+	if c.Workers <= 0 {
+		c.Workers = 2
+	}
+	if c.QueueSize <= 0 {
+		c.QueueSize = 8192
+	}
+	if c.FlushInterval <= 0 {
+		c.FlushInterval = 30 * time.Second
+	}
+	return c
 }
 
 type OpsCleanupConfig struct {
@@ -2495,6 +2542,11 @@ func setDefaults() {
 	viper.SetDefault("ops.cleanup.minute_metrics_retention_days", 30)
 	viper.SetDefault("ops.cleanup.hourly_metrics_retention_days", 30)
 	viper.SetDefault("ops.aggregation.enabled", true)
+	viper.SetDefault("ops.cache_analysis.enabled", true)
+	viper.SetDefault("ops.cache_analysis.sample_rate", 1.0)
+	viper.SetDefault("ops.cache_analysis.max_body_bytes", 8<<20)
+	viper.SetDefault("ops.cache_analysis.l1_entries", 200000)
+	viper.SetDefault("ops.cache_analysis.l2_ttl", "2h")
 	viper.SetDefault("ops.metrics_collector_cache.enabled", true)
 	// TTL should be slightly larger than collection interval (1m) to maximize cross-replica cache hits.
 	viper.SetDefault("ops.metrics_collector_cache.ttl", 65*time.Second)

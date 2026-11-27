@@ -65,7 +65,11 @@
         </template>
 
         <template #cell-user="{ row }">
-          <div v-if="row.user_id" class="text-sm">
+          <div v-if="row.router_user_id" class="text-sm">
+            <span class="font-mono font-medium text-gray-900 dark:text-white" :title="t('admin.ops.errorLog.routerUserTitle')">{{ row.router_user_id }}</span>
+            <div v-if="row.user_email" class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.ops.errorLog.viaSub2apiUser', { user: row.user_email }) }}</div>
+          </div>
+          <div v-else-if="row.user_id" class="text-sm">
             <button
               v-if="userClickable && row.user_email"
               class="font-medium text-primary-600 underline decoration-dashed underline-offset-2 transition-colors hover:text-primary-700 dark:text-primary-400 dark:hover:text-primary-300"
@@ -96,7 +100,10 @@
             v-if="row.account_id"
             class="text-sm text-gray-900 dark:text-white"
             :title="t('admin.ops.errorLog.accountId') + ' ' + row.account_id"
-          >{{ row.account_name || '#' + row.account_id }}</span>
+          >
+            <span class="font-mono text-gray-500 dark:text-gray-400">#{{ row.account_id }}</span>
+            {{ row.account_name }}
+          </span>
           <span v-else class="text-sm text-gray-400 dark:text-gray-500">-</span>
         </template>
 
