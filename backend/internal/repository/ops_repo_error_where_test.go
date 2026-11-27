@@ -46,3 +46,35 @@ func TestBuildOpsErrorLogsWhere_UserQueryUsesExistsSubquery(t *testing.T) {
 		t.Fatalf("where should include EXISTS user email condition: %s", where)
 	}
 }
+
+func TestBuildOpsErrorLogsWhere_RouterCorrelationFilters(t *testing.T) {
+	accountID := int64(1150)
+	filter := &service.OpsErrorLogFilter{
+		RouterUserID: "u-2fb74c8f6df14d4d891d8d5bce273bff",
+		AnyAccountID: &accountID,
+		Query:        "7dca1e02",
+	}
+
+	where, args := buildOpsErrorLogsWhere(filter)
+	if !strings.Contains(where, "e.router_user_id = $") {
+		t.Fatalf("where should filter router_user_id exactly: %s", where)
+	}
+	if !strings.Contains(where, "e.account_id = $") || !strings.Contains(where, "e.upstream_errors") {
+		t.Fatalf("any_account_id should match final account or any upstream hop: %s", where)
+	}
+	if !strings.Contains(where, "e.router_request_id ILIKE $") || !strings.Contains(where, "e.router_user_id ILIKE $") {
+		t.Fatalf("q should search router ids: %s", where)
+	}
+	foundUID, foundAccount := false, false
+	for _, arg := range args {
+		if arg == "u-2fb74c8f6df14d4d891d8d5bce273bff" {
+			foundUID = true
+		}
+		if v, ok := arg.(int64); ok && v == accountID {
+			foundAccount = true
+		}
+	}
+	if !foundUID || !foundAccount {
+		t.Fatalf("args missing router uid or account: %#v", args)
+	}
+}

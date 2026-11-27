@@ -75,6 +75,10 @@ type OpsRepository interface {
 type OpsInsertErrorLogInput struct {
 	RequestID       string
 	ClientRequestID string
+	// RouterRequestID / RouterUserID 是前置 TeamoRouter 声明的 request_id 与终端用户 uid，
+	// 只用于把这条错误对回 router trace；调用方没带时为空。
+	RouterRequestID string
+	RouterUserID    string
 
 	UserID    *int64
 	APIKeyID  *int64

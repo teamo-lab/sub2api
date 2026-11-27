@@ -26,6 +26,13 @@ const (
 	// ClientRequestID 客户端请求的唯一标识，用于追踪请求全生命周期（用于 Ops 监控与排障）。
 	ClientRequestID Key = "ctx_client_request_id"
 
+	// RouterRequestID 是前置 TeamoRouter 声明的 router request_id（X-Teamo-Router-Request-Id），
+	// 只用于 Ops 排障时把 Sub2API 的记录对回 router trace，不参与鉴权或选路。
+	RouterRequestID Key = "ctx_router_request_id"
+
+	// RouterUserID 是前置 TeamoRouter 声明的终端用户 uid（X-Teamo-Router-User-Id），同上只做关联展示。
+	RouterUserID Key = "ctx_router_user_id"
+
 	// Model 请求模型标识（用于统一请求链路日志字段）。
 	Model Key = "ctx_model"
 

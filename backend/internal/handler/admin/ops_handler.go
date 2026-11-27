@@ -153,6 +153,9 @@ func (h *OpsHandler) GetErrorLogs(c *gin.Context) {
 		}
 		filter.AccountID = &id
 	}
+	if !parseOpsErrorCorrelationFilters(c, filter) {
+		return
+	}
 
 	if v := strings.TrimSpace(c.Query("user_id")); v != "" {
 		id, err := strconv.ParseInt(v, 10, 64)
@@ -281,6 +284,9 @@ func (h *OpsHandler) ListRequestErrors(c *gin.Context) {
 			return
 		}
 		filter.AccountID = &id
+	}
+	if !parseOpsErrorCorrelationFilters(c, filter) {
+		return
 	}
 	if v := strings.TrimSpace(c.Query("user_id")); v != "" {
 		id, err := strconv.ParseInt(v, 10, 64)
@@ -503,6 +509,9 @@ func (h *OpsHandler) ListUpstreamErrors(c *gin.Context) {
 			return
 		}
 		filter.AccountID = &id
+	}
+	if !parseOpsErrorCorrelationFilters(c, filter) {
+		return
 	}
 	if v := strings.TrimSpace(c.Query("user_id")); v != "" {
 		id, err := strconv.ParseInt(v, 10, 64)
@@ -789,4 +798,28 @@ func parseOpsDuration(v string) (time.Duration, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// parseOpsErrorCorrelationFilters 解析错误列表的关联筛选：
+//   - any_account_id：最终账号或任意一跳上游尝试用过该账号；
+//   - router_user_id：前置 TeamoRouter 声明的终端用户 uid（精确匹配）。
+//
+// 参数非法时写 400 并返回 false。
+func parseOpsErrorCorrelationFilters(c *gin.Context, filter *service.OpsErrorLogFilter) bool {
+	if v := strings.TrimSpace(c.Query("any_account_id")); v != "" {
+		id, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || id <= 0 {
+			response.BadRequest(c, "Invalid any_account_id")
+			return false
+		}
+		filter.AnyAccountID = &id
+	}
+	if v := strings.TrimSpace(c.Query("router_user_id")); v != "" {
+		if len(v) > 64 {
+			response.BadRequest(c, "Invalid router_user_id")
+			return false
+		}
+		filter.RouterUserID = v
+	}
+	return true
 }
