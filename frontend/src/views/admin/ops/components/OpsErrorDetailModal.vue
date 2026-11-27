@@ -168,12 +168,12 @@
             </caption>
             <thead class="text-gray-400">
               <tr>
-                <th scope="col" class="py-1 pr-3 font-bold">#</th>
-                <th scope="col" class="py-1 pr-3 font-bold">{{ t('admin.ops.errorDetail.attempts.at') }}</th>
-                <th scope="col" class="py-1 pr-3 font-bold">{{ t('admin.ops.errorDetail.attempts.account') }}</th>
-                <th scope="col" class="py-1 pr-3 font-bold">{{ t('admin.ops.errorDetail.attempts.status') }}</th>
-                <th scope="col" class="py-1 pr-3 font-bold">{{ t('admin.ops.errorDetail.attempts.upstreamRequestId') }}</th>
-                <th scope="col" class="py-1 pr-3 font-bold">{{ t('admin.ops.errorDetail.attempts.kind') }}</th>
+                <th scope="col" class="whitespace-nowrap py-1 pr-3 font-bold">#</th>
+                <th scope="col" class="whitespace-nowrap py-1 pr-3 font-bold">{{ t('admin.ops.errorDetail.attempts.at') }}</th>
+                <th scope="col" class="whitespace-nowrap py-1 pr-3 font-bold">{{ t('admin.ops.errorDetail.attempts.account') }}</th>
+                <th scope="col" class="whitespace-nowrap py-1 pr-3 font-bold">{{ t('admin.ops.errorDetail.attempts.status') }}</th>
+                <th scope="col" class="whitespace-nowrap py-1 pr-3 font-bold">{{ t('admin.ops.errorDetail.attempts.upstreamRequestId') }}</th>
+                <th scope="col" class="whitespace-nowrap py-1 pr-3 font-bold">{{ t('admin.ops.errorDetail.attempts.kind') }}</th>
                 <th scope="col" class="py-1 font-bold">{{ t('admin.ops.errorDetail.attempts.message') }}</th>
               </tr>
             </thead>
