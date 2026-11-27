@@ -59,6 +59,7 @@ func TestProvideCleanup_WithMinimalDependencies_NoPanic(t *testing.T) {
 		&service.OpsCleanupService{},
 		&service.OpsScheduledReportService{},
 		opsSystemLogSinkSvc,
+		service.NewOpsCacheAnalyzer(config.OpsCacheAnalysisConfig{}, nil, nil), // opsCacheAnalyzer（未 Start 也必须能 Stop）
 		nil, // opsService
 		nil, // opsIngressRejectAggregator
 		nil, // apiKeyService

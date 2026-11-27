@@ -386,6 +386,8 @@ func (s *OpsCleanupService) runCleanupOnce(ctx context.Context) (opsCleanupDelet
 		// contract depends on 5m=14d and hourly=90d independently of legacy UI settings.
 		{int(opsModel5mRetention / (24 * time.Hour)), "ops_model_metrics_5m", "bucket_start", false, &out.model5mPreagg},
 		{int(opsModelHourlyRetention / (24 * time.Hour)), "ops_model_metrics_hourly", "bucket_start", false, &out.modelHourlyPreagg},
+		// 缓存命中根因分析与模型 5 分钟聚合同样保留 14 天。
+		{int(opsModel5mRetention / (24 * time.Hour)), "ops_cache_analysis_5m", "bucket_start", false, &out.cacheAnalysis},
 	}
 
 	for _, t := range targets {

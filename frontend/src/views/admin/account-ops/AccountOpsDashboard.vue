@@ -105,7 +105,7 @@
           {{ errorMessage }}
         </div>
 
-        <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+        <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
           <button
             v-for="metric in metrics"
             :key="metric.key"
@@ -123,6 +123,14 @@
             </div>
           </button>
         </div>
+
+        <AccountCacheAnalysisPanel
+          ref="cachePanel"
+          :data="cacheAnalysis"
+          :loading="loading"
+          :error-message="cacheAnalysisError"
+          @select-account="drillIntoAccount"
+        />
 
         <div class="h-[380px]">
           <OpsThroughputTrendChart
@@ -257,9 +265,9 @@ import Icon from '@/components/icons/Icon.vue'
 import TokenUsageTrend from '@/components/charts/TokenUsageTrend.vue'
 import TrendLineChartCard, { type TrendLineSeries } from '@/components/charts/TrendLineChartCard.vue'
 import { adminAPI } from '@/api'
-import { opsAPI, type OpsDashboardFilterParams, type OpsDashboardSnapshotV2Response, type OpsErrorDistributionResponse } from '@/api/admin/ops'
+import { opsAPI, type OpsCacheAnalysisResponse, type OpsDashboardFilterParams, type OpsDashboardSnapshotV2Response, type OpsErrorDistributionResponse } from '@/api/admin/ops'
 import type { AccountListItem, AdminUser, TrendDataPoint } from '@/types'
-import { formatNumber } from '@/utils/format'
+import { formatCurrency, formatNumber } from '@/utils/format'
 import OpsThroughputTrendChart from '@/views/admin/ops/components/OpsThroughputTrendChart.vue'
 import OpsErrorDistributionChart from '@/views/admin/ops/components/OpsErrorDistributionChart.vue'
 import OpsErrorTrendChart from '@/views/admin/ops/components/OpsErrorTrendChart.vue'
@@ -268,6 +276,7 @@ import OpsErrorDetailsModal from '@/views/admin/ops/components/OpsErrorDetailsMo
 import OpsErrorDetailModal from '@/views/admin/ops/components/OpsErrorDetailModal.vue'
 import OpsRequestDetailsModal, { type OpsRequestDetailsPreset } from '@/views/admin/ops/components/OpsRequestDetailsModal.vue'
 import AccountSlaBreakdownDialog from './components/AccountSlaBreakdownDialog.vue'
+import AccountCacheAnalysisPanel from './components/AccountCacheAnalysisPanel.vue'
 
 type TimeRange = '5m' | '30m' | '1h' | '6h' | '24h' | 'custom'
 type GroupOption = { id: number; name: string; platform: string }
@@ -294,6 +303,9 @@ const groups = ref<GroupOption[]>([])
 const models = ref<string[]>([])
 const snapshot = ref<OpsDashboardSnapshotV2Response | null>(null)
 const errorDistribution = ref<OpsErrorDistributionResponse | null>(null)
+const cacheAnalysis = ref<OpsCacheAnalysisResponse | null>(null)
+const cacheAnalysisError = ref('')
+const cachePanel = ref<InstanceType<typeof AccountCacheAnalysisPanel> | null>(null)
 const loading = ref(false)
 const errorMessage = ref('')
 const lastUpdated = ref<Date | null>(null)
@@ -400,6 +412,18 @@ const metrics = computed(() => {
     {
       key: 'request-errors', label: t('admin.accountOps.metrics.requestErrors'), value: formatPercent(overview?.error_rate), valueClass: (overview?.error_rate ?? 0) > 0.01 ? 'text-red-500' : 'text-emerald-500',
       detail: t('admin.accountOps.metrics.errors', { count: formatNumber(overview?.error_count_sla ?? 0) }), secondary: '', action: () => openErrorDetails('request')
+    },
+    {
+      key: 'cache', label: t('admin.accountOps.cache.cardLabel'),
+      value: cacheAnalysis.value?.hit_rate != null ? formatPercent(cacheAnalysis.value.hit_rate) : '-',
+      valueClass: 'text-gray-900 dark:text-white',
+      detail: cacheAnalysis.value?.reusable_hit_rate != null
+        ? t('admin.accountOps.cache.reusable', { rate: formatPercent(cacheAnalysis.value.reusable_hit_rate) })
+        : t('admin.accountOps.cache.noData'),
+      secondary: cacheAnalysis.value && cacheAnalysis.value.saved_usd > 0
+        ? t('admin.accountOps.cache.saved', { amount: formatCurrency(cacheAnalysis.value.saved_usd) })
+        : '',
+      action: focusCachePanel
     },
     {
       key: 'duration', label: t('admin.accountOps.metrics.duration'), value: formatMs(overview?.duration?.p99_ms), valueClass: 'text-gray-900 dark:text-white',
@@ -653,6 +677,7 @@ async function refreshAll() {
   if (!hasScope.value) {
     snapshot.value = null
     errorDistribution.value = null
+    cacheAnalysis.value = null
     return
   }
   dashboardController?.abort()
@@ -664,15 +689,23 @@ async function refreshAll() {
   try {
     const params = buildParams()
     if (showAccountBreakdown.value) breakdownParams.value = params
-    const [nextSnapshot, nextDistribution, nextModels] = await Promise.all([
+    // 缓存分析单独兜底：它失败不影响其余看板。
+    const cacheRequest = Promise.resolve()
+      .then(() => opsAPI.getCacheAnalysis(params, { signal: controller.signal }))
+      .then((data) => ({ data, error: '' }))
+      .catch((error: any) => ({ data: null, error: error?.name === 'CanceledError' || error?.name === 'AbortError' ? '' : t('admin.accountOps.cache.loadFailed') }))
+    const [nextSnapshot, nextDistribution, nextModels, nextCache] = await Promise.all([
       opsAPI.getDashboardSnapshotV2(params, { signal: controller.signal }),
       opsAPI.getErrorDistribution(params, { signal: controller.signal }),
-      opsAPI.getDashboardModels(params, { signal: controller.signal })
+      opsAPI.getDashboardModels(params, { signal: controller.signal }),
+      cacheRequest
     ])
     if (sequence !== requestSequence) return
     snapshot.value = nextSnapshot
     errorDistribution.value = nextDistribution
     models.value = nextModels
+    cacheAnalysis.value = nextCache.data
+    cacheAnalysisError.value = nextCache.error
     lastUpdated.value = new Date()
     refreshToken.value += 1
   } catch (error: any) {
@@ -727,6 +760,14 @@ const breakdownScopeLabel = computed(() => {
 function drillIntoAccount(id: number) {
   showAccountBreakdown.value = false
   onAccountChange(id)
+}
+
+// 缓存卡片点击：滚到下方根因面板并把焦点放到它的标题上（键盘用户也能跟过去）。
+function focusCachePanel() {
+  const heading = (cachePanel.value?.$el as HTMLElement | undefined)?.querySelector<HTMLElement>('#account-cache-analysis-title')
+  const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
+  heading?.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' })
+  heading?.focus({ preventScroll: true })
 }
 
 function openErrorDetails(type: 'request' | 'upstream') {

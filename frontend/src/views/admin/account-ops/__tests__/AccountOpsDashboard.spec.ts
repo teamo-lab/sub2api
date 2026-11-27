@@ -10,6 +10,7 @@ const getAccount = vi.fn()
 const getSnapshot = vi.fn()
 const getDistribution = vi.fn()
 const getModels = vi.fn()
+const getCacheAnalysis = vi.fn()
 const listGroups = vi.fn()
 const user = { id: 9, email: 'ka@example.com', username: 'ka' }
 const listUsers = vi.fn()
@@ -41,7 +42,8 @@ vi.mock('@/api/admin/ops', () => ({
   opsAPI: {
     getDashboardSnapshotV2: (...args: unknown[]) => getSnapshot(...args),
     getErrorDistribution: (...args: unknown[]) => getDistribution(...args),
-    getDashboardModels: (...args: unknown[]) => getModels(...args)
+    getDashboardModels: (...args: unknown[]) => getModels(...args),
+    getCacheAnalysis: (...args: unknown[]) => getCacheAnalysis(...args)
   }
 }))
 
@@ -53,6 +55,7 @@ describe('AccountOpsDashboard', () => {
     getSnapshot.mockResolvedValue({ overview: {}, throughput_trend: { points: [] }, error_trend: { points: [] } })
     getDistribution.mockResolvedValue({ total: 0, items: [] })
     getModels.mockResolvedValue(['gpt-5'])
+    getCacheAnalysis.mockResolvedValue(null)
     listGroups.mockResolvedValue([{ id: 7, name: 'premium', platform: 'openai' }])
     listUsers.mockResolvedValue({ items: [user], total: 1 })
     getUser.mockResolvedValue(user)
@@ -355,5 +358,55 @@ describe('AccountOpsDashboard', () => {
     expect(tokenTrend.props('chartHeightClass')).toBe('h-[420px]')
     expect(tokenTrend.element.parentElement?.classList.contains('lg:grid-cols-2')).toBe(false)
     wrapper.unmount()
+  })
+
+  it('shows the cache hit card and passes the analysis to the root-cause panel', async () => {
+    getCacheAnalysis.mockResolvedValue({
+      start_time: '', end_time: '', requests: 10, prompt_tokens: 1000, hit_tokens: 300, uncached_tokens: 700, saved_usd: 1.5,
+      hit_rate: 0.3, reusable_hit_rate: 0.75,
+      causes: [{ cause: 'hit', requests: 2, tokens: 300 }, { cause: 'single_turn', requests: 8, tokens: 700 }],
+      accounts: []
+    })
+    const wrapper = shallowMount(AccountOpsDashboard, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          Select: true, Icon: true, TokenUsageTrend: true, TrendLineChartCard: true, BaseDialog: true,
+          OpsThroughputTrendChart: true, OpsErrorDistributionChart: true, OpsErrorTrendChart: true, OpsAlertEventsCard: true,
+          OpsErrorDetailsModal: true, OpsErrorDetailModal: true, OpsRequestDetailsModal: true, AccountCacheAnalysisPanel: true
+        }
+      }
+    })
+    await flushPromises()
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    await flushPromises()
+
+    expect(getCacheAnalysis).toHaveBeenCalledWith(expect.objectContaining({ account_id: 42, mode: 'raw' }), expect.anything())
+    expect(wrapper.text()).toContain('admin.accountOps.cache.cardLabel')
+    expect(wrapper.text()).toContain('30.00%')
+    const panel = wrapper.findComponent({ name: 'AccountCacheAnalysisPanel' })
+    expect(panel.exists()).toBe(true)
+    expect(panel.props('data')?.hit_rate).toBe(0.3)
+  })
+
+  it('keeps the dashboard working when the cache analysis request fails', async () => {
+    getCacheAnalysis.mockRejectedValue(new Error('boom'))
+    const wrapper = shallowMount(AccountOpsDashboard, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          Select: true, Icon: true, TokenUsageTrend: true, TrendLineChartCard: true, BaseDialog: true,
+          OpsThroughputTrendChart: true, OpsErrorDistributionChart: true, OpsErrorTrendChart: true, OpsAlertEventsCard: true,
+          OpsErrorDetailsModal: true, OpsErrorDetailModal: true, OpsRequestDetailsModal: true, AccountCacheAnalysisPanel: true
+        }
+      }
+    })
+    await flushPromises()
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    await flushPromises()
+
+    expect(getSnapshot).toHaveBeenCalled()
+    expect(wrapper.text()).not.toContain('admin.accountOps.loadFailed')
+    expect(wrapper.findComponent({ name: 'AccountCacheAnalysisPanel' }).props('errorMessage')).toBe('admin.accountOps.cache.loadFailed')
   })
 })

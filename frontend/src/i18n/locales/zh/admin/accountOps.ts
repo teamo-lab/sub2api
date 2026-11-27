@@ -53,6 +53,51 @@ export default {
       ascending: '升序',
       descending: '降序'
     },
+    cache: {
+      cardLabel: '缓存命中率',
+      reusable: '可复用前缀命中 {rate}',
+      saved: '估算省下 {amount}',
+      noData: '暂无数据',
+      title: '缓存未命中根因',
+      summary: '未缓存 {tokens} tokens · 估算省下 {amount}',
+      barLabel: '各原因占 prompt token 的比例',
+      legendTitle: '原因',
+      requests: '{count} 次请求',
+      hint: '按 prompt token 归因：命中部分记「命中」，命中请求里新追加的内容记「增量内容」；未命中请求按顺序判断 低于缓存门槛 → 未打缓存断点 → 有状态会话断链 → 单轮/新会话 → TTL 过期 → 换号 → 前缀漂移 → 上游未命中。可复用前缀命中率 = 命中 ÷（命中 + TTL 过期 + 换号 + 前缀漂移 + 上游未命中）。',
+      accountsTitle: '未命中最多的账号',
+      accountsCaption: '按「该命中却没命中」的 token（TTL 过期、换号、前缀漂移、上游未命中）排序，最多 10 个',
+      accountColumns: { account: '账号', promptTokens: 'Prompt token', hitRate: '命中率', topCauses: '主要未命中原因' },
+      empty: '当前范围还没有分析数据（分析从这次发版之后开始累计）',
+      loadFailed: '缓存分析加载失败',
+      causes: {
+        hit: '命中',
+        incremental: '增量内容',
+        single_turn: '单轮请求',
+        below_min: '低于缓存门槛',
+        no_breakpoint: '未打缓存断点',
+        new_session: '新会话（多轮冷启动）',
+        state_lost: '有状态会话断链',
+        ttl_expired: 'TTL 过期',
+        account_switch: '换号',
+        prefix_drift: '前缀漂移',
+        upstream_miss: '上游未命中',
+        unanalyzed: '未分析'
+      },
+      causeHints: {
+        hit: '上游返回了缓存读取 token',
+        incremental: '命中请求里本轮新追加的内容，本来就不可能命中',
+        single_turn: '请求里没有历史对话，只有系统提示可复用',
+        below_min: 'prompt 不到 1024 token，上游不缓存',
+        no_breakpoint: '发给 Claude 的请求没声明 cache_control，上游不写缓存',
+        new_session: '多轮对话，但这段历史之前没经过这里（冷启动或从别处转来）',
+        state_lost: 'previous_response_id 指向的上一轮不在观测窗口内',
+        ttl_expired: '前缀见过，但距上次已超过上游缓存时长',
+        account_switch: '前缀上次在另一个号上，换号后缓存不在',
+        prefix_drift: '同一会话的早期内容被改了（时间戳、工具顺序等），前缀对不上',
+        upstream_miss: '同号、同前缀、TTL 内仍未命中，问题在上游',
+        unanalyzed: 'WebSocket、超大请求体等没有分析请求体的流量'
+      }
+    },
     alertScopeHint: '仅展示符合当前账号和分组条件的告警事件（告警不区分用户）。',
     loadFailed: '账号监控数据加载失败'
   }
