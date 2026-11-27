@@ -2664,6 +2664,17 @@ func (s *GatewayService) isModelSupportedByAccountWithContext(ctx context.Contex
 
 // isModelSupportedByAccount 根据账户平台检查模型支持（无 context，用于非 Antigravity 平台）
 func (s *GatewayService) isModelSupportedByAccount(account *Account, requestedModel string) bool {
+	return AccountSupportsModel(account, requestedModel)
+}
+
+// AccountSupportsModel 是调度选号时「这个号接不接这个模型」的判定（不含请求上下文）：
+// Antigravity 走映射+默认映射，Bedrock 走模型 ID 解析，OpenAI 透传放行所有模型，
+// Anthropic OAuth 先把短 ID 规范成长 ID，其余平台看 model_mapping（含通配符；没配映射=全放行）。
+// 管理后台账号列表的「按模型筛选」也用它，保证筛出来的号和调度实际会考虑的号一致。
+func AccountSupportsModel(account *Account, requestedModel string) bool {
+	if account == nil {
+		return false
+	}
 	if account.Platform == PlatformAntigravity {
 		if strings.TrimSpace(requestedModel) == "" {
 			return true

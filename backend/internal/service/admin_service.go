@@ -70,7 +70,9 @@ type AdminService interface {
 	ReplaceUserGroup(ctx context.Context, userID, oldGroupID, newGroupID int64) (*ReplaceUserGroupResult, error)
 
 	// Account management
-	ListAccounts(ctx context.Context, page, pageSize int, platform, accountType, status, search string, groupID int64, privacyMode string, sortBy, sortOrder string) ([]Account, int64, error)
+	ListAccounts(ctx context.Context, page, pageSize int, platform, accountType, status, search string, groupID int64, privacyMode, model string, sortBy, sortOrder string) ([]Account, int64, error)
+	// ListAccountMappedModels 返回账号模型映射里出现过的具体模型名（去掉通配符），给账号列表的模型筛选做选项。
+	ListAccountMappedModels(ctx context.Context, platform string) ([]string, error)
 	// ListAccountsForSchedulerScoreFilter 返回符合过滤条件的全部账号（不分页），
 	// 作为账号列表页计算 OpenAI 调度分数的过滤范围池。
 	ListAccountsForSchedulerScoreFilter(ctx context.Context, platform, accountType, status, search string, groupID int64, privacyMode string) ([]Account, error)
@@ -457,6 +459,7 @@ type BulkUpdateAccountFilters struct {
 	Group       string
 	Search      string
 	PrivacyMode string
+	Model       string
 }
 
 // BulkUpdateAccountResult captures the result for a single account update.

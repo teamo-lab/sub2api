@@ -415,6 +415,7 @@ func (s *AccountRepoSuite) TestListWithFilters() {
 		search      string
 		groupID     int64
 		privacyMode string
+		model       string
 		wantCount   int
 		validate    func(accounts []service.Account)
 	}{
@@ -602,6 +603,40 @@ func (s *AccountRepoSuite) TestListWithFilters() {
 				s.ElementsMatch([]string{"privacy-unset", "privacy-empty"}, names)
 			},
 		},
+		{
+			// 按模型筛：精确映射、通配符映射、没配映射（全放行）的号都算支持，映射里没有的号排除。
+			name: "filter_by_model_mapping",
+			setup: func(client *dbent.Client) {
+				mustCreateAccount(s.T(), client, &service.Account{Name: "model-exact", Platform: service.PlatformGemini, Type: service.AccountTypeAPIKey,
+					Credentials: map[string]any{"model_mapping": map[string]any{"gemini-3.8-flash": "gemini-3.8-flash-preview"}}})
+				mustCreateAccount(s.T(), client, &service.Account{Name: "model-wildcard", Platform: service.PlatformGemini, Type: service.AccountTypeAPIKey,
+					Credentials: map[string]any{"model_mapping": map[string]any{"gemini-3.8-*": "gemini-3.8-pro"}}})
+				mustCreateAccount(s.T(), client, &service.Account{Name: "model-other", Platform: service.PlatformGemini, Type: service.AccountTypeAPIKey,
+					Credentials: map[string]any{"model_mapping": map[string]any{"gemini-3.1-pro": "gemini-3.1-pro"}}})
+				mustCreateAccount(s.T(), client, &service.Account{Name: "model-unmapped", Platform: service.PlatformGemini, Type: service.AccountTypeAPIKey,
+					Credentials: map[string]any{"api_key": "k"}})
+			},
+			platform:  service.PlatformGemini,
+			model:     "gemini-3.8-flash",
+			wantCount: 3,
+			validate: func(accounts []service.Account) {
+				names := make([]string, 0, len(accounts))
+				for _, account := range accounts {
+					names = append(names, account.Name)
+				}
+				s.ElementsMatch([]string{"model-exact", "model-wildcard", "model-unmapped"}, names)
+			},
+		},
+		{
+			name: "filter_by_model_no_match",
+			setup: func(client *dbent.Client) {
+				mustCreateAccount(s.T(), client, &service.Account{Name: "only-31", Platform: service.PlatformGemini, Type: service.AccountTypeAPIKey,
+					Credentials: map[string]any{"model_mapping": map[string]any{"gemini-3.1-pro": "gemini-3.1-pro"}}})
+			},
+			platform:  service.PlatformGemini,
+			model:     "gemini-3.8-flash",
+			wantCount: 0,
+		},
 	}
 
 	for _, tt := range tests {
@@ -614,7 +649,7 @@ func (s *AccountRepoSuite) TestListWithFilters() {
 
 			tt.setup(client)
 
-			accounts, page, err := repo.ListWithFilters(ctx, pagination.PaginationParams{Page: 1, PageSize: 10}, tt.platform, tt.accType, tt.status, tt.search, tt.groupID, tt.privacyMode)
+			accounts, page, err := repo.ListWithFilters(ctx, pagination.PaginationParams{Page: 1, PageSize: 10}, tt.platform, tt.accType, tt.status, tt.search, tt.groupID, tt.privacyMode, tt.model)
 			s.Require().NoError(err)
 			s.Require().Len(accounts, tt.wantCount)
 			// Regression guard for issue #3601: when the whole result set fits on a single page,
@@ -686,7 +721,7 @@ func (s *AccountRepoSuite) TestPreload_And_VirtualFields() {
 	s.Require().Len(got.Groups, 1, "expected Groups to be populated")
 	s.Require().Equal(group.ID, got.Groups[0].ID)
 
-	accounts, page, err := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 10}, "", "", "", "acc", 0, "")
+	accounts, page, err := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 10}, "", "", "", "acc", 0, "", "")
 	s.Require().NoError(err, "ListWithFilters")
 	s.Require().Equal(int64(1), page.Total)
 	s.Require().Len(accounts, 1)

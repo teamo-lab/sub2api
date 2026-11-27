@@ -49,6 +49,7 @@ type accountRepoStubForBulkUpdate struct {
 		search      string
 		groupID     int64
 		privacyMode string
+		model       string
 	}
 }
 
@@ -124,11 +125,11 @@ func (s *accountRepoStubForBulkUpdate) ListByGroup(_ context.Context, groupID in
 	return nil, nil
 }
 
-func (s *accountRepoStubForBulkUpdate) ListAllWithFilters(context.Context, string, string, string, string, int64, string) ([]Account, error) {
+func (s *accountRepoStubForBulkUpdate) ListAllWithFilters(context.Context, string, string, string, string, int64, string, string) ([]Account, error) {
 	return nil, nil
 }
 
-func (s *accountRepoStubForBulkUpdate) ListWithFilters(_ context.Context, params pagination.PaginationParams, platform, accountType, status, search string, groupID int64, privacyMode string) ([]Account, *pagination.PaginationResult, error) {
+func (s *accountRepoStubForBulkUpdate) ListWithFilters(_ context.Context, params pagination.PaginationParams, platform, accountType, status, search string, groupID int64, privacyMode, model string) ([]Account, *pagination.PaginationResult, error) {
 	s.listCalled = true
 	s.lastListParams = params
 	s.lastListFilters.platform = platform
@@ -137,6 +138,7 @@ func (s *accountRepoStubForBulkUpdate) ListWithFilters(_ context.Context, params
 	s.lastListFilters.search = search
 	s.lastListFilters.groupID = groupID
 	s.lastListFilters.privacyMode = privacyMode
+	s.lastListFilters.model = model
 	if s.listErr != nil {
 		return nil, nil, s.listErr
 	}
@@ -302,6 +304,7 @@ func TestAdminServiceBulkUpdateAccounts_ResolvesIDsFromFilters(t *testing.T) {
 	filtersValue.Elem().FieldByName("Group").SetString("12")
 	filtersValue.Elem().FieldByName("PrivacyMode").SetString(PrivacyModeCFBlocked)
 	filtersValue.Elem().FieldByName("Search").SetString("bulk-target")
+	filtersValue.Elem().FieldByName("Model").SetString("gemini-3.8-flash")
 	filtersField.Set(filtersValue)
 
 	result, err := svc.BulkUpdateAccounts(context.Background(), input)
@@ -313,6 +316,7 @@ func TestAdminServiceBulkUpdateAccounts_ResolvesIDsFromFilters(t *testing.T) {
 	require.Equal(t, "bulk-target", repo.lastListFilters.search)
 	require.Equal(t, int64(12), repo.lastListFilters.groupID)
 	require.Equal(t, PrivacyModeCFBlocked, repo.lastListFilters.privacyMode)
+	require.Equal(t, "gemini-3.8-flash", repo.lastListFilters.model, "按模型筛出来的批量编辑只能改筛出来的号")
 	require.Equal(t, []int64{7, 11}, repo.bulkUpdateIDs)
 	require.Equal(t, 2, result.Success)
 	require.Equal(t, 0, result.Failed)

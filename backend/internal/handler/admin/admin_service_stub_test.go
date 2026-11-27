@@ -51,11 +51,14 @@ type stubAdminService struct {
 		search      string
 		groupID     int64
 		privacyMode string
+		model       string
 		sortBy      string
 		sortOrder   string
 		calls       int
 	}
-	lastListUsers struct {
+	mappedModels         []string
+	lastMappedModelsPlat string
+	lastListUsers        struct {
 		page      int
 		pageSize  int
 		filters   service.UserListFilters
@@ -399,7 +402,13 @@ func (s *stubAdminService) BatchSetGroupRPMOverrides(_ context.Context, _ int64,
 	return nil
 }
 
-func (s *stubAdminService) ListAccounts(ctx context.Context, page, pageSize int, platform, accountType, status, search string, groupID int64, privacyMode string, sortBy, sortOrder string) ([]service.Account, int64, error) {
+func (s *stubAdminService) ListAccountMappedModels(_ context.Context, platform string) ([]string, error) {
+	s.lastMappedModelsPlat = platform
+	return s.mappedModels, nil
+}
+
+func (s *stubAdminService) ListAccounts(ctx context.Context, page, pageSize int, platform, accountType, status, search string, groupID int64, privacyMode, model string, sortBy, sortOrder string) ([]service.Account, int64, error) {
+	s.lastListAccounts.model = model
 	s.lastListAccounts.platform = platform
 	s.lastListAccounts.accountType = accountType
 	s.lastListAccounts.status = status

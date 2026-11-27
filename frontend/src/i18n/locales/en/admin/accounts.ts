@@ -318,6 +318,8 @@ export default {
         batchPartial: 'Probe partially completed: {success} succeeded, {failed} failed'
       },
       allPrivacyModes: 'All Privacy States',
+      allModels: 'All Models',
+      modelFilterHint: 'Only accounts whose model mapping supports this model (accounts without a mapping accept every model and are included)',
       privacyUnset: 'Unset',
       privacyTrainingOff: 'Training data sharing disabled',
       privacyCfBlocked: 'Blocked by Cloudflare, training may still be on',

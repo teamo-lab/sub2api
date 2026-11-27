@@ -223,7 +223,7 @@ func TestExportDataPassesAccountFiltersAndSort(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(
 		http.MethodGet,
-		"/api/v1/admin/accounts/data?platform=openai&type=oauth&status=active&group=12&privacy_mode=blocked&search=keyword&sort_by=priority&sort_order=desc",
+		"/api/v1/admin/accounts/data?platform=openai&type=oauth&status=active&group=12&privacy_mode=blocked&model=gemini-3.8-flash&search=keyword&sort_by=priority&sort_order=desc",
 		nil,
 	)
 	router.ServeHTTP(rec, req)
@@ -235,6 +235,7 @@ func TestExportDataPassesAccountFiltersAndSort(t *testing.T) {
 	require.Equal(t, "active", adminSvc.lastListAccounts.status)
 	require.Equal(t, int64(12), adminSvc.lastListAccounts.groupID)
 	require.Equal(t, "blocked", adminSvc.lastListAccounts.privacyMode)
+	require.Equal(t, "gemini-3.8-flash", adminSvc.lastListAccounts.model)
 	require.Equal(t, "keyword", adminSvc.lastListAccounts.search)
 	require.Equal(t, "priority", adminSvc.lastListAccounts.sortBy)
 	require.Equal(t, "desc", adminSvc.lastListAccounts.sortOrder)
@@ -316,4 +317,32 @@ func TestImportDataReusesProxyAndSkipsDefaultGroup(t *testing.T) {
 	require.Len(t, adminSvc.createdProxies, 0)
 	require.Len(t, adminSvc.createdAccounts, 1)
 	require.True(t, adminSvc.createdAccounts[0].SkipDefaultGroupBind)
+}
+
+func TestAccountListPassesModelFilter(t *testing.T) {
+	router, adminSvc := setupAccountDataRouter()
+	h := NewAccountHandler(adminSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	router.GET("/api/v1/admin/accounts", h.List)
+	router.GET("/api/v1/admin/accounts/mapped-models", h.ListMappedModels)
+	adminSvc.accounts = []service.Account{{ID: 1, Name: "acc-1", Status: service.StatusActive}}
+	adminSvc.mappedModels = []string{"gemini-3.1-pro", "gemini-3.8-flash"}
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts?platform=gemini&model=%20gemini-3.8-flash%20", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "gemini", adminSvc.lastListAccounts.platform)
+	require.Equal(t, "gemini-3.8-flash", adminSvc.lastListAccounts.model)
+
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/mapped-models?platform=gemini", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "gemini", adminSvc.lastMappedModelsPlat)
+	var resp struct {
+		Code int `json:"code"`
+		Data struct {
+			Models []string `json:"models"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Equal(t, []string{"gemini-3.1-pro", "gemini-3.8-flash"}, resp.Data.Models)
 }
