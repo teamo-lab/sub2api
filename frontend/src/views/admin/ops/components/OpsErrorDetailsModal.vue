@@ -5,6 +5,8 @@ import BaseDialog from '@/components/common/BaseDialog.vue'
 import Select from '@/components/common/Select.vue'
 import OpsErrorLogTable from './OpsErrorLogTable.vue'
 import { opsAPI, type OpsErrorLog } from '@/api/admin/ops'
+import { adminAPI } from '@/api'
+import type { AccountListItem } from '@/types'
 import { buildOpsErrorTimeParams } from '../utils/opsErrorParams'
 
 interface Props {
@@ -41,6 +43,43 @@ const statusCode = ref<number | 'other' | null>(null)
 const phase = ref<string>('')
 const errorOwner = ref<string>('')
 const viewMode = ref<'errors' | 'excluded' | 'all'>('errors')
+// 列表内的账号筛选：匹配最终账号，或换号过程中任意一跳用过的账号。
+const filterAccountId = ref<number | null>(null)
+const routerUserId = ref('')
+const accountChoices = ref<AccountListItem[]>([])
+const accountChoicesLoading = ref(false)
+let accountSearchController: AbortController | null = null
+
+const accountSelectOptions = computed(() => [
+  { value: null, label: t('admin.ops.errorDetails.filters.allAccounts') },
+  ...accountChoices.value.map((account) => ({ value: account.id, label: `#${account.id} · ${account.name}` }))
+])
+
+async function loadAccountChoices(search = '') {
+  accountSearchController?.abort()
+  const controller = new AbortController()
+  accountSearchController = controller
+  accountChoicesLoading.value = true
+  try {
+    const keyword = search.trim()
+    const [response, byID] = await Promise.all([
+      adminAPI.accounts.list(1, 50, {
+        search: keyword,
+        group: typeof props.groupId === 'number' && props.groupId > 0 ? String(props.groupId) : undefined,
+        lite: 'true'
+      }, { signal: controller.signal }),
+      // 账号搜索只匹配名称；纯数字时再按 ID 精确取一次。
+      /^\d+$/.test(keyword) ? adminAPI.accounts.getById(Number(keyword)).catch(() => null) : Promise.resolve(null)
+    ])
+    if (accountSearchController !== controller) return
+    const items = response.items ?? []
+    accountChoices.value = byID && !items.some((item) => item.id === byID.id) ? [byID as AccountListItem, ...items] : items
+  } catch (err: any) {
+    if (err?.name !== 'CanceledError' && err?.name !== 'AbortError') console.error('[OpsErrorDetailsModal] account search failed', err)
+  } finally {
+    if (accountSearchController === controller) accountChoicesLoading.value = false
+  }
+}
 
 
 const modalTitle = computed(() => {
@@ -135,6 +174,8 @@ async function fetchErrorLogs() {
     if (props.model?.trim()) params.model = props.model.trim()
 
     if (q.value.trim()) params.q = q.value.trim()
+    if (typeof filterAccountId.value === 'number' && filterAccountId.value > 0) params.any_account_id = filterAccountId.value
+    if (routerUserId.value.trim()) params.router_user_id = routerUserId.value.trim()
     if (statusCode.value === 'other') params.status_codes_other = '1'
     else if (typeof statusCode.value === 'number') params.status_codes = String(statusCode.value)
 
@@ -161,6 +202,8 @@ async function fetchErrorLogs() {
 
   function resetFilters() {
     q.value = ''
+    filterAccountId.value = null
+    routerUserId.value = ''
     statusCode.value = null
     phase.value = props.errorType === 'upstream' ? 'upstream' : ''
     errorOwner.value = ''
@@ -178,6 +221,7 @@ watch(
     page.value = 1
     pageSize.value = 10
     resetFilters()
+    if (!accountChoices.value.length) void loadAccountChoices()
   }
 )
 
@@ -200,7 +244,7 @@ watch(
 
 let searchTimeout: number | null = null
 watch(
-  () => q.value,
+  () => [q.value, routerUserId.value] as const,
   () => {
     if (!props.show) return
     if (searchTimeout) window.clearTimeout(searchTimeout)
@@ -212,7 +256,7 @@ watch(
 )
 
 watch(
-  () => [statusCode.value, phase.value, errorOwner.value, viewMode.value] as const,
+  () => [statusCode.value, phase.value, errorOwner.value, viewMode.value, filterAccountId.value] as const,
   () => {
     if (!props.show) return
     page.value = 1
@@ -225,9 +269,10 @@ watch(
   <BaseDialog :show="show" :title="modalTitle" width="full" @close="close">
     <div class="flex h-full min-h-0 flex-col">
       <!-- Filters -->
-      <div class="mb-4 flex-shrink-0 border-b border-gray-200 pb-4 dark:border-dark-700">
-        <div class="grid grid-cols-2 gap-2 md:grid-cols-8">
-          <div class="col-span-2 compact-select">
+      <div role="search" class="mb-4 flex-shrink-0 border-b border-gray-200 pb-4 dark:border-dark-700">
+        <div class="grid grid-cols-2 gap-2 md:grid-cols-6 xl:grid-cols-12">
+          <div class="col-span-2 compact-select xl:col-span-3">
+            <label for="ops-error-q" class="sr-only">{{ t('admin.ops.errorDetails.filters.search') }}</label>
             <div class="relative group">
               <div class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3">
                 <svg
@@ -235,35 +280,66 @@ watch(
                   fill="none"
                   viewBox="0 0 24 24"
                   stroke="currentColor"
+                  aria-hidden="true"
                 >
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
                 </svg>
               </div>
               <input
+                id="ops-error-q"
                 v-model="q"
-                type="text"
+                type="search"
+                name="q"
+                autocomplete="off"
                 class="w-full rounded-lg border-gray-200 bg-gray-50/50 py-1.5 pl-9 pr-3 text-xs font-medium text-gray-700 transition-all focus:border-blue-500 focus:bg-white focus:ring-2 focus:ring-blue-500/10 dark:border-dark-700 dark:bg-dark-900 dark:text-gray-300 dark:focus:bg-dark-800"
                 :placeholder="t('admin.ops.errorDetails.searchPlaceholder')"
               />
             </div>
           </div>
 
-          <div class="compact-select">
-            <Select :model-value="statusCode" :options="statusCodeSelectOptions" @update:model-value="statusCode = $event as any" />
+          <div class="col-span-2 compact-select xl:col-span-2">
+            <label for="ops-error-router-uid" class="sr-only">{{ t('admin.ops.errorDetails.filters.routerUser') }}</label>
+            <input
+              id="ops-error-router-uid"
+              v-model="routerUserId"
+              type="search"
+              name="router_user_id"
+              autocomplete="off"
+              spellcheck="false"
+              class="w-full rounded-lg border-gray-200 bg-gray-50/50 px-3 py-1.5 font-mono text-xs font-medium text-gray-700 transition-all focus:border-blue-500 focus:bg-white focus:ring-2 focus:ring-blue-500/10 dark:border-dark-700 dark:bg-dark-900 dark:text-gray-300 dark:focus:bg-dark-800"
+              :placeholder="`${t('admin.ops.errorDetails.filters.routerUser')} ${t('admin.ops.errorDetails.filters.routerUserPlaceholder')}`"
+            />
+          </div>
+
+          <div class="col-span-2 compact-select xl:col-span-2">
+            <Select
+              id="ops-error-account"
+              :model-value="filterAccountId"
+              :options="accountSelectOptions"
+              :aria-label="t('admin.ops.errorDetails.filters.account')"
+              :search-placeholder="t('admin.ops.errorDetails.filters.searchAccount')"
+              :loading="accountChoicesLoading"
+              searchable
+              remote
+              @search="loadAccountChoices"
+              @update:model-value="filterAccountId = typeof $event === 'number' ? $event : null"
+            />
           </div>
 
           <div class="compact-select">
-            <Select :model-value="phase" :options="phaseSelectOptions" @update:model-value="phase = String($event ?? '')" />
+            <Select :model-value="statusCode" :options="statusCodeSelectOptions" :aria-label="t('admin.ops.errorDetails.filters.statusCode')" @update:model-value="statusCode = $event as any" />
           </div>
 
           <div class="compact-select">
-            <Select :model-value="errorOwner" :options="ownerSelectOptions" @update:model-value="errorOwner = String($event ?? '')" />
+            <Select :model-value="phase" :options="phaseSelectOptions" :aria-label="t('admin.ops.errorDetails.filters.phase')" @update:model-value="phase = String($event ?? '')" />
           </div>
 
-
+          <div class="compact-select">
+            <Select :model-value="errorOwner" :options="ownerSelectOptions" :aria-label="t('admin.ops.errorDetails.filters.owner')" @update:model-value="errorOwner = String($event ?? '')" />
+          </div>
 
           <div class="compact-select">
-            <Select :model-value="viewMode" :options="viewModeSelectOptions" @update:model-value="viewMode = $event as any" />
+            <Select :model-value="viewMode" :options="viewModeSelectOptions" :aria-label="t('admin.ops.errorDetails.filters.view')" @update:model-value="viewMode = $event as any" />
           </div>
 
           <div class="flex items-center justify-end">

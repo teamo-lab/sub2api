@@ -929,6 +929,9 @@ export interface OpsErrorLog {
   resolved_by_user_id?: number | null
 
   client_request_id: string
+  /** 前置 TeamoRouter 声明的 request_id / 终端用户 uid（router 流量才有） */
+  router_request_id?: string
+  router_user_id?: string
   request_id: string
   message: string
 

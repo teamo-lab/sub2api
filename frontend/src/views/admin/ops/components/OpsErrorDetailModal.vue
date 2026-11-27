@@ -125,6 +125,76 @@
 
       </div>
 
+      <section class="rounded-xl border border-gray-200 p-5 dark:border-dark-700" data-testid="error-detail-router">
+        <h3 class="text-sm font-black uppercase tracking-wider text-gray-900 dark:text-white">{{ t('admin.ops.errorDetail.router.title') }}</h3>
+        <p v-if="!detail.router_request_id && !detail.router_user_id" class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+          {{ t('admin.ops.errorDetail.router.missing') }}
+        </p>
+        <dl class="mt-3 grid grid-cols-1 gap-x-6 gap-y-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
+          <div>
+            <dt class="text-xs font-bold text-gray-400">{{ t('admin.ops.errorDetail.router.userId') }}</dt>
+            <dd class="mt-0.5 break-all font-mono text-gray-900 dark:text-white">{{ detail.router_user_id || '—' }}</dd>
+          </div>
+          <div>
+            <dt class="text-xs font-bold text-gray-400">{{ t('admin.ops.errorDetail.router.requestId') }}</dt>
+            <dd class="mt-0.5 break-all font-mono text-gray-900 dark:text-white">{{ detail.router_request_id || '—' }}</dd>
+          </div>
+          <div>
+            <dt class="text-xs font-bold text-gray-400">{{ t('admin.ops.errorDetail.router.finalAccount') }}</dt>
+            <dd class="mt-0.5 text-gray-900 dark:text-white">
+              <template v-if="detail.account_id != null">
+                <span class="font-mono">#{{ detail.account_id }}</span>
+                <span class="ml-1">{{ detail.account_name }}</span>
+              </template>
+              <template v-else>—</template>
+            </dd>
+          </div>
+          <div>
+            <dt class="text-xs font-bold text-gray-400">{{ t('admin.ops.errorDetail.router.clientRequestId') }}</dt>
+            <dd class="mt-0.5 break-all font-mono text-gray-900 dark:text-white">{{ detail.client_request_id || '—' }}</dd>
+            <dd class="text-xs text-gray-400">{{ t('admin.ops.errorDetail.router.clientRequestIdHint') }}</dd>
+          </div>
+          <div>
+            <dt class="text-xs font-bold text-gray-400">{{ t('admin.ops.errorDetail.router.sub2apiRequestId') }}</dt>
+            <dd class="mt-0.5 break-all font-mono text-gray-900 dark:text-white">{{ detail.request_id || '—' }}</dd>
+          </div>
+        </dl>
+
+        <div v-if="upstreamAttempts.length" class="mt-5 overflow-x-auto">
+          <table class="min-w-full text-left text-xs" data-testid="error-detail-attempts">
+            <caption class="pb-2 text-left">
+              <span class="block text-sm font-black uppercase tracking-wider text-gray-900 dark:text-white">{{ t('admin.ops.errorDetail.attempts.title') }}</span>
+              <span class="block text-xs font-normal text-gray-500 dark:text-gray-400">{{ t('admin.ops.errorDetail.attempts.caption') }}</span>
+            </caption>
+            <thead class="text-gray-400">
+              <tr>
+                <th scope="col" class="py-1 pr-3 font-bold">#</th>
+                <th scope="col" class="py-1 pr-3 font-bold">{{ t('admin.ops.errorDetail.attempts.at') }}</th>
+                <th scope="col" class="py-1 pr-3 font-bold">{{ t('admin.ops.errorDetail.attempts.account') }}</th>
+                <th scope="col" class="py-1 pr-3 font-bold">{{ t('admin.ops.errorDetail.attempts.status') }}</th>
+                <th scope="col" class="py-1 pr-3 font-bold">{{ t('admin.ops.errorDetail.attempts.upstreamRequestId') }}</th>
+                <th scope="col" class="py-1 pr-3 font-bold">{{ t('admin.ops.errorDetail.attempts.kind') }}</th>
+                <th scope="col" class="py-1 font-bold">{{ t('admin.ops.errorDetail.attempts.message') }}</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100 text-gray-700 dark:divide-dark-700 dark:text-gray-200">
+              <tr v-for="(attempt, idx) in upstreamAttempts" :key="idx">
+                <td class="py-1.5 pr-3 font-mono">{{ idx + 1 }}</td>
+                <td class="whitespace-nowrap py-1.5 pr-3 font-mono">{{ attempt.at }}</td>
+                <td class="py-1.5 pr-3">
+                  <span v-if="attempt.accountId" class="font-mono">#{{ attempt.accountId }}</span>
+                  <span class="ml-1">{{ attempt.accountName }}</span>
+                </td>
+                <td class="py-1.5 pr-3 font-mono">{{ attempt.status ?? '—' }}</td>
+                <td class="break-all py-1.5 pr-3 font-mono">{{ attempt.upstreamRequestId || '—' }}</td>
+                <td class="py-1.5 pr-3 font-mono">{{ attempt.kind || '—' }}</td>
+                <td class="max-w-[28rem] break-words py-1.5">{{ attempt.message || '—' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       <div v-if="rootCauseMessage" class="rounded-xl bg-amber-50 p-6 dark:bg-amber-900/10">
         <h3 class="text-sm font-black uppercase tracking-wider text-amber-900 dark:text-amber-200">{{ t('admin.ops.errorDetail.rootCause') }}</h3>
         <div class="mt-3 break-words text-sm font-medium text-amber-900 dark:text-amber-100">{{ rootCauseMessage }}</div>
@@ -333,6 +403,43 @@ function displayModel(d: OpsErrorDetail | null): string {
   if (requested) return requested
   return String(d.model || '').trim()
 }
+
+type UpstreamAttempt = {
+  at: string
+  accountId: number | null
+  accountName: string
+  status: number | null
+  upstreamRequestId: string
+  kind: string
+  message: string
+}
+
+// upstream_errors 是 Sub2API 内逐跳换号的 JSON 数组（at_unix_ms / account_id / upstream_request_id …）。
+const upstreamAttempts = computed<UpstreamAttempt[]>(() => {
+  const raw = meaningfulPayload(detail.value?.upstream_errors)
+  if (!raw) return []
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return []
+  }
+  if (!Array.isArray(parsed)) return []
+  return parsed.filter((item): item is Record<string, unknown> => !!item && typeof item === 'object').map((item) => {
+    const atMs = Number(item.at_unix_ms)
+    const accountId = Number(item.account_id)
+    const status = Number(item.upstream_status_code)
+    return {
+      at: Number.isFinite(atMs) && atMs > 0 ? formatDateTime(new Date(atMs).toISOString()) : '—',
+      accountId: Number.isFinite(accountId) && accountId > 0 ? accountId : null,
+      accountName: String(item.account_name ?? ''),
+      status: Number.isFinite(status) && status > 0 ? status : null,
+      upstreamRequestId: String(item.upstream_request_id ?? item.upstream_cf_ray ?? ''),
+      kind: String(item.kind ?? ''),
+      message: String(item.message ?? item.reason ?? '')
+    }
+  })
+})
 
 const correlatedUpstream = ref<OpsErrorDetail[]>([])
 const correlatedUpstreamLoading = ref(false)

@@ -275,7 +275,9 @@ export default {
         requestType: 'Type',
         requestTypeSync: 'Sync',
         requestTypeStream: 'Stream',
-        requestTypeWs: 'WS'
+        requestTypeWs: 'WS',
+        routerUserTitle: 'TeamoRouter end-user uid',
+        viaSub2apiUser: 'via {user}'
       },
       // Error Details Modal
       errorDetails: {
@@ -301,7 +303,19 @@ export default {
           internal: 'Internal'
         },
         total: 'Total:',
-        searchPlaceholder: 'Search request_id / client_request_id / message',
+        searchPlaceholder: 'Search request_id / router request_id / uid / message',
+        filters: {
+          search: 'Search',
+          statusCode: 'Status code',
+          phase: 'Phase',
+          owner: 'Owner',
+          view: 'Scope',
+          account: 'Account (incl. failover hops)',
+          allAccounts: 'All accounts',
+          searchAccount: 'Search account name or ID',
+          routerUser: 'Router user uid',
+          routerUserPlaceholder: 'u-…'
+        }
       },
       // Error Detail Modal
       errorDetail: {
@@ -331,6 +345,26 @@ export default {
           account: 'Account',
           status: 'Status',
           requestId: 'Request ID'
+        },
+        router: {
+          title: 'TeamoRouter correlation',
+          userId: 'Router user uid',
+          requestId: 'Router request_id',
+          clientRequestId: 'Sub2API client_request_id',
+          clientRequestIdHint: '= sub2apiClientRequestId in the router trace',
+          sub2apiRequestId: 'Sub2API request_id',
+          finalAccount: 'Final upstream account',
+          missing: 'No router correlation headers on this request (older router, or not router traffic)'
+        },
+        attempts: {
+          title: 'Upstream account attempts',
+          caption: 'Upstream accounts this request went through inside Sub2API, in order',
+          at: 'Time',
+          account: 'Account',
+          status: 'Status',
+          upstreamRequestId: 'Upstream request ID',
+          kind: 'Kind',
+          message: 'Reason'
         },
         responsePreview: {
           expand: 'Response (click to expand)',

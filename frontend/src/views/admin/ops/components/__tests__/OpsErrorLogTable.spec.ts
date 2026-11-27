@@ -63,6 +63,22 @@ describe('OpsErrorLogTable user/api-key/account columns', () => {
     expect(text).toContain('acct-A') // 账号列
   })
 
+  it('shows the router end-user uid and the account id for router traffic', () => {
+    const wrapper = mountTable({
+      user_id: 1,
+      user_email: 'admin@sub2api.local',
+      router_user_id: 'u-2fb74c8f6df14d4d891d8d5bce273bff',
+      account_id: 1150,
+      account_name: 'hoyorouter gemini-3.8-flash 0.42x',
+    })
+
+    const text = wrapper.text()
+    expect(text).toContain('u-2fb74c8f6df14d4d891d8d5bce273bff')
+    expect(text).toContain('admin.ops.errorLog.viaSub2apiUser')
+    expect(text).toContain('#1150')
+    expect(text).toContain('hoyorouter gemini-3.8-flash 0.42x')
+  })
+
   it('shows the deleted badge for a soft-deleted api key', () => {
     const wrapper = mountTable({
       api_key_id: 5,
