@@ -46,6 +46,7 @@ export async function list(
     group?: string
     search?: string
     privacy_mode?: string
+    model?: string
     lite?: string
     include_scheduler_score?: string
     sort_by?: string
@@ -88,6 +89,7 @@ export async function getUpstreamBillingRatesWithEtag(
     group?: string
     search?: string
     privacy_mode?: string
+    model?: string
     sort_by?: string
     sort_order?: 'asc' | 'desc'
   },
@@ -121,6 +123,7 @@ export async function listWithEtag(
     group?: string
     search?: string
     privacy_mode?: string
+    model?: string
     lite?: string
     include_scheduler_score?: string
     sort_by?: string
@@ -690,6 +693,17 @@ export async function syncFromCrs(params: {
   return data
 }
 
+/**
+ * 账号模型映射里出现过的具体模型名（去掉通配符），作为账号列表「按模型筛选」的选项。
+ * platform 为空时返回全部平台。
+ */
+export async function listMappedModels(platform?: string): Promise<string[]> {
+  const { data } = await apiClient.get<{ models: string[] | null }>('/admin/accounts/mapped-models', {
+    params: platform ? { platform } : {}
+  })
+  return data.models ?? []
+}
+
 export async function exportData(options?: {
   ids?: number[]
   filters?: {
@@ -698,6 +712,7 @@ export async function exportData(options?: {
     status?: string
     group?: string
     privacy_mode?: string
+    model?: string
     search?: string
     sort_by?: string
     sort_order?: 'asc' | 'desc'
@@ -708,12 +723,13 @@ export async function exportData(options?: {
   if (options?.ids && options.ids.length > 0) {
     params.ids = options.ids.join(',')
   } else if (options?.filters) {
-    const { platform, type, status, group, privacy_mode, search, sort_by, sort_order } = options.filters
+    const { platform, type, status, group, privacy_mode, model, search, sort_by, sort_order } = options.filters
     if (platform) params.platform = platform
     if (type) params.type = type
     if (status) params.status = status
     if (group) params.group = group
     if (privacy_mode) params.privacy_mode = privacy_mode
+    if (model) params.model = model
     if (search) params.search = search
     if (sort_by) params.sort_by = sort_by
     if (sort_order) params.sort_order = sort_order
@@ -1048,6 +1064,7 @@ export async function refreshOllamaCloudUsage(id: number): Promise<OllamaCloudUs
 
 export const accountsAPI = {
   list,
+  listMappedModels,
   listWithEtag,
   getUpstreamBillingRatesWithEtag,
   getById,

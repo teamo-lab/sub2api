@@ -181,6 +181,7 @@ type BulkUpdateAccountFilters struct {
 	Group       string `json:"group"`
 	Search      string `json:"search"`
 	PrivacyMode string `json:"privacy_mode"`
+	Model       string `json:"model"`
 }
 
 // CheckMixedChannelRequest represents check mixed channel risk request
@@ -522,6 +523,26 @@ func (h *AccountHandler) listAccountSchedulerScoreFilterPool(
 	return accounts
 }
 
+// parseAccountModelFilter 读账号列表的 model 筛选参数：只留「调度会把这个模型派给它」的号。
+func parseAccountModelFilter(c *gin.Context) string {
+	model := strings.TrimSpace(c.Query("model"))
+	if len(model) > 200 {
+		model = model[:200]
+	}
+	return model
+}
+
+// ListMappedModels 返回账号模型映射里出现过的具体模型名，作为列表页模型筛选的选项。
+// GET /api/v1/admin/accounts/mapped-models?platform=gemini
+func (h *AccountHandler) ListMappedModels(c *gin.Context) {
+	models, err := h.adminService.ListAccountMappedModels(c.Request.Context(), strings.TrimSpace(c.Query("platform")))
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"models": models})
+}
+
 // List handles listing all accounts with pagination
 // GET /api/v1/admin/accounts
 func (h *AccountHandler) List(c *gin.Context) {
@@ -531,6 +552,7 @@ func (h *AccountHandler) List(c *gin.Context) {
 	status := c.Query("status")
 	search := c.Query("search")
 	privacyMode := strings.TrimSpace(c.Query("privacy_mode"))
+	model := parseAccountModelFilter(c)
 	sortBy := c.DefaultQuery("sort_by", "name")
 	sortOrder := c.DefaultQuery("sort_order", "asc")
 	// 标准化和验证 search 参数
@@ -560,7 +582,7 @@ func (h *AccountHandler) List(c *gin.Context) {
 		}
 	}
 
-	accounts, total, err := h.adminService.ListAccounts(c.Request.Context(), page, pageSize, platform, accountType, status, search, groupID, privacyMode, sortBy, sortOrder)
+	accounts, total, err := h.adminService.ListAccounts(c.Request.Context(), page, pageSize, platform, accountType, status, search, groupID, privacyMode, model, sortBy, sortOrder)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -2263,6 +2285,7 @@ func toServiceBulkUpdateAccountFilters(filters *BulkUpdateAccountFilters) *servi
 		Group:       filters.Group,
 		Search:      filters.Search,
 		PrivacyMode: filters.PrivacyMode,
+		Model:       strings.TrimSpace(filters.Model),
 	}
 }
 
@@ -3069,7 +3092,7 @@ func (h *AccountHandler) BatchRefreshTier(c *gin.Context) {
 	accounts := make([]*service.Account, 0)
 
 	if len(req.AccountIDs) == 0 {
-		allAccounts, _, err := h.adminService.ListAccounts(ctx, 1, 10000, "gemini", "oauth", "", "", 0, "", "name", "asc")
+		allAccounts, _, err := h.adminService.ListAccounts(ctx, 1, 10000, "gemini", "oauth", "", "", 0, "", "", "name", "asc")
 		if err != nil {
 			response.ErrorFrom(c, err)
 			return

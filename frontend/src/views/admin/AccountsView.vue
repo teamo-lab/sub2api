@@ -7,6 +7,7 @@
             v-model:searchQuery="params.search"
             :filters="params"
             :groups="groups"
+            :models="mappedModels"
             @update:filters="(newFilters) => Object.assign(params, newFilters)"
             @change="debouncedReload"
             @update:searchQuery="debouncedReload"
@@ -552,6 +553,17 @@ const authStore = useAuthStore()
 
 const proxies = ref<AccountProxy[]>([])
 const groups = ref<AdminGroup[]>([])
+const mappedModels = ref<string[]>([])
+let mappedModelsRequestVersion = 0
+const loadMappedModels = async (platform: string) => {
+  const requestVersion = ++mappedModelsRequestVersion
+  try {
+    const models = await adminAPI.accounts.listMappedModels(platform)
+    if (requestVersion === mappedModelsRequestVersion) mappedModels.value = models
+  } catch (error) {
+    console.error('Failed to load mapped models:', error)
+  }
+}
 const groupsByID = computed(() => new Map(groups.value.map(group => [group.id, group])))
 const accountGroupsForRow = (account: Pick<AccountListItem, 'group_ids'>): AdminGroup[] => {
   const groupIDs = account.group_ids ?? []
@@ -576,6 +588,7 @@ type AccountBulkEditTarget =
         group?: string
         search?: string
         privacy_mode?: string
+        model?: string
         sort_by?: string
         sort_order?: AccountSortOrder
       }
@@ -1097,6 +1110,7 @@ const {
     type: '',
     status: '',
     privacy_mode: '',
+    model: '',
     group: '',
     search: '',
     lite: '1',
@@ -1196,6 +1210,7 @@ const buildUpstreamBillingRateFilters = () => {
     group: typeof rawParams.group === 'string' ? rawParams.group : '',
     search: typeof rawParams.search === 'string' ? rawParams.search : '',
     privacy_mode: typeof rawParams.privacy_mode === 'string' ? rawParams.privacy_mode : '',
+    model: typeof rawParams.model === 'string' ? rawParams.model : '',
     sort_by: sortState.sort_by,
     sort_order: sortState.sort_order
   }
@@ -1340,6 +1355,12 @@ const handleSort = (key: string, order: AccountSortOrder) => {
   load()
 }
 
+// 模型筛选的选项跟着平台筛选走：选了 Gemini 就只列 Gemini 号映射里的模型。
+watch(() => params.platform, (platform, previous) => {
+  if (platform === previous) return
+  loadMappedModels(platform || '')
+})
+
 watch(loading, (isLoading, wasLoading) => {
   if (wasLoading && !isLoading) {
     upstreamBillingNow.value = Date.now()
@@ -1463,6 +1484,7 @@ const refreshAccountsIncrementally = async () => {
         type?: string
         status?: string
         privacy_mode?: string
+        model?: string
         group?: string
         search?: string
         sort_by?: string
@@ -2111,6 +2133,7 @@ const buildBulkEditFilterSnapshot = () => {
     group: typeof rawParams.group === 'string' ? rawParams.group : '',
     search: typeof rawParams.search === 'string' ? rawParams.search : '',
     privacy_mode: typeof rawParams.privacy_mode === 'string' ? rawParams.privacy_mode : '',
+    model: typeof rawParams.model === 'string' ? rawParams.model : '',
     sort_by: typeof rawParams.sort_by === 'string' ? rawParams.sort_by : '',
     sort_order: sortOrder
   }
@@ -2187,6 +2210,7 @@ const buildAccountQueryFilters = () => ({
   status: params.status || '',
   group: params.group || '',
   privacy_mode: params.privacy_mode || '',
+  model: params.model || '',
   search: params.search || '',
   sort_by: sortState.sort_by,
   sort_order: sortState.sort_order
@@ -2232,6 +2256,8 @@ const accountMatchesCurrentFilters = (account: Account) => {
   }
   const search = String(filters.search || '').trim().toLowerCase()
   if (search && !account.name.toLowerCase().includes(search)) return false
+  // 模型筛选的判定（通配符、平台默认映射、透传放行）只在后端做；
+  // 改完映射后是否仍匹配，靠下一次列表刷新校正，这里不在前端重算。
   return true
 }
 const mergeRuntimeFields = (oldAccount: Account, updatedAccount: Account): Account => ({
@@ -2589,6 +2615,7 @@ onMounted(async () => {
 
   load()
   loadUpstreamBillingProbeGlobalState()
+  loadMappedModels(params.platform || '')
   const [proxiesResult, groupsResult] = await Promise.allSettled([
     adminAPI.proxies.getAllWithCount(),
     adminAPI.groups.getAll()

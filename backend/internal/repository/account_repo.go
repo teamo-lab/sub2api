@@ -914,7 +914,7 @@ func (r *accountRepository) Delete(ctx context.Context, id int64) error {
 }
 
 func (r *accountRepository) List(ctx context.Context, params pagination.PaginationParams) ([]service.Account, *pagination.PaginationResult, error) {
-	return r.ListWithFilters(ctx, params, "", "", "", "", 0, "")
+	return r.ListWithFilters(ctx, params, "", "", "", "", 0, "", "")
 }
 
 func (r *accountRepository) accountListFilteredQuery(platform, accountType, status, search string, groupID int64, privacyMode string) *dbent.AccountQuery {
@@ -1013,8 +1013,33 @@ func (r *accountRepository) accountListFilteredQuery(platform, accountType, stat
 	return q
 }
 
-func (r *accountRepository) ListWithFilters(ctx context.Context, params pagination.PaginationParams, platform, accountType, status, search string, groupID int64, privacyMode string) ([]service.Account, *pagination.PaginationResult, error) {
-	q := r.accountListFilteredQuery(platform, accountType, status, search, groupID, privacyMode)
+// applyAccountModelFilter 把列表收窄到「调度会把这个模型派给它」的号。
+// 映射有通配符、平台默认映射、透传放行等规则，SQL 表达不了，所以先按其余
+// 条件取出候选号在内存里判定，再用 id IN (...) 收窄，计数/排序/分页仍走 SQL。
+func (r *accountRepository) applyAccountModelFilter(ctx context.Context, q *dbent.AccountQuery, model string) (*dbent.AccountQuery, error) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return q, nil
+	}
+	candidates, err := q.Clone().All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]int64, 0, len(candidates))
+	for _, candidate := range candidates {
+		if service.AccountSupportsModel(accountEntityToService(candidate), model) {
+			ids = append(ids, candidate.ID)
+		}
+	}
+	// ids 为空时 IDIn() 生成 FALSE，结果为空列表。
+	return q.Where(dbaccount.IDIn(ids...)), nil
+}
+
+func (r *accountRepository) ListWithFilters(ctx context.Context, params pagination.PaginationParams, platform, accountType, status, search string, groupID int64, privacyMode, model string) ([]service.Account, *pagination.PaginationResult, error) {
+	q, err := r.applyAccountModelFilter(ctx, r.accountListFilteredQuery(platform, accountType, status, search, groupID, privacyMode), model)
+	if err != nil {
+		return nil, nil, err
+	}
 	// Clone before Count so interceptor-appended predicates (SoftDeleteMixin's
 	// deleted_at IS NULL) don't accumulate on the shared builder and pollute the
 	// subsequent list query. Same pattern used in group_repo/promo_code_repo/user_repo
@@ -1043,8 +1068,12 @@ func (r *accountRepository) ListWithFilters(ctx context.Context, params paginati
 	return outAccounts, paginationResultFromTotal(int64(total), params), nil
 }
 
-func (r *accountRepository) ListAllWithFilters(ctx context.Context, platform, accountType, status, search string, groupID int64, privacyMode string) ([]service.Account, error) {
-	accounts, err := r.accountListFilteredQuery(platform, accountType, status, search, groupID, privacyMode).All(ctx)
+func (r *accountRepository) ListAllWithFilters(ctx context.Context, platform, accountType, status, search string, groupID int64, privacyMode, model string) ([]service.Account, error) {
+	q, err := r.applyAccountModelFilter(ctx, r.accountListFilteredQuery(platform, accountType, status, search, groupID, privacyMode), model)
+	if err != nil {
+		return nil, err
+	}
+	accounts, err := q.All(ctx)
 	if err != nil {
 		return nil, err
 	}
