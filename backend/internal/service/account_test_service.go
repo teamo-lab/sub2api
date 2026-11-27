@@ -2283,7 +2283,13 @@ func (s *AccountTestService) testGeminiAccountConnection(c *gin.Context, account
 		proxyURL = account.Proxy.URL()
 	}
 
-	resp, err := s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+	var resp *http.Response
+	if account.IsGeminiOpenAIChatUpstream() {
+		// 上游只认 OpenAI Chat：和网关同一套转换，测试结果才代表真实转发。
+		resp, err = doGeminiViaOpenAIChat(s.httpUpstream, req, proxyURL, account)
+	} else {
+		resp, err = s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+	}
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Request failed: %s", err.Error()))
 	}

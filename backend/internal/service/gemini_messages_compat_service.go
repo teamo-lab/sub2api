@@ -808,7 +808,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 		attemptCtx, watchdog = newGeminiUpstreamWatchdog(upstreamReq.Context(), s.geminiStreamFirstByteTimeout(useUpstreamStream), s.geminiStreamIdleTimeout(useUpstreamStream))
 		upstreamReq = upstreamReq.WithContext(attemptCtx)
 
-		resp, err = s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+		resp, err = s.doGeminiUpstream(upstreamReq, proxyURL, account)
 		// 收到响应头（或出错）之后 Transport 不会再重放这个请求，放掉请求体，流式期间不再占内存。
 		releaseGeminiUpstreamRequestBody(upstreamReq)
 		if err != nil {
@@ -1415,7 +1415,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 		attemptCtx, watchdog = newGeminiUpstreamWatchdog(upstreamReq.Context(), s.geminiStreamFirstByteTimeout(useUpstreamStream), s.geminiStreamIdleTimeout(useUpstreamStream))
 		upstreamReq = upstreamReq.WithContext(attemptCtx)
 
-		resp, err = s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+		resp, err = s.doGeminiUpstream(upstreamReq, proxyURL, account)
 		// 收到响应头（或出错）之后 Transport 不会再重放这个请求，放掉请求体，流式期间不再占内存。
 		releaseGeminiUpstreamRequestBody(upstreamReq)
 		if err != nil {
@@ -3082,7 +3082,7 @@ func (s *GeminiMessagesCompatService) ForwardAIStudioGET(ctx context.Context, ac
 		return nil, fmt.Errorf("unsupported account type: %s", account.Type)
 	}
 
-	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
+	resp, err := s.doGeminiUpstream(req, proxyURL, account)
 	if err != nil {
 		return nil, err
 	}
